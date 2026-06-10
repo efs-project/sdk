@@ -1,0 +1,37 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+concurrency: release-${{ github.ref }}
+
+permissions:
+  contents: write # create version PR, tags, GitHub releases
+  pull-requests: write # open the Changesets "Version Packages" PR
+  id-token: write # OIDC — npm Trusted Publishing (no NPM_TOKEN secret)
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22 # Trusted Publishing needs Node >= 22.14 / npm >= 11.5.1
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+      - run: pnpm install --frozen-lockfile
+      - run: npm install -g npm@latest # ensure npm >= 11.5.1 for OIDC publishing
+      - run: pnpm build
+      # Opens/updates the "Version Packages" PR; on merge, publishes changed packages.
+      # Publish uses npm Trusted Publishing (OIDC) — provenance is emitted automatically,
+      # no token is read. Requires a Trusted Publisher configured PER PACKAGE on npmjs.com:
+      #   package settings -> Trusted Publisher -> repo "efs-project/sdk",
+      #   workflow ".github/workflows/release.yml". Repo must stay public.
+      - uses: changesets/action@v1
+        with:
+          publish: pnpm release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

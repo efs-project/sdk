@@ -9,7 +9,7 @@ This is one of three doc layers; keeping them distinct stops duplication and rot
 | **Specs** (this folder) | *How does it work now?* — plain-language current behaviour | `docs/specs/` |
 | **ADRs** (`docs/adr/`) | *Why did we choose X?* — decisions + alternatives | `docs/adr/` |
 | **Design** (planning vault) | *What + why at the architecture level?* — cross-cutting, often historical once built | `planning/Designs/sdk-architecture.md` |
-| **API reference** | *Exact signatures* — mechanical, generated | `docs/api/` (typedoc, later) |
+| **API reference** _(later)_ | *Exact signatures* — mechanical, generated | `docs/api/` (typedoc) |
 
 Rules of thumb:
 

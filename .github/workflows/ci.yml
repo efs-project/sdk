@@ -17,9 +17,9 @@ jobs:
           node-version: 20
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm --filter @efs-project/sdk build
-      - run: pnpm --filter @efs-project/sdk typecheck
-      - run: pnpm --filter @efs-project/sdk test
+      - run: pnpm --filter @efs/sdk build
+      - run: pnpm --filter @efs/sdk typecheck
+      - run: pnpm --filter @efs/sdk test
       - run: pnpm lint
 
   solidity:
