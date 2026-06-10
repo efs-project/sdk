@@ -38,7 +38,7 @@ An ADR is for **a choice with alternatives you'd want preserved** — package la
 
 When unsure which side of the boundary a decision sits on, ask before writing — a misfiled ADR is worse than a late one. Worked example: *"change the schema UID the Solidity SDK pins"* touches the protocol → it originates as a planning-vault design, which then spawns an SDK ADR for the SDK's slice (the version bump + import change). *"Switch the bundler to tsdown"* is SDK-only → an ADR here.
 
-The cross-cutting SDK architecture lives in the planning vault: `planning/Designs/sdk-architecture.md`. ADRs here implement slices of it.
+The cross-cutting SDK architecture lives in the planning vault: `planning/Designs/sdk-architecture.md`. ADRs here implement slices of it. For *how the SDK behaves* (not why), see [`docs/specs/`](../specs/).
 
 ## Format & numbering
 

@@ -8,8 +8,11 @@ This is the **upgradeable** layer of EFS (vs. the immutable contracts). Ship the
 
 **If your tool does not auto-load `@`-imported files, read these before starting any task:**
 
-- **[docs/adr/README.md](./docs/adr/README.md)** — the ADR system, the permanence framing, and the **boundary rule** (what's an SDK ADR vs. a planning-vault design). Required.
+- **[docs/specs/overview.md](./docs/specs/overview.md)** — plain-language *how the SDK works* (the model). Start here to understand behaviour.
+- **[docs/adr/README.md](./docs/adr/README.md)** — the ADR system and the **boundary rule** (SDK ADR vs. planning-vault design). Required before writing a decision.
 - **[README.md](./README.md)** — what the two packages are and how they're consumed.
+
+Doc layers (don't duplicate): **specs** = how it works now · **ADRs** = why we chose it · **planning vault** = cross-cutting design. See [docs/specs/README.md](./docs/specs/README.md).
 
 ## The two packages
 
