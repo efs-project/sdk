@@ -2,7 +2,6 @@
 
 **Status:** Accepted
 **Date:** 2026-06-10
-**Permanence:** Ephemeral (internal structure) — the *package names* are Durable once published
 **Related:** planning/Designs/sdk-architecture.md (Q1: both SDKs in one repo)
 
 ## Context
@@ -18,8 +17,8 @@ A **pnpm + Turborepo + Changesets** monorepo with two independently-versioned pa
 ```
 sdk/
 ├── packages/
-│   ├── sdk/          → npm @efs-project/sdk        (TypeScript, off-chain)
-│   └── solidity/     → npm @efs-project/solidity   (Solidity, compile-in source)
+│   ├── sdk/          → npm @efs/sdk        (TypeScript, off-chain)
+│   └── solidity/     → npm @efs/solidity   (Solidity, compile-in source)
 ├── examples/         (foundry-consumer, hardhat-consumer, ts-quickstart)
 ├── docs/adr/         (this system)
 ├── pnpm-workspace.yaml, turbo.json, tsconfig.base.json, biome.json, .changeset/
@@ -28,14 +27,14 @@ sdk/
 - **Workspace manager: pnpm.** De-facto standard for 2025–2026 TS+Solidity monorepos (viem, wagmi); strict `node_modules` avoids phantom-dependency bugs. We override the sibling `contracts` repo's yarn/scaffold-eth convention — inheriting yarn isn't worth it here.
 - **Task runner: Turborepo.** Caches build/test/typecheck across packages.
 - **Two packages, versioned independently via Changesets.** The Solidity ABI and the TS API move on different cadences; lockstep would force no-op bumps and dishonest changelogs.
-- **npm scope `@efs-project`** (matches the GitHub org; guaranteed claimable). If the shorter `@efs` org is secured on npm, rename both packages before first publish — it is a one-line change in each `package.json`, cheap pre-1.0.
-- **Package name `@efs-project/solidity`, not `…/contracts`** — to avoid conceptual collision with the core protocol repo (`efs-project/contracts`). This SDK is a *library you compile in*, not the deployed protocol.
+- **npm scope `@efs`** (selected 2026-06-10 after confirming the scope has no published packages on the npm registry; pending the org being claimed via `npm org create efs` before first publish). The GitHub org stays `efs-project`; only the npm scope is the shorter `@efs`.
+- **Package name `@efs/solidity`, not `…/contracts`** — to avoid conceptual collision with the core protocol repo (`efs-project/contracts`). This SDK is a *library you compile in*, not the deployed protocol.
 
 ## Consequences
 
-- External devs run `npm i @efs-project/sdk` (TS) or `npm i @efs-project/solidity` (Solidity source + remap). One repo, two clear install paths.
+- External devs run `npm i @efs/sdk` (TS) or `npm i @efs/solidity` (Solidity source + remap). One repo, two clear install paths.
 - Changesets gates every PR on a stated version intent; CI opens a "Version Packages" PR and publishes on merge.
-- The package names cross the npm boundary, so they are **Durable** once published — renaming after external adoption is a breaking change. Hence the pre-publish window to settle `@efs` vs `@efs-project`.
+- The package names cross the npm boundary, so renaming after external adoption is a breaking change — hence settling the `@efs` scope pre-publish.
 - Toolchain specifics (bundler, test runner, lint) are recorded in ADR-0002+ and the package configs; they are Ephemeral and revisable.
 
 ## Alternatives considered

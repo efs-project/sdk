@@ -1,5 +1,5 @@
 /**
- * @efs-project/sdk — TypeScript SDK for the Ethereum File System (EFS).
+ * @efs/sdk — TypeScript SDK for the Ethereum File System (EFS).
  *
  * Status: scaffold. Public surface is shaped per planning/Designs/sdk-architecture.md;
  * method bodies are stubs (`NotImplemented`) until the build lands. The *shapes* below

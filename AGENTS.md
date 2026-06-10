@@ -13,8 +13,8 @@ This is the **upgradeable** layer of EFS (vs. the immutable contracts). Ship the
 
 ## The two packages
 
-- **`packages/sdk`** → `@efs-project/sdk` — TypeScript, off-chain reads/writes, viem-native (ADR-0002).
-- **`packages/solidity`** → `@efs-project/solidity` — a compile-in Solidity library (ADR-0003); your contract stays the attester.
+- **`packages/sdk`** → `@efs/sdk` — TypeScript, off-chain reads/writes, viem-native (ADR-0002).
+- **`packages/solidity`** → `@efs/solidity` — a compile-in Solidity library (ADR-0003); your contract stays the attester.
 
 ## Cross-repo coordination — the planning vault
 

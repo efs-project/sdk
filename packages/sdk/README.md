@@ -1,4 +1,4 @@
-# @efs-project/sdk
+# @efs/sdk
 
 TypeScript SDK for the **Ethereum File System (EFS)** — read and write an on-chain filesystem built on EAS attestations.
 
@@ -7,7 +7,7 @@ TypeScript SDK for the **Ethereum File System (EFS)** — read and write an on-c
 ## Install
 
 ```bash
-npm i @efs-project/sdk viem
+npm i @efs/sdk viem
 ```
 
 `viem` is a peer dependency (ADR-0002) — the SDK is viem-native and pulls in no `ethers`.
@@ -15,7 +15,7 @@ npm i @efs-project/sdk viem
 ## Quickstart (target API)
 
 ```ts
-import { createEfsClient, identity } from '@efs-project/sdk'
+import { createEfsClient, identity } from '@efs/sdk'
 import { createPublicClient, createWalletClient, http } from 'viem'
 
 const efs = createEfsClient({

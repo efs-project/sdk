@@ -2,7 +2,6 @@
 
 **Status:** Proposed
 **Date:** YYYY-MM-DD
-**Permanence:** Durable | Ephemeral
 **Related:** PR #N, ADR-XXXX, planning/Designs/<name> (if relevant)
 
 ## Context

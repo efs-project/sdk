@@ -1,4 +1,4 @@
-# @efs-project/solidity
+# @efs/solidity
 
 On-chain (Solidity) SDK for the **Ethereum File System (EFS)** — a **compile-in library** for reading and writing EFS from your own smart contract.
 
@@ -11,13 +11,13 @@ EFS keys all content by **attester address** (`msg.sender` at EAS). This library
 ## Install & import
 
 ```bash
-npm i @efs-project/solidity
+npm i @efs/solidity
 ```
 
 **Hardhat** (resolved via `node_modules`):
 
 ```solidity
-import "@efs-project/solidity/src/EFSWriter.sol";
+import "@efs/solidity/src/EFSWriter.sol";
 
 contract MyApp is EFSWriter {
     function save(string calldata path, bytes32 dataUID) external {
@@ -29,7 +29,7 @@ contract MyApp is EFSWriter {
 **Foundry** — add to `remappings.txt`:
 
 ```
-@efs-project/solidity/=node_modules/@efs-project/solidity/
+@efs/solidity/=node_modules/@efs/solidity/
 ```
 
 ## Surface

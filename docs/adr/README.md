@@ -14,25 +14,21 @@ Numbering is **independent** from contracts — SDK ADRs start at `0001` in thei
 - **Rejected** — considered and explicitly chosen against. Preserved so the option isn't reconsidered without learning from the prior thinking.
 - **Deprecated** — no longer the right choice but not yet replaced. May indicate a known wart.
 
-## Permanence framing (SDK flavor)
-
-The contracts repo classifies surfaces as Etched / Durable / Ephemeral. The SDK inherits the vocabulary but sits almost entirely in the lower two tiers:
-
-- **Durable** — the **published public API across the npm boundary**: exported function signatures, types, and runtime behaviour external devs `import` and depend on. Breaking these is a semver-major event with downstream cost, so change them carefully — supersede-don't-edit the deciding ADR, and document the migration. This is the most permanent thing the SDK has, and it is still *fixable* with a major bump. Treat it as **Durable-but-careful, not Etched**.
-- **Ephemeral** — internal modules, build/tooling config, test helpers, dev scripts, docs prose. Ship the simple version; revise next commit.
-- **Etched** — essentially empty. The SDK hashes nothing into permanent on-chain identity. If a decision feels Etched, it almost certainly belongs in the contracts repo or the planning vault, not here.
-
 ## Discipline (lighter)
 
-ADRs are **immutable once `Status: Accepted`** — but the bar to supersede is low. To change a decision:
+The SDK is the *upgradeable* layer — almost nothing is permanent. The one thing that approaches it is the **published npm API**: breaking an exported signature is a semver-major with a migration cost, so supersede-don't-edit the deciding ADR and note the migration. Everything else (internal code, tooling, tests, prose) ships simple and is revised freely.
+
+ADRs are **immutable once `Status: Accepted`**, but the bar to supersede is low:
 
 1. Write a new ADR with the new approach.
 2. Set the old ADR's `Status` to `Superseded by ADR-NNNN`. Touch nothing else in it.
 3. The new ADR's Context explains why the old one fell short.
 
-That's the whole ceremony. No 50-year test, no freeze WIP-limit, no invariant-proof gate. Supersede freely; the chain of reasoning is the only thing we protect. For a published-API change that breaks downstream consumers, the *care* is in the migration note and the semver bump — not extra ADR rigor.
+That's the whole ceremony — no 50-year test, no freeze gate. Supersede freely; the chain of reasoning is the only thing we protect. Prose-level fixes (typo, stale link) to an accepted ADR are fine in place; only the `Decision` / `Consequences` / `Alternatives` substance must change via supersession.
 
-Prose-level fixes (typo, stale symbol name, wrong link) to an accepted ADR may be made in place at any time. Only the `Decision`, `Consequences`, and `Alternatives` **substance** is the historical record and must be changed via supersession.
+## When to write one
+
+An ADR is for **a choice with alternatives you'd want preserved** — package layout, a dependency, the error model, a public-API shape. A routine code change with no real fork is not an ADR. The test: would a future agent ask *"why did they do it this way?"*
 
 ## Boundary rule — does this belong here?
 
@@ -40,13 +36,13 @@ Prose-level fixes (typo, stale symbol name, wrong link) to an accepted ADR may b
 - **Planning vault design** (`planning/Designs/`): any decision that changes EFS *architecture* or touches the **contracts** or **client** repos. Cross-repo concerns are designed in the vault; a landed design may then produce a per-repo SDK ADR here for the SDK's slice.
 - **Not** `planning/Decisions.md`: SDK code decisions live in SDK ADRs, never in the vault's decisions log. The vault log is for cross-repo coordination calls, not this repo's implementation choices.
 
-When unsure which side of the boundary a decision sits on, ask before writing — a misfiled ADR is worse than a late one.
+When unsure which side of the boundary a decision sits on, ask before writing — a misfiled ADR is worse than a late one. Worked example: *"change the schema UID the Solidity SDK pins"* touches the protocol → it originates as a planning-vault design, which then spawns an SDK ADR for the SDK's slice (the version bump + import change). *"Switch the bundler to tsdown"* is SDK-only → an ADR here.
 
 The cross-cutting SDK architecture lives in the planning vault: `planning/Designs/sdk-architecture.md`. ADRs here implement slices of it.
 
-## Format
+## Format & numbering
 
-Compact, scannable. One screen per ADR. Copy `_template.md`.
+Compact, scannable — one screen per ADR. Copy `_template.md`. The next number is the highest existing `NNNN` + 1; add your ADR to the **Index** below (and remove it from "Recommended next" if listed).
 
 ## Index
 

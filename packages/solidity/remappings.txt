@@ -1,2 +1,2 @@
 forge-std/=lib/forge-std/src/
-@efs-project/solidity/=src/
+@efs/solidity/=src/

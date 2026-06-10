@@ -1,5 +1,5 @@
 {
-  "name": "@efs-project/monorepo",
+  "name": "@efs/monorepo",
   "version": "0.0.0",
   "private": true,
   "description": "The Ethereum File System SDK — TypeScript and Solidity",

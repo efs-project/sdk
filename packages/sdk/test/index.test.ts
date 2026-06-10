@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { NotImplemented, createEfsClient, identity, lens, version } from '../src/index.js'
 
-describe('@efs-project/sdk scaffold', () => {
+describe('@efs/sdk scaffold', () => {
   it('exposes a version', () => {
     expect(version).toBe('0.0.0')
   })

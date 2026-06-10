@@ -2,7 +2,6 @@
 
 **Status:** Accepted
 **Date:** 2026-06-10
-**Permanence:** Durable (the import path & base-contract API cross the package boundary)
 **Related:** ADR-0001, planning/Designs/sdk-architecture.md (On-chain SDK section)
 
 ## Context
@@ -15,12 +14,12 @@ A library of `internal` functions inlines into the caller; an inheritable base c
 
 Ship the on-chain SDK as **Solidity source compiled into the consumer**, not as a deployed contract:
 
-- `@efs-project/solidity` publishes `.sol` **source files only** (no bundling, no deploy artifacts), exactly like `@openzeppelin/contracts`.
+- `@efs/solidity` publishes `.sol` **source files only** (no bundling, no deploy artifacts), exactly like `@openzeppelin/contracts`.
 - Two entry shapes: an `internal` **library** (`EFSLib`) for drop-in helpers, and an inheritable **base contract** (`EFSWriter`) for the happy path. Both keep the consuming contract as attester.
 - **Tooling: Foundry** for building and testing the library (fast Solidity unit tests; `vm.prank` to prove `msg.sender` survives inlining). The sibling `contracts` repo uses Hardhat; a non-deployed library is better served by Foundry, and the published source is toolchain-agnostic for consumers.
 - Consumption:
-  - **Hardhat:** `npm i @efs-project/solidity`, then `import "@efs-project/solidity/src/EFSWriter.sol";` (resolved via `node_modules`).
-  - **Foundry:** install, then `remappings.txt`: `@efs-project/solidity/=node_modules/@efs-project/solidity/`.
+  - **Hardhat:** `npm i @efs/solidity`, then `import "@efs/solidity/src/EFSWriter.sol";` (resolved via `node_modules`).
+  - **Foundry:** install, then `remappings.txt`: `@efs/solidity/=node_modules/@efs/solidity/`.
 
 ## Consequences
 

@@ -8,12 +8,12 @@ The developer SDK for the **Ethereum File System (EFS)** — an on-chain filesys
 
 | Package | npm | For |
 |---|---|---|
-| [`packages/sdk`](./packages/sdk) | `@efs-project/sdk` | **TypeScript** — apps, scripts, agents reading/writing EFS off-chain. viem-native. |
-| [`packages/solidity`](./packages/solidity) | `@efs-project/solidity` | **Solidity** — a compile-in library so your *own contract* can read/write EFS. |
+| [`packages/sdk`](./packages/sdk) | `@efs/sdk` | **TypeScript** — apps, scripts, agents reading/writing EFS off-chain. viem-native. |
+| [`packages/solidity`](./packages/solidity) | `@efs/solidity` | **Solidity** — a compile-in library so your *own contract* can read/write EFS. |
 
 ```bash
-npm i @efs-project/sdk viem      # TypeScript SDK
-npm i @efs-project/solidity      # Solidity library (compile-in)
+npm i @efs/sdk viem      # TypeScript SDK
+npm i @efs/solidity      # Solidity library (compile-in)
 ```
 
 ## Repo layout

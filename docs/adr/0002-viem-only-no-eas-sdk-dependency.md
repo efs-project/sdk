@@ -2,7 +2,6 @@
 
 **Status:** Accepted
 **Date:** 2026-06-10
-**Permanence:** Durable (the chain-client choice leaks into the public API surface)
 **Related:** ADR-0001, planning/Designs/sdk-architecture.md (the `EFS.EAS` exposure)
 
 ## Context
@@ -18,7 +17,7 @@ Depending on `eas-sdk` would drag `ethers` into every consumer's bundle, create 
 - Vendor the EAS contract ABIs and call them through viem (`writeContract`, `readContract`, `encodeAbiParameters`).
 - Re-implement the small pieces we need from `eas-sdk` (the `SchemaEncoder` equivalent via `encodeAbiParameters`; UID derivation via viem `keccak256`/`encodePacked` when we need to predict/verify one).
 - `viem` is a **peerDependency** (`^2`) so the consumer app has a single viem instance — wagmi's stance. No hard `viem` dep, no `ethers` anywhere.
-- If we ever need EAS's offchain/Merkle helpers, isolate them in an optional `@efs-project/eas-adapter` sub-package so `ethers` stays strictly opt-in and out of the core dep tree.
+- If we ever need EAS's offchain/Merkle helpers, isolate them in an optional `@efs/eas-adapter` sub-package so `ethers` stays strictly opt-in and out of the core dep tree.
 
 This refines the planning design's `EFS.EAS` namespace: it exposes **EAS access via viem**, not a re-export of the ethers-based `eas-sdk`.
 

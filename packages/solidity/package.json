@@ -1,5 +1,5 @@
 {
-  "name": "@efs-project/solidity",
+  "name": "@efs/solidity",
   "version": "0.0.0",
   "description": "On-chain (Solidity) SDK for the Ethereum File System (EFS) — a compile-in library",
   "license": "MIT",

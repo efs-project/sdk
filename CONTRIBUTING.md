@@ -18,7 +18,7 @@ pnpm lint        # biome ci
 pnpm format      # biome format --write
 ```
 
-Per package: `pnpm --filter @efs-project/sdk test`, `pnpm --filter @efs-project/solidity build`, etc.
+Per package: `pnpm --filter @efs/sdk test`, `pnpm --filter @efs/solidity build`, etc.
 
 ## Before you open a PR
 
