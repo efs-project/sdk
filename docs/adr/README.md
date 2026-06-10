@@ -2,7 +2,7 @@
 
 ADRs document **decisions** made about the EFS SDK — what we chose, why, and what we considered. They are the institutional memory that survives turnover (human or agent).
 
-This is the **same ADR system as the [contracts repo](https://github.com/efs-project/contracts/blob/main/docs/adr/README.md)** — deliberately, so agents moving between repos don't learn two conventions. It is intentionally **lighter** here. The SDK is the *upgradeable* layer: we ship, observe, and revise. There is no frozen-schema-UID equivalent, so there is no 50-year freeze ceremony. Most SDK ADRs are freely revisable.
+This is the **same ADR system as the [contracts repo](https://github.com/efs-project/contracts/blob/main/docs/adr/README.md)** — a lightweight, MADR-style markdown ADR (`Context` / `Decision` / `Consequences` / `Alternatives`). Mirrored deliberately, so agents moving between repos don't learn two conventions. It is intentionally **lighter** here. The SDK is the *upgradeable* layer: we ship, observe, and revise. There is no frozen-schema-UID equivalent, so there is no 50-year freeze ceremony. Most SDK ADRs are freely revisable.
 
 Numbering is **independent** from contracts — SDK ADRs start at `0001` in their own sequence.
 
