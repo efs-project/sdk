@@ -26,7 +26,7 @@ Picking a path where you meant a specific version is silent breakage when the da
 
 ## What the SDK does and doesn't do
 
-- **Does:** simplify multi-step reads/writes, resolve lenses, batch writes, expose EAS cleanly (viem-native), and give a typed escape hatch to the raw contracts.
+- **Does:** simplify multi-step reads/writes, resolve lenses, batch writes, expose EAS cleanly (viem-native), give a typed escape hatch to the raw contracts, and locate EFS by chain via a shipped **deployments registry** (addresses + schema UIDs) so a supported chain needs no address config ([ADR-0005](../adr/0005-deployments-registry-not-a-deployer.md)). The SDK deploys nothing.
 - **Doesn't (yet):** bundle an indexer. Reverse-lookups ("who tagged this?") that need an external index are stubbed and out of scope for v1.
 
 For exact signatures, see the package READMEs and (later) the generated API reference.

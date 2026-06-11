@@ -50,5 +50,6 @@ Compact, scannable — one screen per ADR. Copy `_template.md`. The next number 
 - [ADR-0002 — viem-only; do not depend on the ethers-based EAS SDK](./0002-viem-only-no-eas-sdk-dependency.md)
 - [ADR-0003 — Ship the on-chain SDK as compile-in Solidity source](./0003-onchain-sdk-as-compile-in-source.md)
 - [ADR-0004 — Publish via npm Trusted Publishing (OIDC), not a stored token](./0004-publish-via-oidc-trusted-publishing.md)
+- [ADR-0005 — Per-chain deployments registry; the SDK is a client, not a deployer](./0005-deployments-registry-not-a-deployer.md)
 
-_Recommended next: ADR-0005 error model · ADR-0006 public API surface & semver policy (write when the code lands)._
+_Recommended next: ADR-0006 error model · ADR-0007 public API surface & semver policy (write when the code lands)._
