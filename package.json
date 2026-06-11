@@ -20,7 +20,7 @@
     "lint": "biome ci .",
     "format": "biome format --write .",
     "changeset": "changeset",
-    "release": "turbo run build && changeset publish"
+    "release": "pnpm --filter @efs/sdk build && changeset publish"
   },
   "devDependencies": {
     "@biomejs/biome": "^1.9.4",

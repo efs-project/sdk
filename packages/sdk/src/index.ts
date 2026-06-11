@@ -75,5 +75,3 @@ export type EfsClient = {
 export function createEfsClient(_config: EfsClientConfig): EfsClient {
   throw new NotImplemented('createEfsClient()')
 }
-
-export const version = '0.0.0'
