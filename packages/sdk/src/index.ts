@@ -1,81 +1,152 @@
 /**
  * @efs/sdk — TypeScript SDK for the Ethereum File System (EFS).
  *
- * Status: scaffold. Public surface is shaped per planning/Designs/sdk-architecture.md;
- * method bodies are stubs (`NotImplemented`) until the build lands. The *shapes* below
- * are the load-bearing part — they encode decisions we don't want to break later
- * (the identity seam, the static-vs-dynamic reference split).
+ * Resource-namespaced client (ADR / Decision F): `efs.fs.*` (files),
+ * `efs.lenses.*` (resolution), `efs.eas.*` (viem-native EAS), `efs.raw.*`
+ * (deployment escape hatch). Shapes follow planning/Designs/sdk-architecture.md;
+ * unbuilt methods throw `NotImplemented` with their final signatures so the
+ * public surface is stable before publish.
  */
 
 import type { Address, PublicClient, WalletClient } from 'viem'
-
-// ── Errors ───────────────────────────────────────────────────────────────────
-// Discriminated error base so external callers catch typed errors, never raw RPC
-// strings (error-model ADR pending — see docs/adr "Recommended next"). Mirrors
-// viem's BaseError ergonomics.
-
-export class EfsError extends Error {
-  override name = 'EfsError'
-}
-
-export class NotImplemented extends EfsError {
-  override name = 'NotImplemented'
-  constructor(what: string) {
-    super(`${what} is not implemented yet (SDK scaffold).`)
-  }
-}
-
-// ── Identity / lens seam (sdk-architecture §1–§3) ──────────────────────────────
-// A lens is a *resolved set of attester addresses*, built from a configurable
-// hierarchy (EFS contracts ADR-0039), not a bare address. v1 ships the trivial resolver
-// (addr -> [addr]); ENS/key-set expansion drops in later, additively. The type
-// stays opaque so N-vs-1 never leaks into a signature.
-
-export type Lens = {
-  readonly __brand: 'Lens'
-  /** Resolve to the ordered attester set at read time. */
-  resolve(): Promise<readonly Address[]>
-}
-
-/** An explicit, literal lens — exactly these addresses, never expanded. */
-export function lens(_addresses: Address | readonly Address[]): Lens {
-  throw new NotImplemented('lens()')
-}
-
-/** An identity that may expand (ENS -> key-set -> ordered lens). Resolves at read time. */
-export function identity(_ensOrAddress: string): Lens {
-  throw new NotImplemented('identity()')
-}
-
-// ── Static vs dynamic references (sdk-architecture §5) ─────────────────────────
-// Distinct types that never silently interconvert. A DataRef is "these exact
-// bytes / this version" (UID). A PathRef is "whatever is active here now".
-
-export type DataRef = { readonly __brand: 'DataRef'; readonly uid: `0x${string}` }
-export type PathRef = { readonly __brand: 'PathRef'; readonly path: string }
-
-// ── Client ─────────────────────────────────────────────────────────────────────
+import {
+  type DeploymentsMap,
+  type EfsDeployment,
+  assertDeploymentIntegrity,
+  resolveDeployment,
+} from './chain/deployments.js'
+import {
+  SchemaEncoder,
+  computeAttestationUID,
+  easAbi,
+  schemaRegistryAbi,
+  verifyAttestationUID,
+} from './eas/index.js'
+import { EfsError, NotImplemented } from './errors.js'
+import { type Lens, identity, lens, resolveLens } from './lenses/resolve.js'
+import type {
+  DataRef,
+  EfsFile,
+  ReadResult,
+  Stat,
+  WriteEstimate,
+  WriteOptions,
+  WriteReceipt,
+} from './types.js'
 
 export type EfsClientConfig = {
   publicClient: PublicClient
   /** Required for writes; reads work without it. */
   walletClient?: WalletClient
-  /** Default lens when none is passed to a read. Defaults to the connected wallet. */
+  /** Override the built-in registry to point at a custom/local deployment. */
+  deployments?: DeploymentsMap
+  /** Default lens when a read passes none (resolves to the connected wallet). */
   defaultLens?: Lens
 }
 
 export type EfsClient = {
-  /** Read the file at a path, resolved through a lens. */
-  read(path: string, opts?: { as?: Lens }): Promise<DataRef | null>
-  /** Pin (write) a file. Batches the underlying attestations (sdk-architecture §6). */
-  pinFile(path: string, content: Uint8Array): Promise<DataRef>
-  /** Clean viem-native access to the underlying EAS layer (ADR-0002). */
-  readonly eas: unknown
+  /** Files. */
+  fs: {
+    write(path: string, content: Uint8Array, opts?: WriteOptions): Promise<WriteReceipt>
+    read(path: string, opts?: { as?: Lens | Address }): Promise<ReadResult | null>
+    fetch(ref: DataRef, opts?: { verify?: boolean }): Promise<EfsFile>
+    stat(path: string, opts?: { as?: Lens | Address }): Promise<Stat | null>
+    list(path: string, opts?: { as?: Lens | Address }): AsyncIterable<DataRef>
+    preview(path: string, content: Uint8Array): Promise<WriteEstimate>
+  }
+  /** Lens resolution. */
+  lenses: {
+    resolve(input: Lens | Address): Promise<readonly Address[]>
+    lens: typeof lens
+    identity: typeof identity
+  }
+  /** viem-native EAS access (ADR-0002). */
+  eas: {
+    encoder(schema: string): SchemaEncoder
+    computeUID: typeof computeAttestationUID
+    verifyUID: typeof verifyAttestationUID
+    abi: { eas: typeof easAbi; schemaRegistry: typeof schemaRegistryAbi }
+  }
+  /** The resolved deployment for the connected chain (escape hatch). */
+  raw: {
+    deployment(): EfsDeployment
+    verifyDeployment(): Promise<void>
+  }
 }
 
-export function createEfsClient(_config: EfsClientConfig): EfsClient {
-  throw new NotImplemented('createEfsClient()')
+function chainIdOf(publicClient: PublicClient): number {
+  const id = publicClient.chain?.id
+  if (id === undefined) {
+    throw new EfsError('publicClient has no `chain` set — cannot resolve the EFS deployment.')
+  }
+  return id
 }
 
-// Content hashing (ADR-0006: bare SHA-256). Real, chain-independent — usable now.
+export function createEfsClient(config: EfsClientConfig): EfsClient {
+  const { publicClient, deployments: override } = config
+  const getDeployment = () => resolveDeployment(chainIdOf(publicClient), override)
+
+  return {
+    fs: {
+      write: (_path, _content, _opts) => {
+        throw new NotImplemented('efs.fs.write()')
+      },
+      read: (_path, _opts) => {
+        throw new NotImplemented('efs.fs.read()')
+      },
+      fetch: (_ref, _opts) => {
+        throw new NotImplemented('efs.fs.fetch()')
+      },
+      stat: (_path, _opts) => {
+        throw new NotImplemented('efs.fs.stat()')
+      },
+      list: (_path, _opts) => {
+        throw new NotImplemented('efs.fs.list()')
+      },
+      preview: (_path, _content) => {
+        throw new NotImplemented('efs.fs.preview()')
+      },
+    },
+    lenses: {
+      resolve: (input) => resolveLens(input, { publicClient }),
+      lens,
+      identity,
+    },
+    eas: {
+      encoder: (schema) => new SchemaEncoder(schema),
+      computeUID: computeAttestationUID,
+      verifyUID: verifyAttestationUID,
+      abi: { eas: easAbi, schemaRegistry: schemaRegistryAbi },
+    },
+    raw: {
+      deployment: getDeployment,
+      verifyDeployment: () => assertDeploymentIntegrity(publicClient, getDeployment()),
+    },
+  }
+}
+
+// ── Standalone exports (chain-independent; usable now) ─────────────────────────
+export * from './eas/index.js'
 export { hashContent, verifyContent, type VerificationStatus } from './content/hash.js'
+export { lens, identity, resolveLens, MAX_LENSES, type Lens } from './lenses/resolve.js'
+export {
+  deployments,
+  resolveDeployment,
+  assertDeploymentIntegrity,
+  type DeploymentsMap,
+  type EfsDeployment,
+  type EfsContracts,
+  type EfsSchemaUIDs,
+} from './chain/deployments.js'
+export * from './errors.js'
+export type {
+  DataRef,
+  DataUID,
+  PathRef,
+  ReadResult,
+  EfsFile,
+  WriteReceipt,
+  WriteEstimate,
+  WriteOptions,
+  Stat,
+} from './types.js'

@@ -18,7 +18,7 @@
     "test": "turbo run test",
     "typecheck": "turbo run typecheck",
     "lint": "biome ci .",
-    "format": "biome format --write .",
+    "format": "biome check --write .",
     "changeset": "changeset",
     "release": "pnpm --filter @efs/sdk build && changeset publish"
   },
