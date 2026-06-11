@@ -1,21 +1,40 @@
-import { http, type Address, createPublicClient } from 'viem'
+import { http, type Address, type WalletClient, createPublicClient, createWalletClient } from 'viem'
 import { sepolia } from 'viem/chains'
 import { describe, expect, it } from 'vitest'
-import { MaxLensesExceeded, NotImplemented, createEfsClient, identity, lens } from '../src/index.js'
+import {
+  MaxLensesExceeded,
+  NotImplemented,
+  WalletRequired,
+  createEfsClient,
+  identity,
+  lens,
+} from '../src/index.js'
 
 const publicClient = createPublicClient({ chain: sepolia, transport: http() })
+const walletClient = createWalletClient({ chain: sepolia, transport: http() }) as WalletClient
 const addr = (n: number) => `0x${n.toString(16).padStart(40, '0')}` as Address
 
 describe('namespaced client (Decision F)', () => {
-  it('builds a client; unbuilt fs verbs reject with NotImplemented (async contract)', async () => {
+  it('read-only verbs reject with NotImplemented (async contract)', async () => {
     const efs = createEfsClient({ publicClient })
-    await expect(efs.fs.write('/x', new Uint8Array())).rejects.toThrow(NotImplemented)
     await expect(efs.fs.read('/x')).rejects.toThrow(NotImplemented)
     await expect(
       (async () => {
         for await (const _ of efs.fs.list('/x')) break
       })(),
     ).rejects.toThrow(NotImplemented)
+  })
+
+  it('write methods are gated: WalletRequired without a wallet, NotImplemented with one', async () => {
+    // The type hides `write` on a read-only client; at runtime the verb exists and
+    // guards with WalletRequired (the backstop behind the type gate).
+    const readOnly = createEfsClient({ publicClient }) as {
+      fs: { write(p: string, c: Uint8Array): Promise<unknown> }
+    }
+    await expect(readOnly.fs.write('/x', new Uint8Array())).rejects.toThrow(WalletRequired)
+
+    const writable = createEfsClient({ publicClient, walletClient })
+    await expect(writable.fs.write('/x', new Uint8Array())).rejects.toThrow(NotImplemented)
   })
 
   it('exposes lens helpers under efs.lenses', () => {
