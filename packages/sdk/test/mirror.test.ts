@@ -65,6 +65,17 @@ describe('resolveTransport - URI parsing (TRANSPORT allowlist)', () => {
     expect(urls[0]!.href).toBe(`https://my.gw/ipfs/${cid}/dir/a.txt?format=raw`)
   })
 
+  it('rejects path traversal in ipfs/arweave subpaths (literal and %2e-encoded)', () => {
+    const cid = 'bafytest'
+    // Literal `..` and percent-encoded `%2e%2e` both normalize in new URL and
+    // must not escape the /ipfs/<cid>/ namespace onto an arbitrary gateway path.
+    expect(() => resolveTransport(`ipfs://${cid}/../admin`).httpUrls()).toThrow()
+    expect(() => resolveTransport(`ipfs://${cid}/%2e%2e/admin`).httpUrls()).toThrow()
+    expect(() => resolveTransport('ar://txid123/../../admin').httpUrls()).toThrow()
+    // A CID/txid that carries non-alphanumeric smuggling chars is rejected at parse.
+    expect(() => resolveTransport('ipfs://bafy%2f..%2fadmin')).toThrow()
+  })
+
   it('parses ar://TXID to arweave gateways', () => {
     const tx = 'AbC123_txid'
     const r = resolveTransport(`ar://${tx}`)

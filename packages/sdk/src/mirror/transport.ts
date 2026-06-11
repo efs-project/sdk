@@ -106,6 +106,25 @@ function trimGateway(g: string): string {
 }
 
 /**
+ * Build a gateway URL for `<nsSegments><subpath>` and verify the subpath cannot
+ * escape the content-address namespace. `new URL` normalizes `..` AND `%2e%2e`
+ * (WHATWG decodes percent-encoded dots during dot-segment removal), so a mirror
+ * like `ipfs://cid/%2e%2e/admin` would otherwise resolve to `/admin` on the
+ * trusted gateway. We assert the post-normalization pathname still begins with
+ * the intended namespace and reject otherwise.
+ */
+function buildGatewayUrl(gateway: string, nsSegments: string, subpath: string, uri: string): URL {
+  const gw = new URL(trimGateway(gateway))
+  const basePath = gw.pathname.endsWith('/') ? gw.pathname.slice(0, -1) : gw.pathname
+  const nsPath = `${basePath}/${nsSegments}`
+  const u = new URL(`${nsPath}${subpath}`, gw.origin)
+  if (!u.pathname.startsWith(nsPath)) {
+    throw new UnsupportedUriError(uri, 'subpath escapes the content-address namespace')
+  }
+  return u
+}
+
+/**
  * Parse a mirror URI into a {@link ResolvedTransport}. Does NOT fetch — purely
  * structural. Throws {@link UnsupportedUriError} for unknown schemes and
  * {@link TransportNotImplementedError} for recognized-but-unresolvable ones
@@ -186,13 +205,18 @@ function resolveIpfs(uri: string): ResolvedTransport {
   if (cid.length === 0) {
     throw new UnsupportedUriError(uri, 'missing CID')
   }
+  // CIDs are alphanumeric (base32/base58/base16); reject anything else so a
+  // crafted CID can't smuggle path/host characters into the gateway URL.
+  if (!/^[A-Za-z0-9]+$/.test(cid)) {
+    throw new UnsupportedUriError(uri, 'invalid CID')
+  }
   return {
     scheme: TRANSPORT.ipfs,
     uri,
     httpUrls: (opts) => {
       const gateways = opts?.ipfsGateways ?? DEFAULT_IPFS_GATEWAYS
       return gateways.map((g) => {
-        const u = new URL(`${trimGateway(g)}/ipfs/${cid}${subpath}`)
+        const u = buildGatewayUrl(g, `ipfs/${cid}`, subpath, uri)
         // IPIP-402: ask the gateway for the verifiable raw block. Harmless on
         // gateways that ignore it; we re-hash regardless.
         if (!u.searchParams.has('format')) u.searchParams.set('format', 'raw')
@@ -212,12 +236,17 @@ function resolveArweave(uri: string): ResolvedTransport {
   if (txid.length === 0) {
     throw new UnsupportedUriError(uri, 'missing Arweave transaction id')
   }
+  // Arweave tx ids are base64url (43 chars of [A-Za-z0-9_-]); reject anything
+  // else so the id can't carry path/host characters.
+  if (!/^[A-Za-z0-9_-]+$/.test(txid)) {
+    throw new UnsupportedUriError(uri, 'invalid Arweave transaction id')
+  }
   return {
     scheme: TRANSPORT.arweave,
     uri,
     httpUrls: (opts) => {
       const gateways = opts?.arweaveGateways ?? DEFAULT_ARWEAVE_GATEWAYS
-      return gateways.map((g) => new URL(`${trimGateway(g)}/${txid}${subpath}`))
+      return gateways.map((g) => buildGatewayUrl(g, txid, subpath, uri))
     },
   }
 }
