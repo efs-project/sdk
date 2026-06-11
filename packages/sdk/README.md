@@ -14,17 +14,19 @@ npm i @efs/sdk viem
 
 ## Quickstart (target API)
 
-The client is resource-namespaced (`efs.fs.*` for files, `efs.lenses.*`, `efs.eas.*`, `efs.raw.*`):
+The client is resource-namespaced (`efs.fs.*` for files, `efs.lenses.*`, `efs.eas.*`, `efs.raw.*`). Its boundary is the **standard** — an [EIP-1193](https://eips.ethereum.org/EIPS/eip-1193) provider + chain — so any wallet works; viem is the engine inside ([standards](../../docs/specs/standards.md)).
 
 ```ts
 import { createEfsClient, identity } from '@efs/sdk'
 import { sepolia } from 'viem/chains'
-import { createPublicClient, http } from 'viem'
 
+// Standard form — pass any EIP-1193 provider (window.ethereum, WalletConnect, …):
 const efs = createEfsClient({
-  publicClient: createPublicClient({ chain: sepolia, transport: http() }),
-  walletClient, // required for writes
+  provider: window.ethereum, // any EIP-1193 provider
+  chain: sepolia,
+  account, // the signing address; omit for a read-only client
 })
+// (viem-native callers can pass `{ publicClient, walletClient }` instead.)
 
 // Resolve "the file at /logo" through an identity (ENS → key-set → lens).
 // `read` returns a reference + who resolved it; `fetch` gets the bytes (verified).

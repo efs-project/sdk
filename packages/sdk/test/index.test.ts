@@ -1,4 +1,11 @@
-import { http, type Address, type WalletClient, createPublicClient, createWalletClient } from 'viem'
+import {
+  http,
+  type Address,
+  type EIP1193Provider,
+  type WalletClient,
+  createPublicClient,
+  createWalletClient,
+} from 'viem'
 import { sepolia } from 'viem/chains'
 import { describe, expect, it } from 'vitest'
 import {
@@ -41,6 +48,25 @@ describe('namespaced client (Decision F)', () => {
     const efs = createEfsClient({ publicClient })
     expect(typeof efs.lenses.lens).toBe('function')
     expect(typeof efs.lenses.identity).toBe('function')
+  })
+
+  it('accepts the EIP-1193 provider form (standard boundary), wallet-gated by `account`', async () => {
+    // A minimal EIP-1193 provider — the durable, library-neutral input.
+    const provider = {
+      request: async () => {
+        throw new Error('mock')
+      },
+      on: () => {},
+      removeListener: () => {},
+    } as unknown as EIP1193Provider
+
+    // No account → read-only client; read verb still resolves to NotImplemented.
+    const ro = createEfsClient({ provider, chain: sepolia })
+    await expect(ro.fs.read('/x')).rejects.toThrow(NotImplemented)
+
+    // With an account → write-capable; write resolves to NotImplemented (not WalletRequired).
+    const rw = createEfsClient({ provider, chain: sepolia, account: addr(1) })
+    await expect(rw.fs.write('/x', new Uint8Array())).rejects.toThrow(NotImplemented)
   })
 })
 

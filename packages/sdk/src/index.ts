@@ -13,7 +13,17 @@
  * are the ones that would force a breaking change, so they exist now.
  */
 
-import type { Address, PublicClient, WalletClient } from 'viem'
+import {
+  type Account,
+  type Address,
+  type Chain,
+  type EIP1193Provider,
+  type PublicClient,
+  type WalletClient,
+  createPublicClient,
+  createWalletClient,
+  custom,
+} from 'viem'
 import {
   type DeploymentsMap,
   type EfsDeployment,
@@ -45,25 +55,56 @@ import type {
 } from './types.js'
 
 /**
- * The read/write clients the SDK consumes. Aliased (not raw viem types in the
- * public config) so we can later widen them to accept an ethers adapter without
- * a breaking change — the seam for staying library-agnostic. The SDK core stays
- * viem-native (ADR-0002); ethers interop ships later as an optional `@efs/sdk/ethers`
- * adapter that produces an `EfsReader`/`EfsWriter`. Any wallet (MetaMask, WalletConnect,
- * Coinbase, hardware, embedded) already works today: viem wraps any EIP-1193 provider.
+ * The SDK's boundary is the **standard** (EIP-1193 provider + EIP-155 chain), not
+ * a library (ADR-0009 / docs/specs/standards.md). viem is the engine *inside* —
+ * we wrap the provider with viem's `custom()` transport. Any wallet (MetaMask,
+ * WalletConnect, Coinbase, hardware, embedded) is an EIP-1193 provider, so all of
+ * them work; a future ethers/other adapter just produces a provider, no break.
  */
-export type EfsReader = PublicClient
-export type EfsWriter = WalletClient
 
-export type EfsClientConfig = {
-  publicClient: EfsReader
-  /** Required for writes; reads work without it. Presence gates write methods
-   * at the type level (see `createEfsClient` overloads). */
-  walletClient?: EfsWriter
+/** Shared config. */
+type CommonConfig = {
   /** Override the built-in registry to point at a custom/local deployment. */
   deployments?: DeploymentsMap
-  /** Default lens when a read passes none (resolves to the connected wallet). */
+  /** Default lens when a read passes none (resolves to the connected account). */
   defaultLens?: Lens
+}
+
+/** Standard form: an EIP-1193 provider + the chain. Pass an `account` to enable writes. */
+export type ProviderConfig = CommonConfig & {
+  /** Any EIP-1193 provider — `window.ethereum`, a WalletConnect session, a viem
+   * client's transport, etc. The durable, library-neutral input. */
+  provider: EIP1193Provider
+  /** The chain (EIP-155) the provider talks to. */
+  chain: Chain
+  /** The signing account for writes; omit for a read-only client. */
+  account?: Address | Account
+}
+
+/** Convenience form: pre-configured viem clients (for viem-native callers). */
+export type ViemConfig = CommonConfig & {
+  publicClient: PublicClient
+  /** Required for writes; presence gates write methods at the type level. */
+  walletClient?: WalletClient
+}
+
+export type EfsClientConfig = ProviderConfig | ViemConfig
+
+/** Normalize either config form to the viem clients the SDK uses internally. */
+function resolveClients(config: EfsClientConfig): {
+  publicClient: PublicClient
+  walletClient: WalletClient | undefined
+} {
+  if ('provider' in config) {
+    const transport = custom(config.provider)
+    const publicClient = createPublicClient({ chain: config.chain, transport })
+    const walletClient =
+      config.account !== undefined
+        ? createWalletClient({ chain: config.chain, account: config.account, transport })
+        : undefined
+    return { publicClient, walletClient }
+  }
+  return { publicClient: config.publicClient, walletClient: config.walletClient }
 }
 
 /** Read-only file operations. */
@@ -123,12 +164,15 @@ function chainIdOf(publicClient: PublicClient): number {
   return id
 }
 
-// Type-level write gate: a `walletClient` in the config widens the return to the
-// write-capable `EfsClient`; without it, you get `EfsReadClient` (no write verbs).
-export function createEfsClient(config: EfsClientConfig & { walletClient: WalletClient }): EfsClient
+// Type-level write gate: a write-capable config (an `account` in the provider form,
+// or a `walletClient` in the viem form) widens the return to `EfsClient`; otherwise
+// you get `EfsReadClient` (no write verbs).
+export function createEfsClient(config: ProviderConfig & { account: Address | Account }): EfsClient
+export function createEfsClient(config: ViemConfig & { walletClient: WalletClient }): EfsClient
 export function createEfsClient(config: EfsClientConfig): EfsReadClient
 export function createEfsClient(config: EfsClientConfig): EfsClient {
-  const { publicClient, walletClient, deployments: override } = config
+  const { publicClient, walletClient } = resolveClients(config)
+  const override = config.deployments
   const getDeployment = () => resolveDeployment(chainIdOf(publicClient), override)
   const requireWallet = () => {
     if (!walletClient) throw new WalletRequired()

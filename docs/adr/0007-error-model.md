@@ -19,6 +19,10 @@ External callers need to handle SDK failures programmatically — distinguish a 
 
 Subclasses set a distinct `name` + `code`: `NotImplemented`, `WalletRequired`, `LensRequired`, `MaxLensesExceeded`, `SchemaMismatchError`, `DeploymentNotFound`, `CursorInvalid`, `PartialBatchFailure`. New failure modes (transport, mirror-scheme-rejected, list-constraint, partial-batch detail) are added as subclasses + codes over time — additive, never breaking, because callers catch `EfsError` and/or switch on the open `code`.
 
+## Realization (standards research, `docs/specs/standards.md`)
+
+The model is a **classifier over viem's `BaseError` tree**, not a reimplementation: viem already decodes Solidity reverts (`Error(string)` `0x08c379a0`, `Panic(uint256)` `0x4e487b71`, and custom errors by 4-byte selector given an ABI). The SDK passes the **EAS ABI** so custom errors decode, `walk()`s to the underlying `ContractFunctionRevertedError`, and maps **EIP-1193/1474 RPC codes** — notably `4001` (user-rejected — surface as benign, not a failure), `4100` (unauthorized), `4902` (chain-not-added) — onto `EfsError` subclasses/codes.
+
 ## Consequences
 
 - Callers can `catch (e) { if (e instanceof EfsError) switch (e.code) … }` or `e.walk(x => x instanceof ContractFunctionRevertedError)` for the underlying revert.

@@ -15,12 +15,12 @@ ADR-0002 made the SDK viem-native (vendored EAS ABIs, no ethers, no eas-sdk). Th
 
 ## Decision
 
-**Keep the core viem-native (ADR-0002 stands). Make ethers a non-breaking future addition via two cheap seams added now:**
+**The public boundary is the standard — an EIP-1193 provider + EIP-155 chain — and viem is the engine *inside* (ADR-0002 stands). This is implemented, not just seamed:**
 
-1. **Alias the client types.** The public config references `EfsReader` / `EfsWriter` (today `= PublicClient` / `WalletClient`), not raw viem types. Later these widen to a union (`PublicClient | EfsReaderAdapter`) — a **non-breaking** change.
-2. **Reserve `@efs/sdk/ethers`** as the future optional adapter entry: `fromEthersSigner()` / `fromEthersProvider()` produce an `EfsReader`/`EfsWriter`, with `ethers` as an optional peerDependency **only there** — never in the core dep tree.
+1. **`createEfsClient` accepts the standard form `{ provider: EIP1193Provider, chain, account? }`.** Internally the SDK wraps the provider with viem's `custom()` transport and builds the viem clients it uses. The public contract is the EIP-1193 `request` interface (the durable standard, see `docs/specs/standards.md`), not viem's concrete types. A second **convenience form** `{ publicClient, walletClient? }` is accepted for viem-native callers; both normalize to viem internally.
+2. **Reserve `@efs/sdk/ethers`** as the future optional adapter entry (`fromEthersSigner`/`fromEthersProvider` → a provider), with `ethers` as an optional peerDependency **only there** — never in the core dep tree.
 
-This refines ADR-0002 ("viem-only") to **"viem-core, ethers-extensible"** — without weakening its load-bearing point (no eas-sdk/ethers dependency in core).
+This refines ADR-0002 ("viem-only") to **"standard boundary, viem engine, library-extensible."** Because the boundary is EIP-1193, **every wallet already works** (MetaMask/WalletConnect/Coinbase/hardware/embedded are all EIP-1193 providers), and swapping or adding a client library never breaks a consumer.
 
 ## Consequences
 

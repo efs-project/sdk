@@ -10,14 +10,17 @@ The SDK's public surface is the one near-permanent thing it has (breaking it is 
 
 ## Decision
 
-**Instantiation — a factory taking injected viem clients (the scaffold's shape wins; the doc is updated to match).**
+**Instantiation — a factory whose boundary is the standard (an EIP-1193 provider + EIP-155 chain); viem is the engine inside (ADR-0009).**
 
 ```ts
+// Standard form (durable, library-neutral; any wallet is an EIP-1193 provider):
+const efs = createEfsClient({ provider, chain, account?, deployments?, defaultLens? })
+// Convenience form (viem-native callers):
 const efs = createEfsClient({ publicClient, walletClient?, deployments?, defaultLens? })
 ```
 
 - A **factory function**, not `new EFSClient` (viem/wagmi never expose `new PublicClient`).
-- Consumers inject built **viem clients** (`publicClient`/`walletClient`) — referenced through the `EfsReader`/`EfsWriter` aliases (ADR-0009) — not raw `rpc`+`chainId` strings, so they bring their own transports/fallbacks/chains and any EIP-1193 wallet.
+- The public contract is the **EIP-1193 `request` interface** (`docs/specs/standards.md`), not viem's concrete types; the SDK wraps the provider with viem's `custom()` transport internally. This is the "depend on the standard, not the library" boundary.
 
 **Resource-namespaced surface** (Decision F): `efs.fs` (files) · `efs.lenses` · `efs.eas` (viem-native) · `efs.raw` (deployment escape hatch). The full design's `graph`/`props`/`lists`/`sorts` namespaces are **additive** (a new top-level namespace is non-breaking) and land in a dedicated pass.
 
