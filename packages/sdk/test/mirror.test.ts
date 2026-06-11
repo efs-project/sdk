@@ -343,6 +343,42 @@ describe('fetchVerified - SSRF', () => {
     })
     expect(res.verification).toBe('matches-author')
   })
+
+  it('re-checks redirect targets: a 30x to a private host is blocked (P1)', async () => {
+    const fetchImpl = vi.fn(async (url: string) => {
+      // A public mirror that tries to bounce us at loopback.
+      if (url === 'https://public.example/a') {
+        return mockResponse(new Uint8Array(), {
+          status: 302,
+          headers: { location: 'http://127.0.0.1/secret' },
+        })
+      }
+      throw new Error(`unexpected fetch to ${url}`) // 127.0.0.1 must never be hit
+    }) as unknown as typeof fetch
+    await expect(
+      fetchVerified(['https://public.example/a'], undefined, { fetchImpl }),
+    ).rejects.toBeInstanceOf(AllMirrorsFailedError)
+    // The redirect was issued once; the loopback target was never fetched.
+    expect(fetchImpl).toHaveBeenCalledOnce()
+    expect(fetchImpl).toHaveBeenCalledWith('https://public.example/a', expect.anything())
+  })
+
+  it('follows a redirect to a public host and verifies the final bytes', async () => {
+    const bytes = enc('after redirect')
+    const hash = hashContent(bytes)
+    const fetchImpl = vi.fn(async (url: string) =>
+      url === 'https://public.example/a'
+        ? mockResponse(new Uint8Array(), {
+            status: 302,
+            headers: { location: 'https://cdn.example/b' },
+          })
+        : mockResponse(bytes),
+    ) as unknown as typeof fetch
+    const res = await fetchVerified(['https://public.example/a'], hash, { fetchImpl })
+    expect(res.verification).toBe('matches-author')
+    expect(fetchImpl).toHaveBeenCalledTimes(2)
+    expect(fetchImpl).toHaveBeenLastCalledWith('https://cdn.example/b', expect.anything())
+  })
 })
 
 describe('fetchVerified - AbortSignal', () => {

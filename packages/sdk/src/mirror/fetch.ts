@@ -169,6 +169,21 @@ function linkAbort(outer: AbortSignal | undefined, inner: AbortController): () =
   return () => outer.removeEventListener('abort', onAbort)
 }
 
+/** Max redirect hops to follow before giving up (each re-checked for SSRF). */
+const MAX_REDIRECTS = 5
+
+/** Read the capped body and capture the declared (informational) content type. */
+async function finishResponse(
+  res: Response,
+  maxBytes: number,
+  controller: AbortController,
+): Promise<{ bytes: Uint8Array; contentType?: string }> {
+  const bytes = await readCapped(res, maxBytes, controller)
+  // Content-Type is informational ONLY (nosniff): captured, never acted on.
+  const declaredType = res.headers.get('content-type') ?? undefined
+  return declaredType !== undefined ? { bytes, contentType: declaredType } : { bytes }
+}
+
 /** Try a single concrete HTTP(S) URL. Returns bytes + declared type, or throws. */
 async function fetchOne(
   url: URL,
@@ -185,20 +200,53 @@ async function fetchOne(
   const unlink = linkAbort(opts.signal, controller)
   const timer = setTimeout(() => controller.abort(), timeoutMs)
   try {
-    const res = await doFetch(url.href, {
-      signal: controller.signal,
-      redirect: 'follow',
-      // We never want a cached cross-origin opaque response; ask for bytes.
-      headers: { accept: 'application/octet-stream, */*' },
-    })
-    if (!res.ok) {
-      throw new Error(`HTTP ${res.status} ${res.statusText}`)
+    let current = url
+    for (let hop = 0; ; hop += 1) {
+      // redirect: 'manual' is load-bearing security: a public mirror must not
+      // be able to 30x us toward a private/metadata host without re-running the
+      // SSRF guard on the new target (P1). In Node/undici this surfaces the 3xx
+      // + Location; in a browser it yields an opaque redirect, where the browser
+      // enforces SSRF/CORS itself, so we let it follow there.
+      const res = await doFetch(current.href, {
+        signal: controller.signal,
+        redirect: 'manual',
+        headers: { accept: 'application/octet-stream, */*' },
+      })
+
+      if (res.type === 'opaqueredirect') {
+        const followed = await doFetch(current.href, {
+          signal: controller.signal,
+          redirect: 'follow',
+          headers: { accept: 'application/octet-stream, */*' },
+        })
+        if (!followed.ok) throw new Error(`HTTP ${followed.status} ${followed.statusText}`)
+        return finishResponse(followed, maxBytes, controller)
+      }
+
+      if (res.status >= 300 && res.status < 400) {
+        if (hop >= MAX_REDIRECTS) throw new Error(`too many redirects (> ${MAX_REDIRECTS})`)
+        const location = res.headers.get('location')
+        if (!location) throw new Error(`HTTP ${res.status} redirect with no Location`)
+        let next: URL
+        try {
+          next = new URL(location, current)
+        } catch {
+          throw new Error(`invalid redirect Location: ${location}`)
+        }
+        if (next.protocol !== 'http:' && next.protocol !== 'https:') {
+          throw new Error(`redirect to non-http(s) scheme (${next.protocol})`)
+        }
+        const ssrf = checkSsrf(next, opts)
+        if (ssrf.blocked) throw new Error(`redirect to SSRF-blocked host (${ssrf.reason})`)
+        current = next
+        continue
+      }
+
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status} ${res.statusText}`)
+      }
+      return finishResponse(res, maxBytes, controller)
     }
-    const bytes = await readCapped(res, maxBytes, controller)
-    // Content-Type is informational ONLY (nosniff). We capture the declared
-    // value but never branch handling on it and never execute the bytes.
-    const declaredType = res.headers.get('content-type') ?? undefined
-    return declaredType !== undefined ? { bytes, contentType: declaredType } : { bytes }
   } finally {
     clearTimeout(timer)
     unlink()
