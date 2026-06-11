@@ -119,6 +119,16 @@ describe('checkSsrf - host guard', () => {
     expect(block('http://localhost/x').blocked).toBe(true)
     expect(block('http://metadata.google.internal/x').blocked).toBe(true)
   })
+  it('blocks IPv4-mapped IPv6, including the canonical hex form Node emits', () => {
+    // new URL() canonicalizes [::ffff:127.0.0.1] -> hostname '::ffff:7f00:1';
+    // both the dotted input and the explicit hex form must be blocked (P1 SSRF).
+    expect(block('http://[::ffff:127.0.0.1]/x').blocked).toBe(true)
+    expect(block('http://[::ffff:7f00:1]/x').blocked).toBe(true)
+    expect(block('http://[::ffff:a9fe:a9fe]/latest/meta-data').blocked).toBe(true) // 169.254.169.254
+    expect(block('http://[::ffff:0a00:0005]/x').blocked).toBe(true) // 10.0.0.5
+    // A public IPv4-mapped address stays allowed.
+    expect(block('http://[::ffff:0808:0808]/x').blocked).toBe(false) // 8.8.8.8
+  })
   it('allows public hosts', () => {
     expect(block('https://example.com/x').blocked).toBe(false)
     expect(block('https://8.8.8.8/x').blocked).toBe(false)

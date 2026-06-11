@@ -84,14 +84,31 @@ function isBlockedIpv6(addr: string): string | undefined {
   if (a.startsWith('fe8') || a.startsWith('fe9') || a.startsWith('fea') || a.startsWith('feb'))
     return 'link-local (fe80::/10)'
   if (a.startsWith('fc') || a.startsWith('fd')) return 'unique-local (fc00::/7)'
-  // IPv4-mapped (::ffff:a.b.c.d) - extract and re-check as IPv4.
-  const mapped = /^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/i.exec(a)
-  if (mapped?.[1]) {
-    const v4 = parseIpv4(mapped[1])
-    if (v4) {
-      const why = isBlockedIpv4(v4[0], v4[1], v4[2], v4[3])
-      if (why) return `IPv4-mapped ${why}`
-    }
+  // IPv4-mapped (::ffff:a.b.c.d) - extract and re-check as IPv4. Node
+  // canonicalizes the dotted tail to hex (::ffff:127.0.0.1 -> ::ffff:7f00:1),
+  // so both forms must be recognized or the guard is trivially bypassed.
+  const v4 = embeddedMappedIpv4(a)
+  if (v4) {
+    const why = isBlockedIpv4(v4[0], v4[1], v4[2], v4[3])
+    if (why) return `IPv4-mapped ${why}`
+  }
+  return undefined
+}
+
+/**
+ * Extract the embedded IPv4 of an IPv4-mapped IPv6 address (`::ffff:…`),
+ * accepting both the dotted tail (`::ffff:127.0.0.1`) and the canonical
+ * two-hextet hex tail Node emits (`::ffff:7f00:1`). Returns the four octets,
+ * or `undefined` if `a` isn't an IPv4-mapped address.
+ */
+function embeddedMappedIpv4(a: string): [number, number, number, number] | undefined {
+  const dotted = /^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/.exec(a)
+  if (dotted?.[1]) return parseIpv4(dotted[1])
+  const hex = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(a)
+  if (hex?.[1] && hex[2]) {
+    const hi = Number.parseInt(hex[1], 16)
+    const lo = Number.parseInt(hex[2], 16)
+    return [(hi >> 8) & 0xff, hi & 0xff, (lo >> 8) & 0xff, lo & 0xff]
   }
   return undefined
 }
