@@ -42,11 +42,13 @@ import { type Lens, identity, lens, resolveLens } from './lenses/resolve.js'
 import type {
   BatchReceipt,
   DataRef,
+  DirEntry,
   EfsFile,
   EfsList,
   FetchOptions,
   FileStat,
   ListOptions,
+  PreviewOptions,
   ReadOptions,
   ReadResult,
   WriteEstimate,
@@ -111,14 +113,16 @@ function resolveClients(config: EfsClientConfig): {
 export type EfsFsRead = {
   read(path: string, opts?: ReadOptions): Promise<ReadResult | null>
   fetch(ref: DataRef, opts?: FetchOptions): Promise<EfsFile>
-  stat(path: string, opts?: ReadOptions): Promise<FileStat | null>
-  list(path: string, opts?: ListOptions): EfsList<DataRef>
+  /** Metadata at a path. Returns a discriminated `FileStat` (`{exists:false}` vs
+   * `{exists:true; …}`), never `null` — absence is modeled once (review A7). */
+  stat(path: string, opts?: ReadOptions): Promise<FileStat>
+  list(path: string, opts?: ListOptions): EfsList<DirEntry>
 }
 
 /** Read + write file operations (only present when a `walletClient` is set). */
 export type EfsFsWrite = EfsFsRead & {
   write(path: string, content: Uint8Array, opts?: WriteOptions): Promise<WriteReceipt>
-  preview(path: string, content: Uint8Array): Promise<WriteEstimate>
+  preview(path: string, content: Uint8Array, opts?: PreviewOptions): Promise<WriteEstimate>
 }
 
 export type EfsLensesNs = {
@@ -241,7 +245,13 @@ export {
   type AttestationRequestData,
   type MultiAttestationRequest,
 } from './eas/index.js'
-export { hashContent, verifyContent, type VerificationStatus } from './content/hash.js'
+export {
+  hashContent,
+  verifyContent,
+  asContentHash,
+  type ContentHash,
+  type VerificationStatus,
+} from './content/hash.js'
 export { lens, identity, resolveLens, MAX_LENSES, type Lens } from './lenses/resolve.js'
 export {
   deployments,
@@ -256,11 +266,13 @@ export * from './errors.js'
 export type {
   DataRef,
   DataUID,
-  PathRef,
+  DirEntry,
   ReadOptions,
   ListOptions,
   FetchOptions,
+  TransportName,
   WriteOptions,
+  PreviewOptions,
   Page,
   EfsList,
   ReadResult,
@@ -268,7 +280,9 @@ export type {
   FileStat,
   WriteReceipt,
   WriteMechanism,
+  CallStatus,
   WriteEstimate,
   OperationResult,
+  OperationKind,
   BatchReceipt,
 } from './types.js'

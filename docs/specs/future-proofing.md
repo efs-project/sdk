@@ -28,7 +28,7 @@
 
 ## 3. Indexing & read-scaling — index-first (see constraint #1)
 
-- **`EfsIndexProvider` interface** (`whoTagged`, `listWriters`, `versionsOf`) — the SDK bundles **no** indexer (confirms the design). Ship an **`EasGraphQLProvider` default** over EAS's per-chain GraphQL endpoints (instant working reverse-lookups), swappable for a self-hosted subgraph/Envio/Ponder.
+- **Reverse-lookups stay caller-supplied** — the SDK bundles **no** indexer *and* wires **no** index provider into the client config. Document an `EfsIndexProvider` *shape* (`whoTagged`, `listWriters`, `versionsOf`) that callers implement, and ship a reference `EasGraphQLProvider` (over EAS's per-chain GraphQL endpoints) as a **docs/example adapter, not a bundled default or `index?` config seam**. Reserving such a seam would re-import the bundled-indexer framing that was explicitly stripped (sdk-architecture.md revision 2026-06-10 / Q3 2026-05-28); see the 2026-06-11 API review §F.
 - **`eth_getLogs` is bounded-only** — chunked, recent-range, or one-time backfill; never the reverse-lookup backbone.
 - **Multicall3** (`0xcA11…CA11`) for batched point-reads ("resolve N attestations").
 - **Future:** shape the interface so **EIP-7745 verifiable logs** (Draft, Glamsterdam) can back it later — today's centralized-index pragmatism upgrades to trustless reads without an API break.
@@ -81,8 +81,9 @@ The "what are we missing" sweep over attestation/registry/data standards — con
 
 - **Ride EAS directly — there is no Final attestation ERC.** EAS is infrastructure, not a ratified ERC; `AttestationRequestData` (recipient, `expirationTime`, `revocable`, `refUID`, `bytes data`, value) is the contract we encode against. ERC-7512 (audits), ERC-5851 (verifiable credentials), ERC-8273 (agentic actions) are all Draft and off-target. **Keep an EAS-resolution seam** so a future attestation ERC could slot in without client churn, but don't wait for one.
 - **EAS-native time/revocation** — use `expirationTime`/`revocable`/`refUID` for mirrors, transports, versioning, and key-set revocation rather than parallel concepts (ties to §7).
+- **EIP-712 domain is obtained at runtime, never hardcoded** — fetch it from the deployed verifier's `getDomainSeparator()` (which binds `name`+`version`+`chainId`+`verifyingContract`) for every delegated/offchain EAS request. The observed `name "EAS"` / `version "1.4.0"` (eas-contracts master) is a **sanity check only** — both vary by deployment. Do **not** assume EIP-5267 `eip712Domain()` is callable (absent in master). Domain mismatch is the #1 EIP-712 failure mode (see [standards.md](./standards.md) EIP-712 row).
 - **ERC-8048 / ERC-8049** — onchain key-value metadata with indexed-key events; the **closest emerging mirror of EFS PROPERTYs**. **WATCH closely** — design properties so they're expressible through that shape. (ERC-7208 data-containers / ERC-7813 table-storage are looser parallels — lower-priority WATCH.)
-- **ERC-2098 compact signatures (64-byte)** — EAS delegated/offchain paths may hand us compact sigs; the verify/normalize seam should **accept both 64- and 65-byte forms**.
+- **ERC-2098 compact signatures (64-byte)** — EAS delegated/offchain paths may hand us compact sigs; the verify/normalize seam should **accept both 64- and 65-byte forms**. This is **TS-verification-scoped only** — an off-chain normalization concern, not an on-chain `@efs/solidity` one.
 - **`abi.encode`, never `encodePacked`** for anything hashed/signed (collision-safety); **EIP-1559 fee fields** via `feeHistory` + buffered estimate, exposed as a per-batch override seam. (Both already in [standards.md](./standards.md) AVOID/ADOPT.)
 
 ## 10. Roadmap watch list (re-check ~quarterly)

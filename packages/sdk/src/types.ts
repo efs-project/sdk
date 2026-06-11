@@ -4,15 +4,26 @@
  * NAMED and exported so adding a field later is non-breaking (review C1). */
 
 import type { Address, Hex } from 'viem'
-import type { VerificationStatus } from './content/hash.js'
+import type { ContentHash, VerificationStatus } from './content/hash.js'
+import type { EfsError } from './errors.js'
 import type { Lens } from './lenses/resolve.js'
 
 // ── Branded references ─────────────────────────────────────────────────────────
 
 export type DataUID = Hex & { readonly __kind: 'DataUID' }
 
-/** Static reference — these exact bytes / this version. */
-export type DataRef = { readonly __brand: 'DataRef'; readonly uid: DataUID }
+/** Static reference — these exact bytes / this version. Carries the chain it lives
+ * on (review A1: a ref without its chain can't be resolved cross-chain) and the
+ * attester that resolved it (review A2: `fetch(ref)` needs the author to verify
+ * the attested `contentHash` — the verified two-step flow is broken without it). */
+export type DataRef = {
+  readonly __brand: 'DataRef'
+  readonly uid: DataUID
+  /** The EIP-155 chain this ref resolves on. */
+  readonly chainId: number
+  /** The attester whose lens won placement — the author `fetch` verifies against. */
+  readonly resolvedBy: Address
+}
 /** Dynamic reference — whatever is active at this path now. */
 export type PathRef = { readonly __brand: 'PathRef'; readonly path: string }
 
@@ -33,11 +44,23 @@ export type ListOptions = ReadOptions & {
   cursor?: string
 }
 
+/** A named transport for mirror/fetch resolution. Open union (review A8): the
+ * known transports are autocompletable, but an unrecognized name is still
+ * assignable so adding one is never breaking. Will be derived from the planned
+ * `TRANSPORT` constant (ADR-0011) once it lands. */
+export type TransportName =
+  | 'web3'
+  | 'arweave'
+  | 'ipfs'
+  | 'magnet'
+  | 'https'
+  | (string & Record<never, never>)
+
 export type FetchOptions = {
   /** Verify fetched bytes against the author's attested contentHash (default true). */
   verify?: boolean
   /** Restrict/prioritize transports (e.g. `['ipfs', 'https']`); default = all by priority. */
-  transports?: readonly string[]
+  transports?: readonly TransportName[]
 }
 
 // ── Pagination ─────────────────────────────────────────────────────────────────
@@ -55,11 +78,33 @@ export type EfsList<T> = AsyncIterable<T> & {
   page(opts?: { limit?: number; cursor?: string }): Promise<Page<T>>
 }
 
+// ── Listings ─────────────────────────────────────────────────────────────────
+
+/** One entry in a directory listing. The design specifies dir entries (a name
+ * plus its anchoring UID and kind), not raw refs (review A11): a listing needs
+ * the entry's name and whether it's a file or a directory, which a bare
+ * `DataRef` can't carry. */
+export type DirEntry = {
+  /** The entry's name within the listed directory (the last path segment). */
+  name: string
+  /** Whether this entry is a file or a subdirectory. */
+  kind: 'file' | 'dir'
+  /** The static ref to the file's bytes (present for `kind: 'file'`). */
+  dataUID?: DataUID
+  /** The anchor UID for a subdirectory (present for `kind: 'dir'`). */
+  anchorUID?: DataUID
+}
+
 // ── Writes ─────────────────────────────────────────────────────────────────────
 
 /** How a batched write was delivered. Exported so additions are localized, not a
  * breaking change to an exhaustive `switch` (review C5). */
-export type WriteMechanism = 'multiAttest-sequential' | 'eip5792' | 'erc4337' | 'gateway'
+export type WriteMechanism = 'sequential' | 'eip5792' | 'erc4337' | 'gateway'
+
+/** Lifecycle status of a write/batch (review A3). Models EIP-5792 status `600`
+ * (a half-written file) which a binary `done`/`ok` can't represent — without it
+ * an abandoned sequential run returns a success-shaped receipt. */
+export type CallStatus = 'pending' | 'confirmed' | 'offchain-failed' | 'reverted' | 'partial'
 
 export type WriteOptions = {
   contentType?: string
@@ -68,22 +113,38 @@ export type WriteOptions = {
   signal?: AbortSignal
 }
 
+/** Options for `fs.preview`. Reserved now (review A12) so the write-simulation
+ * seam (e.g. price source, lens) can land additively without a signature change.
+ * Intentionally near-empty until the preview pass defines its knobs. */
+export type PreviewOptions = ReadOptions
+
 /** A durable, serializable write session. `steps` are idempotent per
  * (path-qualified) id so a resume skips only mined work and never double-mints. */
 export type WriteReceipt = {
-  contentHash: string
+  contentHash: ContentHash
   data?: DataRef
   steps: Array<{ id: string; uid?: DataUID; done: boolean }>
   signatureCount: number
   mechanism: WriteMechanism
+  /** Lifecycle status; `'partial'`/`'reverted'` flag a half-written file. */
+  status?: CallStatus
 }
+
+/** The op-type a batch entry performed — partial-failure UIs need to show which
+ * kind of operation failed (review A6). */
+export type OperationKind = 'write' | 'pin' | 'tag' | 'property' | 'list' | 'mirror' | 'sort'
 
 /** One operation's result inside a multi-op batch. */
 export type OperationResult = {
   id: string
+  /** Which op-type this entry performed. */
+  kind: OperationKind
   ok: boolean
   uid?: DataUID
-  error?: Error
+  /** The op's transaction hash, when it produced one. */
+  txHash?: Hex
+  /** A typed EFS error (carries `.code`); not a bare `Error` (review A6). */
+  error?: EfsError
 }
 
 /** The result of executing a multi-op batch. */
@@ -91,6 +152,12 @@ export type BatchReceipt = {
   results: readonly OperationResult[]
   signatureCount: number
   mechanism: WriteMechanism
+  /** Lifecycle status; `'partial'` when some ops landed and some did not. */
+  status?: CallStatus
+  /** True when some operations landed and some did not (review A3). */
+  partialFailure?: boolean
+  /** The transaction hashes the batch produced, in delivery order. */
+  txHashes?: readonly Hex[]
 }
 
 export type WriteEstimate = {
@@ -99,13 +166,17 @@ export type WriteEstimate = {
   signatureCount: number
   chunkDeploys: number
   gas: bigint
-  estimatedUSD?: number
+  /** Estimated cost as a range, not a bare scalar (review A4 / future-proofing.md §5).
+   * Omitted until pricing lands. */
+  usd?: { min: number; max: number; priceSource?: string; asOf?: number }
   warnings: string[]
 }
 
 // ── Reads ──────────────────────────────────────────────────────────────────────
 
-/** A resolved read: the data ref plus which attester/lens won (review UX-4). */
+/** A resolved read: the data ref plus which attester/lens won (review UX-4).
+ * `resolvedBy` is also folded into `DataRef` (review A2) so a ref carried to
+ * `fetch` alone can still verify; it is kept here for the read-time view. */
 export type ReadResult = { data: DataRef; resolvedBy: Address }
 
 /** Fetched bytes + trust-relative verification (never a bare "verified"). */
@@ -117,11 +188,15 @@ export type EfsFile = {
   hashAuthor?: Address
 }
 
-/** Metadata about the file at a path, without fetching bytes. */
-export type FileStat = {
-  exists: boolean
-  data?: DataRef
-  resolvedBy?: Address
-  contentType?: string
-  size?: bigint
-}
+/** Metadata about the file at a path, without fetching bytes. Discriminated on
+ * `exists` (review A7): absence is modeled once here, not also as a `| null`
+ * return. Mirrors the Solidity `(bool exists, …)` shape. */
+export type FileStat =
+  | { exists: false }
+  | {
+      exists: true
+      data: DataRef
+      resolvedBy: Address
+      contentType?: string
+      size?: bigint
+    }

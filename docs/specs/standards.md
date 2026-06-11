@@ -33,10 +33,10 @@
 
 | Standard | Status | SDK | Note |
 |---|---|---|---|
-| **EIP-712** Typed structured data | Final | **ADOPT** | Every EAS delegated request. Pin the domain exactly: `verifyingContract` = the EAS/proxy address, correct `chainId`, EAS's own `name`/`version`. Domain mismatch is failure mode #1. |
+| **EIP-712** Typed structured data | Final | **ADOPT** | Every EAS delegated request. Obtain the domain **at runtime** from the deployed verifier's `getDomainSeparator()` (it binds `name`+`version`+`chainId`+`verifyingContract`) — never hardcode it, as these vary by deployment. Observed `name "EAS"` / `version "1.4.0"` (eas-contracts master) only as a sanity check, not an assumption. Do **not** rely on EIP-5267 `eip712Domain()` (absent in master). Domain mismatch is failure mode #1. |
 | **EIP-1271** Contract-wallet `isValidSignature` | Final | **ADOPT** (verify) | Never `ecrecover` off-chain — route through a 1271-aware path. |
 | **ERC-6492** Counterfactual-wallet signatures | Final | **ADOPT** | Coinbase Smart Wallet emits these. **viem's `verifyTypedData`/`verifyMessage` *Actions* handle 1271 + 6492 (+ 8010) automatically** — use those, never the EOA-only util. |
-| **ERC-2098** Compact (64-byte) signatures | Final | **SEAM** | Accept both 64- and 65-byte forms in the verify/normalize seam. |
+| **ERC-2098** Compact (64-byte) signatures | Final | **SEAM** | Accept both 64- and 65-byte forms in the verify/normalize seam. **TS-verification-scoped only** — this is an off-chain signature-normalization concern, not an on-chain (`@efs/solidity`) one. |
 | **EIP-7739** Nested/readable typed sigs (cross-account replay) | Draft | **WATCH** | Real but not adoption-critical; viem ships it experimental. Don't emit wrappers yet; don't block it. |
 
 **Replay defenses to implement regardless:** per-EAS `nonce`, `deadline`, and domain-bound `chainId` + `verifyingContract` (kills cross-chain + cross-contract replay).
@@ -122,7 +122,7 @@ EIP-7702 wallet support · EIP-5792 capability evolution · EIP-7715 session key
 | **ERC-7683 / 7802 / EIL** interop | mixed | **WATCH/AVOID** | Abstract assets, not where data lives — won't relocate an EFS file. |
 | **ERC-7774** ETag caching (over ERC-5219) | Draft | **SEAM** | Cache on-chain content serves. |
 | **IANA media types** | RFC 6838 | **ADOPT** | `contentType` is an IANA type; the *attested* value is authoritative, never the transport's. |
-| **ERC-2098** Compact signatures | Final | **SEAM** | Accept both 64- and 65-byte sig forms in the verify/normalize path (EAS delegated/offchain may hand us compact sigs). |
+| **ERC-2098** Compact signatures | Final | **SEAM** | Accept both 64- and 65-byte sig forms in the verify/normalize path (EAS delegated/offchain may hand us compact sigs). **TS-verification-scoped only**, not an on-chain `@efs/solidity` concern. |
 | **ERC-8048 / ERC-8049** Onchain key-value metadata | Draft | **WATCH** | Closest emerging mirror of EFS PROPERTYs (string-key/bytes-value + indexed events) — design properties expressible through it. |
 | **ERC-7512 / ERC-5851 / ERC-8273** Attestation ERCs | Draft | **WATCH** | None Final or on-target; we ride EAS directly as the substrate and keep an EAS-resolution seam. |
 | **Tenderly / Blockaid** tx simulation | de-facto | **SEAM** | `efs.fs.preview` stays pluggable to a simulation RPC; no baked provider/keys, no safety guarantee. |

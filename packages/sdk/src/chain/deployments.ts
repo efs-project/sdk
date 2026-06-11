@@ -22,7 +22,7 @@ export type EfsContracts = {
   aliasResolver: Address
 }
 
-/** The 9 frozen EFS schema UIDs (contracts ADR-0048). */
+/** The frozen EFS schema-UID set (defined in the contracts repo). */
 export type EfsSchemaUIDs = {
   anchor: Hex
   property: Hex

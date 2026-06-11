@@ -25,9 +25,11 @@ describe('content hashing (ADR-0006: bare SHA-256)', () => {
     expect(verifyContent(bytes, undefined)).toBe('no-claim')
   })
 
-  it('treats a malformed claim (0x-prefixed / wrong length) as mismatch, not a pass', () => {
+  it('flags a malformed claim (0x-prefixed / wrong length) as malformed-claim, not a pass (A9)', () => {
+    // A claim that isn't a well-formed bare SHA-256 is an attester bug, distinct
+    // from real content/hash divergence ('mismatch') — and never a pass.
     const bytes = enc('gm')
-    expect(verifyContent(bytes, `0x${hashContent(bytes)}`)).toBe('mismatch')
-    expect(verifyContent(bytes, 'deadbeef')).toBe('mismatch')
+    expect(verifyContent(bytes, `0x${hashContent(bytes)}`)).toBe('malformed-claim')
+    expect(verifyContent(bytes, 'deadbeef')).toBe('malformed-claim')
   })
 })
