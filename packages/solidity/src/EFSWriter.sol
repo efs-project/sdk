@@ -19,8 +19,12 @@ abstract contract EFSWriter {
         return EFSLib.read(path);
     }
 
-    /// @notice Pin a file at `path`. Once implemented, emits {EfsFilePinned}.
+    /// @notice Pin a file at `path`; emits {EfsFilePinned} for domain consumers.
+    /// @dev    {EFSLib.pinFile} reverts until implemented, so the emit is unreachable
+    ///         for now — but this locks the happy-path shape (capture, emit, return)
+    ///         so inheritors get the event without writing their own wrapper.
     function _efsPinFile(string memory path, bytes32 dataUID) internal returns (bytes32 pinUID) {
-        return EFSLib.pinFile(path, dataUID);
+        pinUID = EFSLib.pinFile(path, dataUID);
+        emit EfsFilePinned(path, dataUID, pinUID);
     }
 }
