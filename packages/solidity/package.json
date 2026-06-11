@@ -9,7 +9,7 @@
     "directory": "packages/solidity"
   },
   "files": ["src/**/*.sol", "README.md"],
-  "publishConfig": { "access": "public" },
+  "publishConfig": { "access": "public", "provenance": true },
   "keywords": ["ethereum", "efs", "eas", "solidity", "filesystem"],
   "homepage": "https://github.com/efs-project/sdk/tree/main/packages/solidity",
   "scripts": {

@@ -5,10 +5,20 @@ on:
     branches: [main]
   pull_request:
 
+# CI only reads the repo — never needs write.
+permissions:
+  contents: read
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   ts:
     name: TypeScript (build, typecheck, test, lint)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -25,14 +35,15 @@ jobs:
   solidity:
     name: Solidity (build, test, fmt)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: foundry-rs/foundry-toolchain@v1
       - working-directory: packages/solidity
         run: |
-          # forge-std is a test-only dep (not shipped); clone it rather than
-          # `forge install` to avoid submodule/flag churn across Foundry versions.
-          git clone --depth 1 https://github.com/foundry-rs/forge-std lib/forge-std
+          # forge-std is a test-only dep (not shipped); clone a pinned tag rather
+          # than `forge install` to avoid submodule/flag churn and master drift.
+          git clone --depth 1 --branch v1.9.4 https://github.com/foundry-rs/forge-std lib/forge-std
           forge build
           forge test
           forge fmt --check
@@ -41,6 +52,7 @@ jobs:
     name: Changeset present
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:

@@ -14,6 +14,7 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -23,7 +24,7 @@ jobs:
           cache: pnpm
           registry-url: https://registry.npmjs.org
       - run: pnpm install --frozen-lockfile
-      - run: npm install -g npm@latest # ensure npm >= 11.5.1 for OIDC publishing
+      - run: npm install -g npm@11 # pinned major; needs npm >= 11.5.1 for OIDC publishing
       - run: pnpm build
       # Opens/updates the "Version Packages" PR; on merge, publishes changed packages.
       # Publish uses npm Trusted Publishing (OIDC) — provenance is emitted automatically,
