@@ -17,7 +17,7 @@ Setup (one-time, requires the npm org owner):
 - For **each** package on npmjs.com → Settings → **Trusted Publisher** → GitHub repo `efs-project/sdk`, workflow `.github/workflows/release.yml`.
 - The workflow declares `permissions: id-token: write`, uses Node ≥ 22.14 / npm ≥ 11.5.1, and the **repo must stay public** (OIDC provenance is not emitted from private repos).
 
-Mechanics: a merge to `main` runs the Changesets "Version Packages" PR; merging that publishes the changed packages. Under OIDC, provenance is emitted automatically — but because `changeset publish` shells out through pnpm/npm and the implicit path has had rough edges (changesets/action#542), we set `publishConfig.provenance: true` on both packages to make it explicit rather than rely on it being inferred.
+**Publishing is disabled until launch.** Pre-launch the packages are unpublished `0.0.0` and the `@efs` org doesn't exist, so the release workflow runs `changesets/action` *without* the `publish:` input — it only manages the "Version Packages" PR and never publishes. At launch we add `with: { publish: pnpm release }` and configure the per-package Trusted Publisher. Once enabled, a merge to `main` runs the Version Packages PR; merging that publishes the changed packages. Under OIDC, provenance is emitted automatically — but because `changeset publish` shells out through pnpm/npm and the implicit path has had rough edges (changesets/action#542), we set `publishConfig.provenance: true` on both packages to make it explicit rather than rely on it being inferred.
 
 ## Consequences
 

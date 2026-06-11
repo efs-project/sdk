@@ -29,13 +29,15 @@ jobs:
       # .sol source as-is, so the release path needs no Foundry. (CI compile-checks
       # the Solidity package on every PR before merge.)
       - run: pnpm --filter @efs/sdk build
-      # Opens/updates the "Version Packages" PR; on merge, publishes changed packages.
-      # Publish uses npm Trusted Publishing (OIDC) — provenance is emitted automatically,
-      # no token is read. Requires a Trusted Publisher configured PER PACKAGE on npmjs.com:
+      # PUBLISHING IS INTENTIONALLY DISABLED UNTIL LAUNCH. The packages are pre-1.0,
+      # unpublished 0.0.0, and the @efs npm org isn't created yet — auto-publishing
+      # now would push a scaffold. With no `publish:` input, changesets/action only
+      # manages the "Version Packages" PR; it never publishes.
+      #
+      # TO ENABLE AT LAUNCH: add `with: { publish: pnpm release }` below, and
+      # configure a Trusted Publisher PER PACKAGE on npmjs.com (OIDC, no token):
       #   package settings -> Trusted Publisher -> repo "efs-project/sdk",
       #   workflow ".github/workflows/release.yml". Repo must stay public.
       - uses: changesets/action@v1
-        with:
-          publish: pnpm release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
