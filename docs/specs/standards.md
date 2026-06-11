@@ -105,3 +105,20 @@ EIP-7702 wallet support · EIP-5792 capability evolution · EIP-7715 session key
 
 ## AVOID
 `web3.js` (archived) · `eth_sign` (blind-signing) · legacy `gasPrice` · `encodePacked` for hashed/signed data · EIP-4844 blobs for durable file storage · hand-rolled ERC-4337/UserOps · raw `ecrecover` for signature verification.
+
+## Adjacent standards (2026-06-11 pass 2 — full doctrine in [future-proofing.md](./future-proofing.md))
+
+| Standard | Status | SDK | Note |
+|---|---|---|---|
+| **EIP-4444** History expiry | active (partial shipped) | **design constraint** | `eth_getLogs` over deep history is unreliable → reads are index-first; resolve via current state + an `EfsIndexProvider`. |
+| **EIP-7623** Calldata cost floor | Final (Pectra) | **ADOPT** (estimate) | Calldata-heavy writes ~2.5×; surface `tokensInCalldata` in estimates. |
+| **EIP-7825** Per-tx gas cap (~16.7M) | Final (Fusaka) | **design constraint** | Chunk SSTORE2/batched writes under the cap. |
+| **EIP-5792 `getCallsStatus`** | Final | **ADOPT** | Status `600` = partial write (half-written file) — first-class resume/repair. |
+| **EIP-7745 / 7792** Verifiable logs | Draft (Glamsterdam) | **WATCH** | Future trustless backing for the index provider. |
+| **Multicall3** (`0xcA11…CA11`) | de-facto | **ADOPT** | Batched point-reads. |
+| **ERC-7730** Clear Signing | launched 2026-05 | **ADOPT** | Ship descriptors so EFS writes show path/contentHash/lens, not a blind hash. |
+| **RIP-7212** P-256 precompile | finalized | **covered** | Passkey-wallet sigs verify transparently via our 1271/6492 path. |
+| **ERC-7895** sub-accounts / **ERC-7715** session keys | Draft | **WATCH/SEAM** | Wallet "one account, many keys" — but each is a distinct attester; the EFS key-set is the inverse and stays EFS-native. |
+| **ERC-7683 / 7802 / EIL** interop | mixed | **WATCH/AVOID** | Abstract assets, not where data lives — won't relocate an EFS file. |
+| **ERC-7774** ETag caching (over ERC-5219) | Draft | **SEAM** | Cache on-chain content serves. |
+| **IANA media types** | RFC 6838 | **ADOPT** | `contentType` is an IANA type; the *attested* value is authoritative, never the transport's. |

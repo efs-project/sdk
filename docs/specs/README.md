@@ -21,6 +21,7 @@ Rules of thumb:
 
 - [overview.md](./overview.md) — the SDK at a glance: the two packages and the core model.
 - [standards.md](./standards.md) — the EIPs/ERCs/CAIPs the SDK is built on (ADOPT/SEAM/WATCH/AVOID), researched 2026-06-11.
+- [future-proofing.md](./future-proofing.md) — engineering doctrine + roadmap risk (history expiry, gas/calldata, durability, indexing, security/clear-signing, key-sets), 9-domain pass.
 - [content-hash.md](./content-hash.md) — the bare-SHA-256 `contentHash` convention.
 
 _More specs land as the implementation does (reads, writes/batching, lenses/identity, errors)._
