@@ -30,7 +30,9 @@ jobs:
       - uses: foundry-rs/foundry-toolchain@v1
       - working-directory: packages/solidity
         run: |
-          forge install foundry-rs/forge-std --no-commit
+          # forge-std is a test-only dep (not shipped); clone it rather than
+          # `forge install` to avoid submodule/flag churn across Foundry versions.
+          git clone --depth 1 https://github.com/foundry-rs/forge-std lib/forge-std
           forge build
           forge test
           forge fmt --check
