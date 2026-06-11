@@ -15,5 +15,15 @@
   },
   "javascript": {
     "formatter": { "quoteStyle": "single", "semicolons": "asNeeded" }
-  }
+  },
+  "overrides": [
+    {
+      "include": ["**/test/**", "**/*.test.ts"],
+      "linter": {
+        "rules": {
+          "style": { "noNonNullAssertion": "off" }
+        }
+      }
+    }
+  ]
 }
