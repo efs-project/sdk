@@ -39,18 +39,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: foundry-rs/foundry-toolchain@v1
-      - working-directory: packages/solidity
-        run: |
-          # forge-std is a test-only dep (not shipped); clone a pinned tag rather
-          # than `forge install` to avoid submodule/flag churn and master drift.
-          git clone --depth 1 --branch v1.9.4 https://github.com/foundry-rs/forge-std lib/forge-std
-          forge build
-          forge test
-          forge fmt --check
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # Use the package scripts so CI and a contributor's `pnpm test` run the same
+      # path; the build/test pre-hooks bootstrap forge-std (test-only, not shipped).
+      - run: pnpm --filter @efs/solidity build
+      - run: pnpm --filter @efs/solidity test
+      - run: pnpm --filter @efs/solidity fmt:check
 
   changeset:
     name: Changeset present
-    if: github.event_name == 'pull_request'
+    # Skip the gate for Changesets' own "Version Packages" PR, which consumes
+    # (deletes) the changeset files — it legitimately has none left.
+    if: github.event_name == 'pull_request' && github.head_ref != 'changeset-release/main'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
