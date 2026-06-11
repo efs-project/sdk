@@ -76,3 +76,6 @@ export type EfsClient = {
 export function createEfsClient(_config: EfsClientConfig): EfsClient {
   throw new NotImplemented('createEfsClient()')
 }
+
+// Content hashing (ADR-0006: bare SHA-256). Real, chain-independent — usable now.
+export { hashContent, verifyContent, type VerificationStatus } from './content/hash.js'

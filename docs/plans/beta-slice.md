@@ -9,7 +9,7 @@ A dev installs `@efs/sdk`, points it at a chain, **writes a file** (resumable, c
 ## Grounding facts (verified against `.wt-schema-freeze`, 2026-06-10)
 
 - **9 frozen schemas** (`deploy/lib/schemas.ts:36-66`): ANCHOR `string name, bytes32 schemaUID`; PROPERTY `string value` (revocable, ADR-0052); **DATA `""` (empty)**; PIN `bytes32 definition`; TAG `bytes32 definition, int256 weight`; MIRROR `bytes32 transportDefinition, string uri`; LIST/LIST_ENTRY/REDIRECT.
-- **A file's `contentHash`, `size`, `contentType` are reserved-key PROPERTYs bound to the DATA UID** — each a 3-attestation bundle (key-anchor→DATA, PROPERTY(`string value`), binding PIN), **lens-scoped per attester**. The hash value is a **self-describing multibase-multihash / CID string** (no on-chain algorithm marker); the encoding spec is **unwritten upstream** → the SDK must own it.
+- **A file's `contentHash`, `size`, `contentType` are reserved-key PROPERTYs bound to the DATA UID** — each a 3-attestation bundle (key-anchor→DATA, PROPERTY(`string value`), binding PIN), **lens-scoped per attester**. The hash value is a **bare SHA-256 lowercase-hex string** (ADR-0006; the PROPERTY key is the algorithm tag). The contract stores it opaquely, so this is a client convention.
 - **No chain is deployed yet** except the contracts repo's local **chain 31337** (Sepolia fork). Real Sepolia is `0x…TBD` pending James's freeze sign-off; schema UIDs are on-chain getters; addresses are post-deploy (CREATE3 planned, not realized).
 
 ## API surface — namespaced, per the architecture doc (NOT flat)
@@ -38,7 +38,7 @@ efs.fs.preview(path, bytes): Promise<WriteEstimate>    // cost/tx/sig preflight 
 
 ```ts
 type WriteReceipt = {
-  contentHash: string                 // multihash/CID string (SDK-owned encoding, Decision A)
+  contentHash: string                 // bare SHA-256 lowercase hex (ADR-0006)
   data?: DataRef
   steps: Array<{ id: string; uid?: AttestationUID; done: boolean }>  // path-qualified, idempotent (see Resume)
   signatureCount: number
@@ -83,7 +83,7 @@ The DAG is `DATA → key-anchor → binding-PIN` = **3 layers per property** (th
 
 1. **`chain/` deployments registry** — `DeploymentsMap` shape (addresses + 9 schema UIDs per chainId) + a **construct-time schema-UID mismatch check**. Seed chain 31337 (Decision C). Sepolia pending.
 2. **`eas/`** — vendored EAS ABIs; `encodeSchemaData`, `attest`/`multiAttest`, UID derivation/verification.
-3. **`content/`** — the SDK-owned multihash/CID content-hash encode + verify (Decision A).
+3. **`content/`** — bare SHA-256 content-hash (`hashContent`) + trust-relative verify (ADR-0006). **Done** (`content/hash.ts`, tested).
 4. **`schema/`** — the 9 schema encoders; the contentHash/size/contentType reserved-key PROPERTY bundles.
 5. **`write/` — `efs.fs.write`** — DAG, one `multiAttest` per layer, thread mined UIDs, dedup, `onProgress`, `resume`, `WriteReceipt`.
 6. **`read/` — `efs.fs.read`/`fetch`/`list`** — lens-resolved active DATA → ref + `resolvedBy`; transport-priority mirror resolution + `message/external-body` + trust-relative verification; the iterator.
@@ -105,7 +105,7 @@ Reverse-lookup/discovery (`NotImplemented`), account-groups, the gateway, the `@
 ## Decisions to surface to James (important / controversial)
 
 - **F. Namespaced vs flat API — realign to the architecture doc (rec).** The validated design is namespaced (`efs.fs.write`); the scaffold drifted to flat (`pinFile`) — an unforced error on my part. **Rec:** realign to namespaced (the doc wins). *Going flat instead would be a conscious override of the validated, expert-reviewed Q2 decision — flag if you want that.* This is the one to settle first; it reshapes the scaffold's `index.ts`.
-- **A. The SDK defines the content-hash encoding convention.** Upstream left multihash/CID encoding + vectors unwritten, so whatever the SDK emits becomes de-facto standard. **Rec:** multibase-multihash, keccak256 default (per ADR-0049's stated intent), documented as an SDK spec and surfaced upstream for a contracts-side blessing. *Protocol-adjacent; worth a conscious nod.*
+- **A. Content-hash encoding — DECIDED (ADR-0006): bare SHA-256.** `contentHash` = lowercase-hex SHA-256 (matches `sha256sum`); the PROPERTY key is the algorithm tag; no multihash/CID/keccak. (Two expert passes killed the multihash case: its future-proofing is illusory and the IPFS-CID rationale is false.) Implemented in `content/hash.ts`; spec at [docs/specs/content-hash.md](../specs/content-hash.md). Surfaced upstream as an ADR-0049 follow-up.
 - **Verification is trust-relative (not a choice so much as a truth to honor).** `'verified'` would mislead — an attacker can attest a matching `contentHash` under their own lens. We report `matches-author` against `resolvedBy`. Flagging because it changes what the SDK can promise.
 - **C. Integration-test against the local fork (chain 31337) now.** Unblocks end-to-end validation before the freeze sign-off — the biggest schedule win. **Rec:** yes. *Cost: a concrete cross-repo artifact for the 31337 addresses/ABIs — a published `@efs/deployments` snapshot or a pinned vendored copy, NOT a live cross-repo read in CI (fragile). Pin this before building `chain/`.*
 - **D. Beta = TypeScript only;** `@efs/solidity` stays signatures-only. **Rec:** yes (flag if OnionDAO needs the on-chain path sooner).
