@@ -252,6 +252,8 @@ export {
   type ContentHash,
   type VerificationStatus,
 } from './content/hash.js'
+// Off-chain fetch/verify/mirror engine (freeze-independent; see future-proofing.md §2).
+export * from './mirror/index.js'
 export { lens, identity, resolveLens, MAX_LENSES, type Lens } from './lenses/resolve.js'
 export {
   deployments,

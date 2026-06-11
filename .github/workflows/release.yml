@@ -23,7 +23,8 @@ jobs:
           node-version: 22 # Trusted Publishing needs Node >= 22.14 / npm >= 11.5.1
           cache: pnpm
           registry-url: https://registry.npmjs.org
-      - run: pnpm install --frozen-lockfile
+      # --ignore-scripts: block dependency install scripts on the publish path too.
+      - run: pnpm install --frozen-lockfile --ignore-scripts
       - run: npm install -g npm@11 # pinned major; needs npm >= 11.5.1 for OIDC publishing
       # Only the TS package needs a build artifact to publish; @efs/solidity ships
       # .sol source as-is, so the release path needs no Foundry. (CI compile-checks

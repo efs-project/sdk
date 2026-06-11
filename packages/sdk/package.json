@@ -62,7 +62,9 @@
     "build": "tsup",
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "size": "size-limit",
+    "knip": "knip"
   },
   "peerDependencies": {
     "viem": "^2"
@@ -71,10 +73,13 @@
     "viem": { "optional": false }
   },
   "devDependencies": {
-    "tsup": "^8.3.0",
-    "typescript": "^5.6.3",
-    "viem": "^2.21.0",
-    "vitest": "^2.1.0",
-    "prool": "^0.0.16"
+    "@size-limit/preset-small-lib": "12.1.0",
+    "knip": "6.16.1",
+    "prool": "0.0.16",
+    "size-limit": "12.1.0",
+    "tsup": "8.5.1",
+    "typescript": "5.9.3",
+    "viem": "2.52.2",
+    "vitest": "2.1.9"
   }
 }

@@ -26,7 +26,11 @@ jobs:
         with:
           node-version: 20
           cache: pnpm
-      - run: pnpm install --frozen-lockfile
+      # --ignore-scripts neutralizes malicious dependency postinstall/preinstall
+      # scripts — the dominant supply-chain attack on a wallet-adjacent SDK.
+      # It only suppresses *dependency* lifecycle scripts; explicit `pnpm run`
+      # pre/post hooks (e.g. the Solidity forge-std bootstrap) still run.
+      - run: pnpm install --frozen-lockfile --ignore-scripts
       - run: pnpm --filter @efs/sdk build
       # Guard the dual ESM/CJS `exports` map: attw catches type masquerading /
       # resolution bugs, publint catches malformed package metadata.
@@ -37,6 +41,12 @@ jobs:
       - run: pnpm --filter @efs/sdk exec publint
       - run: pnpm --filter @efs/sdk typecheck
       - run: pnpm --filter @efs/sdk test
+      # Bundle-size budget on the @efs/sdk ESM entry (viem external). Fails the
+      # build if the gzipped surface grows past the budget in .size-limit.json.
+      - run: pnpm --filter @efs/sdk size
+      # Dead-code / unused-dependency report. Report-only (|| true) for now — the
+      # findings are follow-ups, not a merge gate, while the API surface settles.
+      - run: pnpm --filter @efs/sdk knip || true
       - run: pnpm lint
 
   solidity:
@@ -51,9 +61,11 @@ jobs:
         with:
           node-version: 20
           cache: pnpm
-      - run: pnpm install --frozen-lockfile
+      - run: pnpm install --frozen-lockfile --ignore-scripts
       # Use the package scripts so CI and a contributor's `pnpm test` run the same
       # path; the build/test pre-hooks bootstrap forge-std (test-only, not shipped).
+      # --ignore-scripts above only suppresses *dependency* install scripts, so
+      # these explicit `pnpm run` pre/post hooks still execute.
       - run: pnpm --filter @efs/solidity build
       - run: pnpm --filter @efs/solidity test
       - run: pnpm --filter @efs/solidity fmt:check
@@ -74,5 +86,5 @@ jobs:
         with:
           node-version: 20
           cache: pnpm
-      - run: pnpm install --frozen-lockfile
+      - run: pnpm install --frozen-lockfile --ignore-scripts
       - run: pnpm changeset status --since=origin/main

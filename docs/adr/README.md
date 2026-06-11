@@ -55,3 +55,4 @@ Compact, scannable — one screen per ADR. Copy `_template.md`. The next number 
 - [ADR-0007 — Error model: viem-`BaseError`-grade typed tree](./0007-error-model.md)
 - [ADR-0008 — Public API shape, instantiation & semver policy](./0008-public-api-and-semver.md)
 - [ADR-0009 — Library-agnostic seam: viem core, ethers as an optional adapter](./0009-library-agnostic-seam.md)
+- [ADR-0010 — Off-chain fetch/verify/mirror engine](./0010-fetch-mirror-engine.md)

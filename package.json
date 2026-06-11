@@ -23,11 +23,11 @@
     "release": "pnpm --filter @efs/sdk build && changeset publish"
   },
   "devDependencies": {
-    "@arethetypeswrong/cli": "^0.18.3",
-    "@biomejs/biome": "^1.9.4",
-    "@changesets/cli": "^2.27.9",
-    "publint": "^0.2.12",
-    "turbo": "^2.3.0",
-    "typescript": "^5.6.3"
+    "@arethetypeswrong/cli": "0.18.3",
+    "@biomejs/biome": "1.9.4",
+    "@changesets/cli": "2.31.0",
+    "publint": "0.2.12",
+    "turbo": "2.9.17",
+    "typescript": "5.9.3"
   }
 }

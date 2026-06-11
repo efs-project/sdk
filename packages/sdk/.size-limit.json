@@ -1,0 +1,10 @@
+[
+  {
+    "name": "@efs/sdk ESM (gzip, viem external)",
+    "path": "dist/index.js",
+    "import": "*",
+    "ignore": ["viem"],
+    "gzip": true,
+    "limit": "8 kB"
+  }
+]
