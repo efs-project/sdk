@@ -28,7 +28,7 @@ const efs = createEfsClient({
 
 // Resolve "the file at /logo" through an identity (ENS → key-set → lens).
 // `read` returns a reference + who resolved it; `fetch` gets the bytes (verified).
-const result = await efs.fs.read('/logo', { as: identity('jamescarnley.eth') })
+const result = await efs.fs.read('/logo', { lens: identity('jamescarnley.eth') })
 if (result) {
   const file = await efs.fs.fetch(result.data)
   console.log(file.bytes, file.verification) // 'matches-author' | 'mismatch' | 'no-claim'
