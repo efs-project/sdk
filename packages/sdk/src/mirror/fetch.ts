@@ -281,9 +281,20 @@ export async function fetchVerified(
       continue
     }
 
-    // Inline data: - no network, no SSRF, just decode + verify.
+    // Inline data: - no network, no SSRF, just decode + verify. Still enforce
+    // the size cap: a giant data: URI (from untrusted metadata) must not bypass
+    // maxBytes just because no fetch is involved.
     if (resolved.inline) {
       const bytes = resolved.inline.bytes
+      const maxBytes = opts.maxBytes ?? DEFAULT_MAX_BYTES
+      if (bytes.byteLength > maxBytes) {
+        attempts.push({
+          uri,
+          scheme: resolved.scheme,
+          reason: `inline payload ${bytes.byteLength} bytes exceeds cap (${maxBytes})`,
+        })
+        continue
+      }
       const verification = statusFor(bytes, expectedHash)
       return {
         bytes,

@@ -120,10 +120,15 @@ function embeddedMappedIpv4(a: string): [number, number, number, number] | undef
  * internal names (`localhost`, `*.local`, `*.internal`).
  */
 export function checkSsrf(url: URL, opts: SsrfGuardOptions = {}): SsrfResult {
-  const host = url.hostname.toLowerCase()
+  // Strip any trailing dot(s): DNS treats `localhost.` as the same host as
+  // `localhost`, but `URL.hostname` preserves the dot, so the FQDN form would
+  // otherwise slip past the literal name/IP checks below (P1).
+  const host = url.hostname.toLowerCase().replace(/\.+$/, '')
 
   if (opts.allowPrivateHosts) return { blocked: false }
-  if (opts.allowlist?.some((h) => h.toLowerCase() === host)) return { blocked: false }
+  if (opts.allowlist?.some((h) => h.toLowerCase().replace(/\.+$/, '') === host)) {
+    return { blocked: false }
+  }
 
   // Literal IPv4.
   const v4 = parseIpv4(host)
@@ -134,7 +139,7 @@ export function checkSsrf(url: URL, opts: SsrfGuardOptions = {}): SsrfResult {
   }
 
   // Literal IPv6.
-  const v6 = normalizeIpv6(url.hostname)
+  const v6 = normalizeIpv6(host)
   if (v6) {
     const why = isBlockedIpv6(v6)
     if (why) return { blocked: true, host: v6, reason: why }

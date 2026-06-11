@@ -129,6 +129,13 @@ describe('checkSsrf - host guard', () => {
     // A public IPv4-mapped address stays allowed.
     expect(block('http://[::ffff:0808:0808]/x').blocked).toBe(false) // 8.8.8.8
   })
+  it('blocks trailing-dot FQDN forms of internal hosts', () => {
+    // DNS treats `localhost.` as `localhost`, but URL.hostname keeps the dot.
+    expect(block('http://localhost./x').blocked).toBe(true)
+    expect(block('http://metadata.google.internal./x').blocked).toBe(true)
+    expect(block('http://foo.internal./x').blocked).toBe(true)
+    expect(block('http://127.0.0.1./x').blocked).toBe(true)
+  })
   it('allows public hosts', () => {
     expect(block('https://example.com/x').blocked).toBe(false)
     expect(block('https://8.8.8.8/x').blocked).toBe(false)
@@ -174,6 +181,15 @@ describe('fetchVerified - happy paths per transport', () => {
     const res = await fetchVerified(['data:text/plain;base64,aGVsbG8='], hash, { fetchImpl })
     expect(res.verification).toBe('matches-author')
     expect(res.contentType).toBe('text/plain')
+    expect(fetchImpl).not.toHaveBeenCalled()
+  })
+
+  it('enforces maxBytes on inline data: URIs (no cap bypass)', async () => {
+    // 'hello' is 5 bytes; cap at 4 -> the inline mirror must be rejected.
+    const fetchImpl = vi.fn() as unknown as typeof fetch
+    await expect(
+      fetchVerified(['data:text/plain;base64,aGVsbG8='], undefined, { fetchImpl, maxBytes: 4 }),
+    ).rejects.toBeInstanceOf(AllMirrorsFailedError)
     expect(fetchImpl).not.toHaveBeenCalled()
   })
 })
