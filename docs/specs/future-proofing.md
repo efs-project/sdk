@@ -33,6 +33,7 @@
 - **Multicall3** (`0xcA11…CA11`) for batched point-reads ("resolve N attestations").
 - **Future:** shape the interface so **EIP-7745 verifiable logs** (Draft, Glamsterdam) can back it later — today's centralized-index pragmatism upgrades to trustless reads without an API break.
 - **Event/indexability** lives in how we populate EAS's indexed `attester`/`schema`/`refUID` topics, not custom events.
+- **Ship a reference subgraph + Envio/Ponder schema as docs** (not deps) so teams needing self-hosted/decentralized durability have a working starting point. Envio HyperIndex's wildcard indexing fits "index all EAS attestations of schema X" without enumerating addresses.
 
 ## 4. Security & clear-signing
 
@@ -42,6 +43,7 @@
 - **Deployments registry is a trust root** — beyond the bytecode/UID check: provenance-attest + sign the generated registry, verify at load, make codegen reproducible. The only path to an address is generation+verification (no hand-edited JSON bypass).
 - **Untrusted content is inert** — never execute fetched bytes, SSRF-guard mirror URLs (block private/loopback/metadata IPs), size/timeout limits, lens-scoped mirror filtering.
 - **MEV/front-running** — path claims are front-runnable; **WATCH**, warn, and push commit-reveal at the contract layer if path-ownership lands (the SDK can't fix this alone).
+- **Transaction simulation is a seam, not a dependency** — `efs.fs.preview` stays pluggable to a Tenderly/Blockaid-style simulation RPC (dry-run + asset-diff + malicious-contract scan), but bakes in **no** paid provider or API key. Simulation reflects current state and can drift at inclusion — never present "simulation passed" as a safety guarantee.
 
 ## 5. Gas & transaction lifecycle — durable shapes
 
@@ -62,7 +64,7 @@
 
 - **Passkeys (RIP-7212) + MPC/embedded wallets are already covered** by our 1271/6492 verify path — the attester is the stable wallet address; key-share rotation doesn't change it. No new work.
 - **No wallet standard does "many addresses → one identity."** Sub-accounts (ERC-7895) and session keys (ERC-7715) each get a *distinct* attester — the inverse of content attribution. So the **multi-device key-set is EFS-native**: a primary identity *attests* "these addresses are me" (the `webOfTrust` lens tier), *consuming* wallet hierarchies rather than replacing them.
-- **Design in revocation/time-bounding** — "this device key is no longer me as of block N" — so a compromised device can't retroactively poison content. No standard gives this.
+- **Design in revocation/time-bounding** — "this device key is no longer me as of block N" — so a compromised device can't retroactively poison content. No standard gives this — but build it on **EAS-native primitives** (`expirationTime` uint64, `revocable`, `refUID`) rather than inventing parallel concepts.
 - **Prefer stable smart-account addresses** over bare EOAs (EOA key loss = identity loss; smart-account recovery rotates the signer, not the address → attestations survive).
 
 ## 8. Metadata & representation
@@ -73,7 +75,17 @@
 - **Property keys: reverse-DNS** (`xyz.efs.*`) for third-party keys; a tiny reserved bare-key core (`contentType`/`contentHash`/`size`).
 - **Serve path:** ERC-5219 status/headers + **ERC-7774 ETag/`evm-events` caching**; range as a seam. **JSON-LD/schema.org as an opt-in seam**, not the baseline (overkill).
 
-## 9. Roadmap watch list (re-check ~quarterly)
+## 9. Attestation substrate & encoding (completeness sweep)
+
+The "what are we missing" sweep over attestation/registry/data standards — confirms we ride the right substrate and flags the emerging ones to track.
+
+- **Ride EAS directly — there is no Final attestation ERC.** EAS is infrastructure, not a ratified ERC; `AttestationRequestData` (recipient, `expirationTime`, `revocable`, `refUID`, `bytes data`, value) is the contract we encode against. ERC-7512 (audits), ERC-5851 (verifiable credentials), ERC-8273 (agentic actions) are all Draft and off-target. **Keep an EAS-resolution seam** so a future attestation ERC could slot in without client churn, but don't wait for one.
+- **EAS-native time/revocation** — use `expirationTime`/`revocable`/`refUID` for mirrors, transports, versioning, and key-set revocation rather than parallel concepts (ties to §7).
+- **ERC-8048 / ERC-8049** — onchain key-value metadata with indexed-key events; the **closest emerging mirror of EFS PROPERTYs**. **WATCH closely** — design properties so they're expressible through that shape. (ERC-7208 data-containers / ERC-7813 table-storage are looser parallels — lower-priority WATCH.)
+- **ERC-2098 compact signatures (64-byte)** — EAS delegated/offchain paths may hand us compact sigs; the verify/normalize seam should **accept both 64- and 65-byte forms**.
+- **`abi.encode`, never `encodePacked`** for anything hashed/signed (collision-safety); **EIP-1559 fee fields** via `feeHistory` + buffered estimate, exposed as a per-batch override seam. (Both already in [standards.md](./standards.md) AVOID/ADOPT.)
+
+## 10. Roadmap watch list (re-check ~quarterly)
 
 | Item | Timeline | Why we care |
 |---|---|---|

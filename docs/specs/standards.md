@@ -122,3 +122,7 @@ EIP-7702 wallet support · EIP-5792 capability evolution · EIP-7715 session key
 | **ERC-7683 / 7802 / EIL** interop | mixed | **WATCH/AVOID** | Abstract assets, not where data lives — won't relocate an EFS file. |
 | **ERC-7774** ETag caching (over ERC-5219) | Draft | **SEAM** | Cache on-chain content serves. |
 | **IANA media types** | RFC 6838 | **ADOPT** | `contentType` is an IANA type; the *attested* value is authoritative, never the transport's. |
+| **ERC-2098** Compact signatures | Final | **SEAM** | Accept both 64- and 65-byte sig forms in the verify/normalize path (EAS delegated/offchain may hand us compact sigs). |
+| **ERC-8048 / ERC-8049** Onchain key-value metadata | Draft | **WATCH** | Closest emerging mirror of EFS PROPERTYs (string-key/bytes-value + indexed events) — design properties expressible through it. |
+| **ERC-7512 / ERC-5851 / ERC-8273** Attestation ERCs | Draft | **WATCH** | None Final or on-target; we ride EAS directly as the substrate and keep an EAS-resolution seam. |
+| **Tenderly / Blockaid** tx simulation | de-facto | **SEAM** | `efs.fs.preview` stays pluggable to a simulation RPC; no baked provider/keys, no safety guarantee. |
