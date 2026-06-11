@@ -28,6 +28,13 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @efs/sdk build
+      # Guard the dual ESM/CJS `exports` map: attw catches type masquerading /
+      # resolution bugs, publint catches malformed package metadata.
+      # node16 profile: the package requires Node >=20 and ships an `exports`
+      # map, so legacy node10 resolution (which ignores `exports`, breaking
+      # subpath entries) is an explicit non-target.
+      - run: pnpm --filter @efs/sdk exec attw --pack --profile node16
+      - run: pnpm --filter @efs/sdk exec publint
       - run: pnpm --filter @efs/sdk typecheck
       - run: pnpm --filter @efs/sdk test
       - run: pnpm lint

@@ -52,5 +52,6 @@ Compact, scannable — one screen per ADR. Copy `_template.md`. The next number 
 - [ADR-0004 — Publish via npm Trusted Publishing (OIDC), not a stored token](./0004-publish-via-oidc-trusted-publishing.md)
 - [ADR-0005 — Per-chain deployments registry; the SDK is a client, not a deployer](./0005-deployments-registry-not-a-deployer.md)
 - [ADR-0006 — `contentHash` is a bare SHA-256 digest](./0006-content-hash-bare-sha256.md)
-
-_Recommended next: ADR-0007 error model · ADR-0008 public API surface & semver policy (write when the code lands)._
+- [ADR-0007 — Error model: viem-`BaseError`-grade typed tree](./0007-error-model.md)
+- [ADR-0008 — Public API shape, instantiation & semver policy](./0008-public-api-and-semver.md)
+- [ADR-0009 — Library-agnostic seam: viem core, ethers as an optional adapter](./0009-library-agnostic-seam.md)

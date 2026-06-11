@@ -9,10 +9,12 @@ dist/
 # Turbo
 .turbo/
 
-# Foundry (packages/solidity)
+# Foundry (packages/solidity) — build artifacts, never shipped or tracked
 out/
 cache/
 broadcast/
+packages/solidity/out/
+packages/solidity/cache/
 packages/solidity/lib/
 
 # Env / secrets

@@ -7,7 +7,7 @@
   "sideEffects": false,
   "repository": {
     "type": "git",
-    "url": "https://github.com/efs-project/sdk.git",
+    "url": "git+https://github.com/efs-project/sdk.git",
     "directory": "packages/sdk"
   },
   "files": ["dist"],
@@ -17,9 +17,44 @@
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js",
-      "require": "./dist/index.cjs"
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    },
+    "./eas": {
+      "import": {
+        "types": "./dist/eas/index.d.ts",
+        "default": "./dist/eas/index.js"
+      },
+      "require": {
+        "types": "./dist/eas/index.d.cts",
+        "default": "./dist/eas/index.cjs"
+      }
+    },
+    "./lenses": {
+      "import": {
+        "types": "./dist/lenses/index.d.ts",
+        "default": "./dist/lenses/index.js"
+      },
+      "require": {
+        "types": "./dist/lenses/index.d.cts",
+        "default": "./dist/lenses/index.cjs"
+      }
+    },
+    "./chain": {
+      "import": {
+        "types": "./dist/chain/index.d.ts",
+        "default": "./dist/chain/index.js"
+      },
+      "require": {
+        "types": "./dist/chain/index.d.cts",
+        "default": "./dist/chain/index.cjs"
+      }
     },
     "./package.json": "./package.json"
   },

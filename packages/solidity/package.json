@@ -5,11 +5,15 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/efs-project/sdk.git",
+    "url": "git+https://github.com/efs-project/sdk.git",
     "directory": "packages/solidity"
   },
   "files": ["src/**/*.sol", "README.md"],
   "publishConfig": { "access": "public", "provenance": true },
+  "exports": {
+    "./contracts/*": "./src/*.sol",
+    "./package.json": "./package.json"
+  },
   "keywords": ["ethereum", "efs", "eas", "solidity", "filesystem"],
   "homepage": "https://github.com/efs-project/sdk/tree/main/packages/solidity",
   "scripts": {
