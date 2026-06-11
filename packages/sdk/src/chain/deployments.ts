@@ -60,13 +60,19 @@ export function resolveDeployment(chainId: number, override?: DeploymentsMap): E
 }
 
 /**
- * Construct-time integrity gate (ADR-0005 / review S1). The view/router addresses
- * resolve every read, so a wrong, typo'd, or non-contract address must be rejected
- * loudly — not silently resolve to nothing. Verifies each EFS contract has deployed
- * bytecode on the target chain.
+ * Construct-time sanity gate (ADR-0005 / review S1). Verifies each EFS contract
+ * address has *some* bytecode on the target chain — this catches a wrong/typo'd
+ * or non-contract address, nothing more. It does NOT authenticate that the code
+ * is the *right* EFS contract.
  *
- * TODO(build): also assert `deployment.schemas` match the indexer's on-chain UID
- * getters once the eas read layer lands (catches a UID/registry mismatch).
+ * The real trust gate is the **schema-UID match**: assert `deployment.schemas`
+ * equal the indexer's on-chain UID getters (a malicious/wrong indexer can't fake
+ * the frozen UIDs). That lands with the read layer (TODO below) and is what makes
+ * an overridden `deployments` map safe to trust. Until then, treat a passing
+ * bytecode check as "addresses are contracts," not "addresses are EFS."
+ *
+ * TODO(build): add the schema-UID assertion once the eas read layer can call the
+ * indexer's UID getters.
  */
 export async function assertDeploymentIntegrity(
   publicClient: PublicClient,

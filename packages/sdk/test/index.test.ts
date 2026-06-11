@@ -7,11 +7,15 @@ const publicClient = createPublicClient({ chain: sepolia, transport: http() })
 const addr = (n: number) => `0x${n.toString(16).padStart(40, '0')}` as Address
 
 describe('namespaced client (Decision F)', () => {
-  it('builds a client; unbuilt fs verbs throw NotImplemented', () => {
+  it('builds a client; unbuilt fs verbs reject with NotImplemented (async contract)', async () => {
     const efs = createEfsClient({ publicClient })
-    expect(() => efs.fs.write('/x', new Uint8Array())).toThrow(NotImplemented)
-    expect(() => efs.fs.read('/x')).toThrow(NotImplemented)
-    expect(() => efs.fs.list('/x')).toThrow(NotImplemented)
+    await expect(efs.fs.write('/x', new Uint8Array())).rejects.toThrow(NotImplemented)
+    await expect(efs.fs.read('/x')).rejects.toThrow(NotImplemented)
+    await expect(
+      (async () => {
+        for await (const _ of efs.fs.list('/x')) break
+      })(),
+    ).rejects.toThrow(NotImplemented)
   })
 
   it('exposes lens helpers under efs.lenses', () => {

@@ -88,22 +88,26 @@ export function createEfsClient(config: EfsClientConfig): EfsClient {
 
   return {
     fs: {
-      write: (_path, _content, _opts) => {
+      // Stubs reject/throw-on-iterate (not sync-throw) so the async contract is
+      // locked now — callers' `.catch()` / `for await` behave as they will post-build.
+      write: async (_path, _content, _opts) => {
         throw new NotImplemented('efs.fs.write()')
       },
-      read: (_path, _opts) => {
+      read: async (_path, _opts) => {
         throw new NotImplemented('efs.fs.read()')
       },
-      fetch: (_ref, _opts) => {
+      fetch: async (_ref, _opts) => {
         throw new NotImplemented('efs.fs.fetch()')
       },
-      stat: (_path, _opts) => {
+      stat: async (_path, _opts) => {
         throw new NotImplemented('efs.fs.stat()')
       },
-      list: (_path, _opts) => {
-        throw new NotImplemented('efs.fs.list()')
-      },
-      preview: (_path, _content) => {
+      list: (_path, _opts) => ({
+        [Symbol.asyncIterator]() {
+          throw new NotImplemented('efs.fs.list()')
+        },
+      }),
+      preview: async (_path, _content) => {
         throw new NotImplemented('efs.fs.preview()')
       },
     },
