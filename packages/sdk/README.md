@@ -14,21 +14,31 @@ npm i @efs/sdk viem
 
 ## Quickstart (target API)
 
+The client is resource-namespaced (`efs.fs.*` for files, `efs.lenses.*`, `efs.eas.*`, `efs.raw.*`):
+
 ```ts
 import { createEfsClient, identity } from '@efs/sdk'
-import { createPublicClient, createWalletClient, http } from 'viem'
+import { sepolia } from 'viem/chains'
+import { createPublicClient, http } from 'viem'
 
 const efs = createEfsClient({
-  publicClient: createPublicClient({ transport: http() }),
+  publicClient: createPublicClient({ chain: sepolia, transport: http() }),
   walletClient, // required for writes
 })
 
-// Read "the file at /logo", resolved through an identity (ENS → key-set → lens).
-const file = await efs.read('/logo', { as: identity('jamescarnley.eth') })
+// Resolve "the file at /logo" through an identity (ENS → key-set → lens).
+// `read` returns a reference + who resolved it; `fetch` gets the bytes (verified).
+const result = await efs.fs.read('/logo', { as: identity('jamescarnley.eth') })
+if (result) {
+  const file = await efs.fs.fetch(result.data)
+  console.log(file.bytes, file.verification) // 'matches-author' | 'mismatch' | 'no-claim'
+}
 
 // Write a file (batched multi-attestation under the hood).
-await efs.pinFile('/notes/hello.txt', new TextEncoder().encode('gm'))
+await efs.fs.write('/notes/hello.txt', new TextEncoder().encode('gm'))
 ```
+
+> **Status:** `efs.lenses`, `efs.eas`, content hashing, and the deployments registry are implemented; the `efs.fs.*` verbs above are the target shape and currently throw `NotImplemented`.
 
 ## Design notes that shape this API
 
