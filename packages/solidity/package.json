@@ -11,7 +11,7 @@
   "files": ["src/**/*.sol", "README.md"],
   "publishConfig": { "access": "public", "provenance": true },
   "exports": {
-    "./contracts/*": "./src/*.sol",
+    "./src/*.sol": "./src/*.sol",
     "./package.json": "./package.json"
   },
   "keywords": ["ethereum", "efs", "eas", "solidity", "filesystem"],
