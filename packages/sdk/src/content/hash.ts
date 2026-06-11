@@ -27,7 +27,10 @@ export type VerificationStatus =
  * `resolvedBy`) — verification is trust-relative, not absolute integrity.
  * `undefined` claimedHash → 'no-claim' (caller must treat as unverifiable).
  */
-export function verifyContent(bytes: Uint8Array, claimedHash: string | undefined): VerificationStatus {
+export function verifyContent(
+  bytes: Uint8Array,
+  claimedHash: string | undefined,
+): VerificationStatus {
   if (claimedHash === undefined) return 'no-claim'
   const claim = claimedHash.toLowerCase()
   // A malformed claim (0x-prefixed, padded, wrong length) cannot be trusted → mismatch.
