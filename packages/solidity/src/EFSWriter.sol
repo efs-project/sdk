@@ -7,12 +7,10 @@ import {EFSLib} from "./EFSLib.sol";
 /// @notice Inheritable base contract — the happy path for adding EFS to your contract.
 ///         Inherit it and call the wrapped helpers; because the base runs in your
 ///         contract's context, your contract stays the EAS attester (ADR-0003).
-/// @dev    Status: scaffold. Methods delegate to {EFSLib}; bodies are stubs until the
-///         build lands. EFS-level events/errors live here (EAS events are UID-keyed,
-///         not domain-keyed, so domain consumers need these).
+/// @dev    Status: scaffold. Methods delegate to {EFSLib}, whose bodies revert until the
+///         build lands. EFS-level events/errors live here (EAS events are UID-keyed, not
+///         domain-keyed, so domain consumers need these).
 abstract contract EFSWriter {
-    using EFSLib for *;
-
     /// @notice Emitted when this contract pins a file at a path.
     event EfsFilePinned(string path, bytes32 indexed dataUID, bytes32 pinUID);
 
@@ -21,9 +19,8 @@ abstract contract EFSWriter {
         return EFSLib.read(path);
     }
 
-    /// @notice Pin a file at `path`; emits {EfsFilePinned}.
+    /// @notice Pin a file at `path`. Once implemented, emits {EfsFilePinned}.
     function _efsPinFile(string memory path, bytes32 dataUID) internal returns (bytes32 pinUID) {
-        pinUID = EFSLib.pinFile(path, dataUID);
-        emit EfsFilePinned(path, dataUID, pinUID);
+        return EFSLib.pinFile(path, dataUID);
     }
 }
