@@ -76,39 +76,88 @@ function normalizeIpv6(host: string): string | undefined {
   return (addr ?? '').toLowerCase()
 }
 
-/** A reason string for IPv6 addresses that must never be fetched server-side. */
-function isBlockedIpv6(addr: string): string | undefined {
-  const a = addr.toLowerCase()
-  if (a === '::1' || a === '0:0:0:0:0:0:0:1') return 'loopback (::1)'
-  if (a === '::' || a === '0:0:0:0:0:0:0:0') return 'unspecified (::)'
-  if (a.startsWith('fe8') || a.startsWith('fe9') || a.startsWith('fea') || a.startsWith('feb'))
-    return 'link-local (fe80::/10)'
-  if (a.startsWith('fc') || a.startsWith('fd')) return 'unique-local (fc00::/7)'
-  // IPv4-mapped (::ffff:a.b.c.d) - extract and re-check as IPv4. Node
-  // canonicalizes the dotted tail to hex (::ffff:127.0.0.1 -> ::ffff:7f00:1),
-  // so both forms must be recognized or the guard is trivially bypassed.
-  const v4 = embeddedMappedIpv4(a)
-  if (v4) {
-    const why = isBlockedIpv4(v4[0], v4[1], v4[2], v4[3])
-    if (why) return `IPv4-mapped ${why}`
+/**
+ * Expand an IPv6 textual address (lowercased, no brackets/zone) to its 16 bytes.
+ * Handles `::` compression and a trailing embedded IPv4 (`::ffff:1.2.3.4`).
+ * Returns `undefined` if it isn't a parseable IPv6 literal. Working at the byte
+ * level (rather than string-prefix matching) collapses every textual variant —
+ * compressed, expanded, mixed-case, leading-zero — to one canonical check.
+ */
+function expandIpv6(addr: string): number[] | undefined {
+  if (!addr.includes(':')) return undefined
+  let s = addr
+  // A trailing embedded IPv4 (`…:1.2.3.4`) becomes two hextets.
+  const lastColon = s.lastIndexOf(':')
+  const tail = s.slice(lastColon + 1)
+  if (tail.includes('.')) {
+    const v4 = parseIpv4(tail)
+    if (!v4) return undefined
+    const hi = ((v4[0] << 8) | v4[1]).toString(16)
+    const lo = ((v4[2] << 8) | v4[3]).toString(16)
+    s = `${s.slice(0, lastColon + 1)}${hi}:${lo}`
   }
-  return undefined
+  const halves = s.split('::')
+  if (halves.length > 2) return undefined
+  const head = halves[0] ? halves[0].split(':') : []
+  const tailGroups = halves.length === 2 ? (halves[1] ? halves[1].split(':') : []) : null
+  let groups: string[]
+  if (tailGroups === null) {
+    groups = head // no `::` — must be a full 8 groups
+  } else {
+    const missing = 8 - head.length - tailGroups.length
+    if (missing < 0) return undefined
+    groups = [...head, ...Array<string>(missing).fill('0'), ...tailGroups]
+  }
+  if (groups.length !== 8) return undefined
+  const bytes: number[] = []
+  for (const g of groups) {
+    if (!/^[0-9a-f]{1,4}$/.test(g)) return undefined
+    const n = Number.parseInt(g, 16)
+    bytes.push((n >> 8) & 0xff, n & 0xff)
+  }
+  return bytes
 }
 
 /**
- * Extract the embedded IPv4 of an IPv4-mapped IPv6 address (`::ffff:…`),
- * accepting both the dotted tail (`::ffff:127.0.0.1`) and the canonical
- * two-hextet hex tail Node emits (`::ffff:7f00:1`). Returns the four octets,
- * or `undefined` if `a` isn't an IPv4-mapped address.
+ * A reason string for IPv6 addresses that must never be fetched server-side.
+ * Beyond the literal scoped ranges, IPv6 can *embed* an IPv4 via several
+ * transition prefixes (IPv4-mapped/-compatible/-translated, NAT64, 6to4) — each
+ * a known SSRF bypass if only `::ffff:` is recognized — so we expand to bytes,
+ * pull the embedded IPv4 out of every such prefix, and re-check it as IPv4.
  */
-function embeddedMappedIpv4(a: string): [number, number, number, number] | undefined {
-  const dotted = /^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/.exec(a)
-  if (dotted?.[1]) return parseIpv4(dotted[1])
-  const hex = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(a)
-  if (hex?.[1] && hex[2]) {
-    const hi = Number.parseInt(hex[1], 16)
-    const lo = Number.parseInt(hex[2], 16)
-    return [(hi >> 8) & 0xff, hi & 0xff, (lo >> 8) & 0xff, lo & 0xff]
+function isBlockedIpv6(addr: string): string | undefined {
+  const b = expandIpv6(addr.toLowerCase())
+  if (!b) {
+    if (addr === '::1') return 'loopback (::1)'
+    if (addr === '::') return 'unspecified (::)'
+    return undefined
+  }
+  const at = (i: number) => b[i] ?? 0 // b is length 16; coalesce keeps the type clean
+  const isZero = (lo: number, hi: number) => b.slice(lo, hi).every((x) => x === 0)
+
+  if (isZero(0, 15) && at(15) === 1) return 'loopback (::1)'
+  if (isZero(0, 16)) return 'unspecified (::)'
+  if (at(0) === 0xfe && (at(1) & 0xc0) === 0x80) return 'link-local (fe80::/10)'
+  if ((at(0) & 0xfe) === 0xfc) return 'unique-local (fc00::/7)'
+  if (at(0) === 0xfe && (at(1) & 0xc0) === 0xc0) return 'site-local (fec0::/10, deprecated)'
+  if (at(0) === 0x20 && at(1) === 0x01 && at(2) === 0x00 && at(3) === 0x00)
+    return 'Teredo (2001::/32)'
+
+  // Transition prefixes that embed an IPv4 in their low bits — extract + recheck.
+  let v4: [number, number, number, number] | undefined
+  const low = (): [number, number, number, number] => [at(12), at(13), at(14), at(15)]
+  if (isZero(0, 10) && at(10) === 0xff && at(11) === 0xff)
+    v4 = low() // ::ffff:0:0/96 IPv4-mapped
+  else if (isZero(0, 12))
+    v4 = low() // ::/96 IPv4-compatible (:: and ::1 handled above)
+  else if (at(0) === 0x00 && at(1) === 0x64 && at(2) === 0xff && at(3) === 0x9b && isZero(4, 12))
+    v4 = low() // 64:ff9b::/96 NAT64 well-known
+  else if (isZero(0, 8) && at(8) === 0xff && at(9) === 0xff && isZero(10, 12))
+    v4 = low() // ::ffff:0:0 IPv4-translated form
+  else if (at(0) === 0x20 && at(1) === 0x02) v4 = [at(2), at(3), at(4), at(5)] // 2002::/16 6to4 (embedded v4 in bytes 2-5)
+  if (v4) {
+    const why = isBlockedIpv4(v4[0], v4[1], v4[2], v4[3])
+    if (why) return `IPv6-embedded IPv4 ${why}`
   }
   return undefined
 }

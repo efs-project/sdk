@@ -178,6 +178,15 @@ async function finishResponse(
   maxBytes: number,
   controller: AbortController,
 ): Promise<{ bytes: Uint8Array; contentType?: string }> {
+  // Refuse compressed responses BEFORE reading the body. undici auto-inflates
+  // gzip/br/zstd, so a tiny compressed body can balloon past maxBytes during the
+  // read (and chained encodings were unbounded pre-undici-7.18.2, CVE-2026-22036).
+  // Mirror bytes are raw and hash-verified, so transport compression is never
+  // wanted; rejecting it here means the decompression stream is never pumped.
+  const encoding = res.headers.get('content-encoding')
+  if (encoding && encoding.toLowerCase() !== 'identity') {
+    throw new Error(`refusing compressed response (content-encoding: ${encoding})`)
+  }
   const bytes = await readCapped(res, maxBytes, controller)
   // Content-Type is informational ONLY (nosniff): captured, never acted on.
   const declaredType = res.headers.get('content-type') ?? undefined
@@ -210,14 +219,14 @@ async function fetchOne(
       const res = await doFetch(current.href, {
         signal: controller.signal,
         redirect: 'manual',
-        headers: { accept: 'application/octet-stream, */*' },
+        headers: { accept: 'application/octet-stream, */*', 'accept-encoding': 'identity' },
       })
 
       if (res.type === 'opaqueredirect') {
         const followed = await doFetch(current.href, {
           signal: controller.signal,
           redirect: 'follow',
-          headers: { accept: 'application/octet-stream, */*' },
+          headers: { accept: 'application/octet-stream, */*', 'accept-encoding': 'identity' },
         })
         if (!followed.ok) throw new Error(`HTTP ${followed.status} ${followed.statusText}`)
         return finishResponse(followed, maxBytes, controller)
@@ -275,7 +284,7 @@ export async function fetchVerified(
     const uri = mirrorUri(mirror)
     let resolved: ResolvedTransport
     try {
-      resolved = resolveTransport(uri)
+      resolved = resolveTransport(uri, { maxBytes: opts.maxBytes ?? DEFAULT_MAX_BYTES })
     } catch (err) {
       attempts.push({ uri, scheme: 'https', reason: errMsg(err) })
       continue

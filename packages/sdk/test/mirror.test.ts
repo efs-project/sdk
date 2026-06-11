@@ -129,6 +129,28 @@ describe('checkSsrf - host guard', () => {
     // A public IPv4-mapped address stays allowed.
     expect(block('http://[::ffff:0808:0808]/x').blocked).toBe(false) // 8.8.8.8
   })
+  it('relies on URL normalization for alternate IPv4 encodings (lock-in)', () => {
+    // Node's WHATWG URL parser canonicalizes these to dotted-quad BEFORE the
+    // guard runs. These assertions lock that assumption in — if a future parser
+    // stopped normalizing, the guard would silently weaken and this would fail.
+    expect(block('http://0177.0.0.1/x').blocked).toBe(true) // octal -> 127.0.0.1
+    expect(block('http://2130706433/x').blocked).toBe(true) // dword -> 127.0.0.1
+    expect(block('http://0x7f000001/x').blocked).toBe(true) // hex -> 127.0.0.1
+    expect(block('http://127.1/x').blocked).toBe(true) // part-collapse -> 127.0.0.1
+    expect(block('http://2852039166/x').blocked).toBe(true) // dword -> 169.254.169.254
+  })
+  it('blocks IPv6 transition forms that embed a private/loopback IPv4', () => {
+    expect(block('http://[::127.0.0.1]/x').blocked).toBe(true) // IPv4-compatible
+    expect(block('http://[::ffff:0:127.0.0.1]/x').blocked).toBe(true) // IPv4-translated
+    expect(block('http://[64:ff9b::127.0.0.1]/x').blocked).toBe(true) // NAT64 -> loopback
+    expect(block('http://[64:ff9b::a9fe:a9fe]/x').blocked).toBe(true) // NAT64 -> metadata
+    expect(block('http://[2002:7f00:1::]/x').blocked).toBe(true) // 6to4 -> 127.0.0.1
+    expect(block('http://[fec0::1]/x').blocked).toBe(true) // site-local (deprecated)
+    expect(block('http://[2001::1]/x').blocked).toBe(true) // Teredo
+    // Public IPv6 and a public IPv4-mapped address stay allowed.
+    expect(block('https://[2606:4700:4700::1111]/x').blocked).toBe(false) // Cloudflare DNS
+    expect(block('http://[::ffff:8.8.8.8]/x').blocked).toBe(false)
+  })
   it('blocks trailing-dot FQDN forms of internal hosts', () => {
     // DNS treats `localhost.` as `localhost`, but URL.hostname keeps the dot.
     expect(block('http://localhost./x').blocked).toBe(true)
@@ -182,6 +204,15 @@ describe('fetchVerified - happy paths per transport', () => {
     expect(res.verification).toBe('matches-author')
     expect(res.contentType).toBe('text/plain')
     expect(fetchImpl).not.toHaveBeenCalled()
+  })
+
+  it('refuses a compressed response before reading the body (decompression bomb)', async () => {
+    const fetchImpl = vi.fn(async () =>
+      mockResponse(enc('x'), { headers: { 'content-encoding': 'gzip' } }),
+    ) as unknown as typeof fetch
+    await expect(
+      fetchVerified(['https://mirror.example/blob'], undefined, { fetchImpl }),
+    ).rejects.toBeInstanceOf(AllMirrorsFailedError)
   })
 
   it('enforces maxBytes on inline data: URIs (no cap bypass)', async () => {

@@ -111,7 +111,7 @@ function trimGateway(g: string): string {
  * {@link TransportNotImplementedError} for recognized-but-unresolvable ones
  * (`web3://`).
  */
-export function resolveTransport(uri: string): ResolvedTransport {
+export function resolveTransport(uri: string, opts: { maxBytes?: number } = {}): ResolvedTransport {
   const scheme = SCHEME_RE.exec(uri)?.[1]?.toLowerCase()
   if (!scheme) {
     throw new UnsupportedUriError(uri, 'no URI scheme')
@@ -143,7 +143,7 @@ export function resolveTransport(uri: string): ResolvedTransport {
       return resolveArweave(uri)
 
     case 'data':
-      return resolveData(uri)
+      return resolveData(uri, opts.maxBytes)
 
     case 'magnet':
       // Parse-only: BitTorrent has no synchronous HTTP resolution path here.
@@ -226,7 +226,7 @@ function resolveArweave(uri: string): ResolvedTransport {
  * `data:[<mediatype>][;base64],<data>` (RFC 2397) to inline decoded bytes.
  * No network. The media type is captured for information only.
  */
-function resolveData(uri: string): ResolvedTransport {
+function resolveData(uri: string, maxBytes?: number): ResolvedTransport {
   const comma = uri.indexOf(',')
   if (comma === -1) {
     throw new UnsupportedUriError(uri, 'malformed data: URI (no comma)')
@@ -236,6 +236,19 @@ function resolveData(uri: string): ResolvedTransport {
   const isBase64 = /;base64$/i.test(meta)
   const mediaType = (isBase64 ? meta.replace(/;base64$/i, '') : meta).trim()
   const contentType = mediaType.length > 0 ? mediaType : undefined
+
+  // Reject by *encoded* length before decoding, so an oversized data: URI from
+  // untrusted metadata can't force a huge allocation (the decode is the bomb).
+  // base64 decodes to ~len*3/4 bytes; the text path is a safe over-approximation.
+  if (maxBytes !== undefined) {
+    const estimated = isBase64 ? Math.floor((dataPart.length * 3) / 4) : dataPart.length
+    if (estimated > maxBytes) {
+      throw new UnsupportedUriError(
+        uri,
+        `inline payload exceeds maxBytes (~${estimated} > ${maxBytes})`,
+      )
+    }
+  }
 
   let bytes: Uint8Array
   if (isBase64) {
