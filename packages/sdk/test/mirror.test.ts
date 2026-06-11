@@ -72,6 +72,9 @@ describe('resolveTransport - URI parsing (TRANSPORT allowlist)', () => {
     expect(() => resolveTransport(`ipfs://${cid}/../admin`).httpUrls()).toThrow()
     expect(() => resolveTransport(`ipfs://${cid}/%2e%2e/admin`).httpUrls()).toThrow()
     expect(() => resolveTransport('ar://txid123/../../admin').httpUrls()).toThrow()
+    // Sibling whose name shares the CID prefix: /ipfs/bafyadmin must NOT pass a
+    // namespace check for /ipfs/bafy (needs a `/` boundary, not a raw prefix).
+    expect(() => resolveTransport('ipfs://bafy/../bafyadmin').httpUrls()).toThrow()
     // A CID/txid that carries non-alphanumeric smuggling chars is rejected at parse.
     expect(() => resolveTransport('ipfs://bafy%2f..%2fadmin')).toThrow()
   })

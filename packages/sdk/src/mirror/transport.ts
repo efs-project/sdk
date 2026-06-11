@@ -118,7 +118,9 @@ function buildGatewayUrl(gateway: string, nsSegments: string, subpath: string, u
   const basePath = gw.pathname.endsWith('/') ? gw.pathname.slice(0, -1) : gw.pathname
   const nsPath = `${basePath}/${nsSegments}`
   const u = new URL(`${nsPath}${subpath}`, gw.origin)
-  if (!u.pathname.startsWith(nsPath)) {
+  // Require an exact match or a `/` boundary — a bare prefix check would let
+  // `../<cid>admin` pass (`/ipfs/bafyadmin` startsWith `/ipfs/bafy`).
+  if (u.pathname !== nsPath && !u.pathname.startsWith(`${nsPath}/`)) {
     throw new UnsupportedUriError(uri, 'subpath escapes the content-address namespace')
   }
   return u
