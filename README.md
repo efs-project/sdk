@@ -2,7 +2,7 @@
 
 The developer SDK for the **Ethereum File System (EFS)** — an on-chain filesystem built on [EAS](https://attest.org) attestations.
 
-> **Status: scaffold.** Repo structure, toolchain, and public API shapes are in place; implementations land next. Architecture: [`planning/Designs/sdk-architecture.md`](https://github.com/efs-project/planning). Decisions: [`docs/adr/`](./docs/adr).
+> **Status: scaffold.** Repo structure, toolchain, and public API shapes are in place; implementations land next. How it works: [`docs/specs/overview.md`](./docs/specs/overview.md). Decisions: [`docs/adr/`](./docs/adr). (Cross-cutting design rationale lives in the EFS planning vault, internal.)
 
 ## Two packages, two audiences
 

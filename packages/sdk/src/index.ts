@@ -11,7 +11,8 @@ import type { Address, PublicClient, WalletClient } from 'viem'
 
 // ── Errors ───────────────────────────────────────────────────────────────────
 // Discriminated error base so external callers catch typed errors, never raw RPC
-// strings (ADR-0004, pending). Mirrors viem's BaseError ergonomics.
+// strings (error-model ADR pending — see docs/adr "Recommended next"). Mirrors
+// viem's BaseError ergonomics.
 
 export class EfsError extends Error {
   override name = 'EfsError'

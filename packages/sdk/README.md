@@ -2,7 +2,7 @@
 
 TypeScript SDK for the **Ethereum File System (EFS)** — read and write an on-chain filesystem built on EAS attestations.
 
-> **Status: scaffold.** The public surface is shaped; method bodies are stubs until the build lands. See [`planning/Designs/sdk-architecture.md`](https://github.com/efs-project/planning) for the design and [`docs/adr/`](../../docs/adr) for decisions.
+> **Status: scaffold.** The public surface is shaped; method bodies are stubs until the build lands. See [`docs/specs/overview.md`](../../docs/specs/overview.md) for how it works and [`docs/adr/`](../../docs/adr) for decisions.
 
 ## Install
 
