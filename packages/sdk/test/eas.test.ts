@@ -2,6 +2,8 @@ import { type Hex, decodeAbiParameters, encodeAbiParameters, encodePacked, kecca
 import { describe, expect, it } from 'vitest'
 import {
   SchemaEncoder,
+  buildAttest,
+  buildMultiAttest,
   computeAttestationUID,
   parseSchema,
   verifyAttestationUID,
@@ -170,5 +172,30 @@ describe('SchemaEncoder.decodeData parity with viem', () => {
     const data = encodeAbiParameters(params, ['x', uid])
     const enc = new SchemaEncoder('string name, bytes32 schemaUID')
     expect(enc.decodeData(data)).toEqual([...decodeAbiParameters(params, data)])
+  })
+})
+
+describe('attest builders forward resolver value (msg.value)', () => {
+  const EAS = '0x0000000000000000000000000000000000000eA5' as const
+  const entry = (value?: bigint) => ({
+    recipient: ZERO_ADDR,
+    expirationTime: 0n,
+    revocable: true,
+    refUID: ZERO_UID,
+    data: '0x' as Hex,
+    ...(value === undefined ? {} : { value }),
+  })
+
+  it('buildAttest forwards data.value as the tx value (0n by default)', () => {
+    expect(buildAttest(EAS, { schema: ZERO_UID, data: entry() }).value).toBe(0n)
+    expect(buildAttest(EAS, { schema: ZERO_UID, data: entry(5n) }).value).toBe(5n)
+  })
+
+  it('buildMultiAttest sums every entry value across requests', () => {
+    const call = buildMultiAttest(EAS, [
+      { schema: ZERO_UID, data: [entry(2n), entry(3n)] },
+      { schema: ZERO_UID, data: [entry(), entry(4n)] },
+    ])
+    expect(call.value).toBe(9n)
   })
 })

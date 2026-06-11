@@ -70,8 +70,10 @@ function normalizeData(d: AttestationRequestData) {
 
 /**
  * The shape consumed by viem's `writeContract` / `simulateContract`: an
- * `address` plus the matched `abi`, `functionName`, and `args`. Callers add
- * `account`, `chain`, and any `value`/gas overrides at the call site.
+ * `address` plus the matched `abi`, `functionName`, `args`, and the transaction
+ * `value`. `attest`/`multiAttest` are payable — `msg.value` must cover the sum of
+ * the per-attestation resolver `value`s — so the builder computes and forwards it
+ * (0n when no resolver value is set). Callers add `account`/`chain`/gas overrides.
  */
 export interface ContractCall<TFunctionName extends string, TArgs> {
   /** The EAS contract address to call. */
@@ -82,28 +84,34 @@ export interface ContractCall<TFunctionName extends string, TArgs> {
   functionName: TFunctionName
   /** The positional argument tuple. */
   args: TArgs
+  /** `msg.value` = sum of the per-attestation resolver `value`s (`0n` if none). */
+  value: bigint
 }
 
 /**
  * Build the `writeContract` args for a single `attest` call. Pure: returns the
- * request, executes nothing.
+ * request, executes nothing. `value` forwards the resolver value so a payable
+ * resolver is funded when spread into `writeContract`.
  */
 export function buildAttest(
   easAddress: Address,
   request: AttestationRequest,
 ): ContractCall<'attest', readonly [{ schema: Hex; data: ReturnType<typeof normalizeData> }]> {
+  const data = normalizeData(request.data)
   return {
     address: easAddress,
     abi: easAbi,
     functionName: 'attest',
-    args: [{ schema: request.schema, data: normalizeData(request.data) }] as const,
+    args: [{ schema: request.schema, data }] as const,
+    value: data.value,
   }
 }
 
 /**
  * Build the `writeContract` args for a `multiAttest` call. Requests should be
  * grouped by distinct schema for EAS's batching optimization (IEAS.sol:162-163).
- * Pure: returns the request, executes nothing.
+ * Pure: returns the request, executes nothing. `value` is the sum of every
+ * entry's resolver value across all requests (`msg.value` must cover the total).
  */
 export function buildMultiAttest(
   easAddress: Address,
@@ -116,10 +124,15 @@ export function buildMultiAttest(
     schema: r.schema,
     data: r.data.map(normalizeData),
   }))
+  const value = multiRequests.reduce(
+    (sum, r) => r.data.reduce((s, d) => s + d.value, sum),
+    ZERO_VALUE,
+  )
   return {
     address: easAddress,
     abi: easAbi,
     functionName: 'multiAttest',
     args: [multiRequests] as const,
+    value,
   }
 }
