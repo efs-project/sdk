@@ -207,11 +207,21 @@ export class RpcError extends EfsError {
   }
 }
 
-/** Pull a numeric EIP-1193/1474 error code off an arbitrary error-ish value.
- * viem's `ProviderRpcError`/`RpcError` carry `.code`; raw EIP-1193 errors do too. */
+/** Pull a numeric EIP-1193/1474 error code off an error or ANY error in its
+ * `cause` chain. viem wraps provider errors (e.g. a `UserRejectedRequestError`
+ * carrying `4001`) under contract/transaction errors, so the code is often on a
+ * nested cause, not the outer error — walk the chain or wrapped failures fall
+ * through to a generic `EfsError`. Cycle-guarded. */
 function numericCode(err: unknown): number | undefined {
-  const code = (err as { code?: unknown } | null | undefined)?.code
-  return typeof code === 'number' ? code : undefined
+  const seen = new Set<unknown>()
+  let cur: unknown = err
+  while (cur != null && !seen.has(cur)) {
+    seen.add(cur)
+    const code = (cur as { code?: unknown }).code
+    if (typeof code === 'number') return code
+    cur = (cur as { cause?: unknown }).cause
+  }
+  return undefined
 }
 
 /**

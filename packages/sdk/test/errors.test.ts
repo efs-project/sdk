@@ -110,6 +110,18 @@ describe('classifyError (ADR-0007 classifier)', () => {
     expect(out.cause).toBe(plain)
   })
 
+  it('finds an EIP-1193 code on a nested cause (wrapped wallet rejection)', () => {
+    // viem wraps a UserRejectedRequestError (4001) under a contract/tx error;
+    // the code is on the cause, not the outer error.
+    const inner = Object.assign(new Error('User rejected the request.'), { code: 4001 })
+    const wrapped = Object.assign(new Error('execution failed'), { cause: inner })
+    expect(classifyError(wrapped).code).toBe('UserRejected')
+    // A nested JSON-RPC code resolves too.
+    const rpcInner = Object.assign(new Error('rpc'), { code: -32000 })
+    const rpcWrapped = Object.assign(new Error('outer'), { cause: rpcInner })
+    expect(classifyError(rpcWrapped).code).toBe('RpcError')
+  })
+
   it('never throws on exotic inputs and always returns an EfsError', () => {
     for (const input of [undefined, null, 42, 'a string', {}, Symbol('s')]) {
       const out = classifyError(input)

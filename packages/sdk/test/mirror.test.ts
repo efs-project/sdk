@@ -237,6 +237,19 @@ describe('fetchVerified - happy paths per transport', () => {
     ).rejects.toBeInstanceOf(AllMirrorsFailedError)
     expect(fetchImpl).not.toHaveBeenCalled()
   })
+
+  it('counts UTF-8 bytes (not UTF-16 length) for text data: URIs', async () => {
+    // '€' is 1 string char but 3 UTF-8 bytes; cap at 2 must reject it even though
+    // its character count (1) is within the cap.
+    const fetchImpl = vi.fn() as unknown as typeof fetch
+    await expect(
+      fetchVerified(['data:,%E2%82%AC'], undefined, { fetchImpl, maxBytes: 2 }),
+    ).rejects.toBeInstanceOf(AllMirrorsFailedError)
+    // resolveTransport enforces the cap directly too (not only via fetchVerified).
+    expect(() => resolveTransport('data:,%E2%82%AC', { maxBytes: 2 })).toThrow()
+    // A literal (non-percent-encoded) non-ASCII char is caught as well.
+    expect(() => resolveTransport('data:,€', { maxBytes: 2 })).toThrow()
+  })
 })
 
 describe('fetchVerified - failover', () => {

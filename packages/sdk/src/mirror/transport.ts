@@ -268,16 +268,17 @@ function resolveData(uri: string, maxBytes?: number): ResolvedTransport {
   const mediaType = (isBase64 ? meta.replace(/;base64$/i, '') : meta).trim()
   const contentType = mediaType.length > 0 ? mediaType : undefined
 
-  // Reject by *encoded* length before decoding, so an oversized data: URI from
-  // untrusted metadata can't force a huge allocation (the decode is the bomb).
-  // base64 decodes to ~len*3/4 bytes; the text path is a safe over-approximation.
+  // Pre-decode reject on a cheap LOWER bound of the decoded size, so a giant
+  // payload can't force a large allocation (the decode is the bomb). base64
+  // decodes to ~len*3/4 bytes (tight). For text, the minimum is ceil(len/3) — the
+  // all-`%XX` case (3 chars → 1 byte) — which bounds transient allocation to
+  // ≤ ~3× maxBytes. The exact UTF-8 check AFTER decode is authoritative.
   if (maxBytes !== undefined) {
-    const estimated = isBase64 ? Math.floor((dataPart.length * 3) / 4) : dataPart.length
-    if (estimated > maxBytes) {
-      throw new UnsupportedUriError(
-        uri,
-        `inline payload exceeds maxBytes (~${estimated} > ${maxBytes})`,
-      )
+    const lowerBound = isBase64
+      ? Math.floor((dataPart.length * 3) / 4)
+      : Math.ceil(dataPart.length / 3)
+    if (lowerBound > maxBytes) {
+      throw new UnsupportedUriError(uri, `inline payload exceeds maxBytes (~>${maxBytes})`)
     }
   }
 
@@ -288,6 +289,16 @@ function resolveData(uri: string, maxBytes?: number): ResolvedTransport {
     // Percent-decoded text payload, then UTF-8 encoded.
     const text = decodeURIComponent(dataPart)
     bytes = new TextEncoder().encode(text)
+  }
+
+  // Authoritative cap on ACTUAL UTF-8 bytes (e.g. `€` is 1 char but 3 bytes, so a
+  // char-count check under-counts). Enforced here so `resolveTransport` honors the
+  // cap even when called directly, not only via fetchVerified afterward.
+  if (maxBytes !== undefined && bytes.byteLength > maxBytes) {
+    throw new UnsupportedUriError(
+      uri,
+      `inline payload ${bytes.byteLength} bytes exceeds maxBytes (${maxBytes})`,
+    )
   }
 
   return {
