@@ -238,6 +238,20 @@ describe('fetchVerified - happy paths per transport', () => {
     expect(fetchImpl).not.toHaveBeenCalled()
   })
 
+  it('does not count base64 padding/whitespace against the cap', async () => {
+    // 'aGVsbG8=' decodes to exactly 5 bytes; at maxBytes=5 it must be ACCEPTED
+    // (the padding `=` must not be counted as a 6th byte by the pre-check).
+    const bytes = enc('hello')
+    const hash = hashContent(bytes)
+    const fetchImpl = vi.fn() as unknown as typeof fetch
+    const res = await fetchVerified(['data:text/plain;base64,aGVsbG8='], hash, {
+      fetchImpl,
+      maxBytes: 5,
+    })
+    expect(res.verification).toBe('matches-author')
+    expect(res.bytes).toEqual(bytes)
+  })
+
   it('counts UTF-8 bytes (not UTF-16 length) for text data: URIs', async () => {
     // '€' is 1 string char but 3 UTF-8 bytes; cap at 2 must reject it even though
     // its character count (1) is within the cap.

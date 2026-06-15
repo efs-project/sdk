@@ -270,13 +270,20 @@ function resolveData(uri: string, maxBytes?: number): ResolvedTransport {
 
   // Pre-decode reject on a cheap LOWER bound of the decoded size, so a giant
   // payload can't force a large allocation (the decode is the bomb). base64
-  // decodes to ~len*3/4 bytes (tight). For text, the minimum is ceil(len/3) — the
-  // all-`%XX` case (3 chars → 1 byte) — which bounds transient allocation to
-  // ≤ ~3× maxBytes. The exact UTF-8 check AFTER decode is authoritative.
+  // decodes to `floor(sig*3/4)` where `sig` is the significant-char count after
+  // stripping whitespace and `=` padding (counting padding over-estimates and
+  // would falsely reject an at-cap payload, e.g. `aGVsbG8=` → 5 bytes, not 6).
+  // For text, the minimum is ceil(len/3) — the all-`%XX` case (3 chars → 1 byte)
+  // — bounding transient allocation to ≤ ~3× maxBytes. The exact UTF-8 check
+  // AFTER decode is authoritative.
   if (maxBytes !== undefined) {
-    const lowerBound = isBase64
-      ? Math.floor((dataPart.length * 3) / 4)
-      : Math.ceil(dataPart.length / 3)
+    let lowerBound: number
+    if (isBase64) {
+      const sig = dataPart.replace(/\s+/g, '').replace(/=+$/, '').length
+      lowerBound = Math.floor((sig * 3) / 4)
+    } else {
+      lowerBound = Math.ceil(dataPart.length / 3)
+    }
     if (lowerBound > maxBytes) {
       throw new UnsupportedUriError(uri, `inline payload exceeds maxBytes (~>${maxBytes})`)
     }
