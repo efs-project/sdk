@@ -282,23 +282,14 @@ function resolveData(uri: string, maxBytes?: number): ResolvedTransport {
     }
   }
 
-  // Pre-decode reject on a cheap LOWER bound of the decoded size, so a giant
-  // payload can't force a large allocation (the decode is the bomb). base64
-  // decodes to `floor(sig*3/4)` where `sig` is the significant-char count after
-  // stripping whitespace and `=` padding (counting padding over-estimates and
-  // would falsely reject an at-cap payload, e.g. `aGVsbG8=` → 5 bytes, not 6).
-  // For text, the minimum is ceil(len/3) — the all-`%XX` case (3 chars → 1 byte)
-  // — bounding transient allocation to ≤ ~3× maxBytes. The exact UTF-8 check
-  // AFTER decode is authoritative.
-  if (maxBytes !== undefined) {
-    let lowerBound: number
-    if (isBase64) {
-      const sig = b64Text.replace(/\s+/g, '').replace(/=+$/, '').length
-      lowerBound = Math.floor((sig * 3) / 4)
-    } else {
-      lowerBound = Math.ceil(dataPart.length / 3)
-    }
-    if (lowerBound > maxBytes) {
+  // base64 decodes whole (atob allocates the lot), so reject up front on the
+  // decoded-size estimate: `floor(sig*3/4)` over the significant chars (whitespace
+  // and `=` padding stripped, since counting them over-estimates and would falsely
+  // reject an at-cap payload like `aGVsbG8=` → 5 bytes, not 6). The text path needs
+  // no pre-check — decodeDataOctets is bound-aware and aborts mid-decode.
+  if (maxBytes !== undefined && isBase64) {
+    const sig = b64Text.replace(/\s+/g, '').replace(/=+$/, '').length
+    if (Math.floor((sig * 3) / 4) > maxBytes) {
       throw new UnsupportedUriError(uri, `inline payload exceeds maxBytes (~>${maxBytes})`)
     }
   }
@@ -307,7 +298,7 @@ function resolveData(uri: string, maxBytes?: number): ResolvedTransport {
   if (isBase64) {
     bytes = decodeBase64(b64Text)
   } else {
-    bytes = decodeDataOctets(dataPart)
+    bytes = decodeDataOctets(dataPart, uri, maxBytes)
   }
 
   // Authoritative cap on ACTUAL UTF-8 bytes (e.g. `€` is 1 char but 3 bytes, so a
@@ -334,24 +325,38 @@ function resolveData(uri: string, maxBytes?: number): ResolvedTransport {
  * would reject as invalid UTF-8. So decode `%XX` byte-wise and emit literal runs
  * as their UTF-8 bytes. Never throws on arbitrary octets, so binary inline
  * mirrors (e.g. `data:application/octet-stream,%ff`) hash correctly.
+ *
+ * Bound-aware: aborts the moment the decoded length exceeds `maxBytes` (literals
+ * are flushed in chunks so the running total is checked continuously), so a giant
+ * literal payload can't allocate ~3× the cap before an after-the-fact check —
+ * the size guard is enforced DURING decode, not after.
  */
-function decodeDataOctets(s: string): Uint8Array {
+function decodeDataOctets(s: string, uri: string, maxBytes?: number): Uint8Array {
+  const cap = maxBytes ?? Number.POSITIVE_INFINITY
   const out: number[] = []
   const enc = new TextEncoder()
   let literal = ''
+  const checkCap = () => {
+    if (out.length > cap) {
+      throw new UnsupportedUriError(uri, `inline payload exceeds maxBytes (${maxBytes})`)
+    }
+  }
   const flush = () => {
     if (literal.length > 0) {
       for (const b of enc.encode(literal)) out.push(b)
       literal = ''
+      checkCap()
     }
   }
   for (let i = 0; i < s.length; i += 1) {
     if (s[i] === '%' && i + 2 < s.length && /^[0-9a-f]{2}$/i.test(s.slice(i + 1, i + 3))) {
       flush()
       out.push(Number.parseInt(s.slice(i + 1, i + 3), 16))
+      checkCap()
       i += 2
     } else {
       literal += s[i]
+      if (literal.length >= 4096) flush() // bound the running total + encode transient
     }
   }
   flush()

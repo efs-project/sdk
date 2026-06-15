@@ -272,6 +272,13 @@ describe('fetchVerified - happy paths per transport', () => {
     expect(res.bytes).toEqual(bytes)
   })
 
+  it('aborts a large literal data: payload during decode (bound-aware)', () => {
+    // A mostly-literal payload well over the cap must be rejected by the decoder
+    // itself, not allocated in full and then rejected after the fact.
+    const big = 'a'.repeat(10_000)
+    expect(() => resolveTransport(`data:,${big}`, { maxBytes: 64 })).toThrow()
+  })
+
   it('counts UTF-8 bytes (not UTF-16 length) for text data: URIs', async () => {
     // '€' is 1 string char but 3 UTF-8 bytes; cap at 2 must reject it even though
     // its character count (1) is within the cap.
