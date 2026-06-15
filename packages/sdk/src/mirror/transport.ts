@@ -268,34 +268,28 @@ function resolveData(uri: string, maxBytes?: number): ResolvedTransport {
   const mediaType = (isBase64 ? meta.replace(/;base64$/i, '') : meta).trim()
   const contentType = mediaType.length > 0 ? mediaType : undefined
 
-  // For a base64 payload the WHATWG data: processor percent-decodes the body
-  // BEFORE base64-decoding, so producers may percent-encode base64 specials
-  // (`%2F`→`/`, `%2B`→`+`, `%3D`→`=`). Decode to the real base64 text first so the
-  // size estimate and `atob` see actual base64 chars, not `%XX` triplets. Percent
-  // escapes here are ASCII (valid UTF-8); fall back to raw on malformed input.
-  let b64Text = dataPart
+  let bytes: Uint8Array
   if (isBase64) {
+    // base64 decodes whole (atob allocates the lot, and the WHATWG processor
+    // percent-decodes the body first — `%2F`→`/`, `%3D`→`=`). Estimate the decoded
+    // size from the RAW body via a scan (percent escapes decoded inline, whitespace
+    // + trailing `=` padding excluded) and reject BEFORE materializing the decoded
+    // base64 text, so an oversized percent-encoded body can't force the decode-all
+    // allocation the cap exists to prevent.
+    if (maxBytes !== undefined) {
+      const sig = significantBase64Chars(dataPart)
+      if (Math.floor((sig * 3) / 4) > maxBytes) {
+        throw new UnsupportedUriError(uri, `inline payload exceeds maxBytes (~>${maxBytes})`)
+      }
+    }
+    // WHATWG order: percent-decode the body, then base64-decode. Escapes are ASCII
+    // (valid UTF-8); fall back to raw on malformed input.
+    let b64Text = dataPart
     try {
       b64Text = decodeURIComponent(dataPart)
     } catch {
       // leave raw; decodeBase64's normalization/`atob` will surface the error
     }
-  }
-
-  // base64 decodes whole (atob allocates the lot), so reject up front on the
-  // decoded-size estimate: `floor(sig*3/4)` over the significant chars (whitespace
-  // and `=` padding stripped, since counting them over-estimates and would falsely
-  // reject an at-cap payload like `aGVsbG8=` → 5 bytes, not 6). The text path needs
-  // no pre-check — decodeDataOctets is bound-aware and aborts mid-decode.
-  if (maxBytes !== undefined && isBase64) {
-    const sig = b64Text.replace(/\s+/g, '').replace(/=+$/, '').length
-    if (Math.floor((sig * 3) / 4) > maxBytes) {
-      throw new UnsupportedUriError(uri, `inline payload exceeds maxBytes (~>${maxBytes})`)
-    }
-  }
-
-  let bytes: Uint8Array
-  if (isBase64) {
     bytes = decodeBase64(b64Text)
   } else {
     bytes = decodeDataOctets(dataPart, uri, maxBytes)
@@ -361,6 +355,35 @@ function decodeDataOctets(s: string, uri: string, maxBytes?: number): Uint8Array
   }
   flush()
   return Uint8Array.from(out)
+}
+
+/**
+ * Count the significant base64 characters of a (possibly percent-encoded) body
+ * WITHOUT materializing the decoded string — percent escapes are decoded inline,
+ * whitespace is skipped, and trailing `=` padding is excluded (counting padding
+ * would over-estimate and falsely reject an at-cap payload). Used to size-check a
+ * base64 `data:` body before allocating it. `floor(result * 3 / 4)` = decoded bytes.
+ */
+function significantBase64Chars(s: string): number {
+  let sig = 0
+  let pendingPad = 0 // `=` runs are padding only if nothing significant follows
+  for (let i = 0; i < s.length; i += 1) {
+    let ch = s[i] ?? ''
+    if (ch === '%' && i + 2 < s.length && /^[0-9a-f]{2}$/i.test(s.slice(i + 1, i + 3))) {
+      ch = String.fromCharCode(Number.parseInt(s.slice(i + 1, i + 3), 16))
+      i += 2
+    }
+    if (ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r' || ch === '\f' || ch === '\v') {
+      continue
+    }
+    if (ch === '=') {
+      pendingPad += 1
+      continue
+    }
+    sig += 1 + pendingPad // a real char means any prior `=` were not trailing padding
+    pendingPad = 0
+  }
+  return sig
 }
 
 /** Decode a base64 string to bytes without Buffer (works in browser + node). */

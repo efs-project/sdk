@@ -103,6 +103,13 @@ describe('resolveTransport - URI parsing (TRANSPORT allowlist)', () => {
     expect(r.inline?.contentType).toBeUndefined()
   })
 
+  it('rejects an oversized percent-encoded base64 body before materializing it', () => {
+    // '%41' x1000 percent-decodes to 1000 'A's -> ~750 decoded bytes; at a small
+    // cap it must be rejected from the raw-scan estimate, before decodeURIComponent.
+    const body = '%41'.repeat(1000)
+    expect(() => resolveTransport(`data:;base64,${body}`, { maxBytes: 64 })).toThrow()
+  })
+
   it('percent-decodes a base64 data: body before decoding (WHATWG order)', () => {
     // %2Fw%3D%3D percent-decodes to '/w==', which base64-decodes to the byte 0xff.
     const r = resolveTransport('data:application/octet-stream;base64,%2Fw%3D%3D')
