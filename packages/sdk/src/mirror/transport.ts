@@ -293,9 +293,7 @@ function resolveData(uri: string, maxBytes?: number): ResolvedTransport {
   if (isBase64) {
     bytes = decodeBase64(dataPart)
   } else {
-    // Percent-decoded text payload, then UTF-8 encoded.
-    const text = decodeURIComponent(dataPart)
-    bytes = new TextEncoder().encode(text)
+    bytes = decodeDataOctets(dataPart)
   }
 
   // Authoritative cap on ACTUAL UTF-8 bytes (e.g. `€` is 1 char but 3 bytes, so a
@@ -314,6 +312,36 @@ function resolveData(uri: string, maxBytes?: number): ResolvedTransport {
     httpUrls: () => [],
     ...(contentType !== undefined ? { inline: { contentType, bytes } } : { inline: { bytes } }),
   }
+}
+
+/**
+ * Decode a non-base64 `data:` payload to raw bytes (RFC 2397). Percent escapes
+ * are OCTETS, not UTF-8 text — `%ff` is the byte `0xFF`, which `decodeURIComponent`
+ * would reject as invalid UTF-8. So decode `%XX` byte-wise and emit literal runs
+ * as their UTF-8 bytes. Never throws on arbitrary octets, so binary inline
+ * mirrors (e.g. `data:application/octet-stream,%ff`) hash correctly.
+ */
+function decodeDataOctets(s: string): Uint8Array {
+  const out: number[] = []
+  const enc = new TextEncoder()
+  let literal = ''
+  const flush = () => {
+    if (literal.length > 0) {
+      for (const b of enc.encode(literal)) out.push(b)
+      literal = ''
+    }
+  }
+  for (let i = 0; i < s.length; i += 1) {
+    if (s[i] === '%' && i + 2 < s.length && /^[0-9a-f]{2}$/i.test(s.slice(i + 1, i + 3))) {
+      flush()
+      out.push(Number.parseInt(s.slice(i + 1, i + 3), 16))
+      i += 2
+    } else {
+      literal += s[i]
+    }
+  }
+  flush()
+  return Uint8Array.from(out)
 }
 
 /** Decode a base64 string to bytes without Buffer (works in browser + node). */

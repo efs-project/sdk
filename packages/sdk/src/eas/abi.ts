@@ -132,11 +132,49 @@ export const getSchemaAbi = [
 ] as const
 
 /**
- * Combined EAS ABI for the functions the SDK calls on the EAS contract
- * (`attest`, `multiAttest`, `getAttestation`). `getSchema` lives on the
- * separate SchemaRegistry contract and is exported on its own.
+ * EAS custom-error fragments (transcribed from eas-contracts EAS.sol/IEAS.sol —
+ * all zero-arg). Required so viem can populate `ContractFunctionRevertedError
+ * .data.errorName` when an `attest`/`multiAttest` call reverts; without them the
+ * error classifier (errors.ts) can't map e.g. `InvalidSchema` → `SchemaMismatch`
+ * and EAS reverts fall through as generic. (Codex P2.)
  */
-export const easAbi = [...attestAbi, ...multiAttestAbi, ...getAttestationAbi] as const
+const easErrorsAbi = [
+  { type: 'error', name: 'AccessDenied', inputs: [] },
+  { type: 'error', name: 'AlreadyRevoked', inputs: [] },
+  { type: 'error', name: 'AlreadyRevokedOffchain', inputs: [] },
+  { type: 'error', name: 'AlreadyTimestamped', inputs: [] },
+  { type: 'error', name: 'DeadlineExpired', inputs: [] },
+  { type: 'error', name: 'InsufficientValue', inputs: [] },
+  { type: 'error', name: 'InvalidAttestation', inputs: [] },
+  { type: 'error', name: 'InvalidAttestations', inputs: [] },
+  { type: 'error', name: 'InvalidEAS', inputs: [] },
+  { type: 'error', name: 'InvalidExpirationTime', inputs: [] },
+  { type: 'error', name: 'InvalidLength', inputs: [] },
+  { type: 'error', name: 'InvalidOffset', inputs: [] },
+  { type: 'error', name: 'InvalidRegistry', inputs: [] },
+  { type: 'error', name: 'InvalidRevocation', inputs: [] },
+  { type: 'error', name: 'InvalidRevocations', inputs: [] },
+  { type: 'error', name: 'InvalidSchema', inputs: [] },
+  { type: 'error', name: 'InvalidSignature', inputs: [] },
+  { type: 'error', name: 'InvalidVerifier', inputs: [] },
+  { type: 'error', name: 'Irrevocable', inputs: [] },
+  { type: 'error', name: 'NotFound', inputs: [] },
+  { type: 'error', name: 'NotPayable', inputs: [] },
+  { type: 'error', name: 'WrongSchema', inputs: [] },
+] as const
+
+/**
+ * Combined EAS ABI for the functions the SDK calls on the EAS contract
+ * (`attest`, `multiAttest`, `getAttestation`) plus the custom-error fragments so
+ * reverts decode to named errors. `getSchema` lives on the separate
+ * SchemaRegistry contract and is exported on its own.
+ */
+export const easAbi = [
+  ...attestAbi,
+  ...multiAttestAbi,
+  ...getAttestationAbi,
+  ...easErrorsAbi,
+] as const
 
 /** SchemaRegistry ABI subset (just `getSchema`). */
 export const schemaRegistryAbi = [...getSchemaAbi] as const

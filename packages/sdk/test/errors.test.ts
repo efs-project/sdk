@@ -3,8 +3,10 @@ import {
   ProviderRpcError,
   UserRejectedRequestError,
   RpcError as ViemRpcError,
+  toFunctionSelector,
 } from 'viem'
 import { describe, expect, it } from 'vitest'
+import { easAbi } from '../src/eas/index.js'
 import {
   ContractReverted,
   Disconnected,
@@ -108,6 +110,19 @@ describe('classifyError (ADR-0007 classifier)', () => {
     expect(out.code).toBe('EfsError')
     expect(out.shortMessage).toBe('something odd happened')
     expect(out.cause).toBe(plain)
+  })
+
+  it('decodes a real EAS revert via the bundled easAbi error fragments', () => {
+    // The bundled easAbi must carry the EAS custom-error fragments, or viem
+    // cannot populate errorName on a real attest/multiAttest revert.
+    expect(easAbi.some((f) => f.type === 'error' && f.name === 'InvalidSchema')).toBe(true)
+    const revert = new ContractFunctionRevertedError({
+      abi: easAbi,
+      functionName: 'attest',
+      data: toFunctionSelector('InvalidSchema()'),
+    })
+    expect(revert.data?.errorName).toBe('InvalidSchema')
+    expect(classifyError(revert).code).toBe('SchemaMismatch')
   })
 
   it('finds an EIP-1193 code on a nested cause (wrapped wallet rejection)', () => {

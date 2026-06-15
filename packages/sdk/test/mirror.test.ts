@@ -103,6 +103,15 @@ describe('resolveTransport - URI parsing (TRANSPORT allowlist)', () => {
     expect(r.inline?.contentType).toBeUndefined()
   })
 
+  it('decodes percent-escaped binary octets (not UTF-8 text) in data: URIs', () => {
+    // %ff is the byte 0xFF — invalid UTF-8; decodeURIComponent would throw.
+    const r = resolveTransport('data:application/octet-stream,%ff')
+    expect(r.inline?.bytes).toEqual(new Uint8Array([0xff]))
+    // Mixed literal + octet escapes round-trip byte-wise.
+    const mixed = resolveTransport('data:,A%00%ff')
+    expect(mixed.inline?.bytes).toEqual(new Uint8Array([0x41, 0x00, 0xff]))
+  })
+
   it('magnet: parses but yields no HTTP URLs', () => {
     const r = resolveTransport('magnet:?xt=urn:btih:abc')
     expect(r.scheme).toBe(TRANSPORT.magnet)
