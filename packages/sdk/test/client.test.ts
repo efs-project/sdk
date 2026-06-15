@@ -45,21 +45,25 @@ const contracts: EfsContracts = {
   fileView: addr(5),
   edgeResolver: addr(6),
   mirrorResolver: addr(7),
-  listResolver: addr(8),
-  listEntryResolver: addr(9),
-  aliasResolver: addr(10),
+  sortOverlay: addr(8),
+  listResolver: addr(9),
+  listEntryResolver: addr(10),
+  listReader: addr(11),
+  schemaNameIndex: addr(12),
 }
 
 const schemas: EfsSchemaUIDs = {
   anchor: '0x01',
   property: '0x02',
   data: '0x03',
-  pin: '0x04',
-  tag: '0x05',
-  mirror: '0x06',
-  list: '0x07',
-  listEntry: '0x08',
-  redirect: '0x09',
+  blob: '0x04',
+  pin: '0x05',
+  tag: '0x06',
+  mirror: '0x07',
+  sortInfo: '0x08',
+  list: '0x09',
+  listEntry: '0x0a',
+  naming: '0x0b',
 }
 
 const deployment: EfsDeployment = { chainId: CHAIN_ID, contracts, schemas }

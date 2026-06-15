@@ -29,4 +29,6 @@ Picking a path where you meant a specific version is silent breakage when the da
 - **Does:** simplify multi-step reads/writes, resolve lenses, batch writes, expose EAS cleanly (viem-native), give a typed escape hatch to the raw contracts, and locate EFS by chain via a shipped **deployments registry** (addresses + schema UIDs) so a supported chain needs no address config ([ADR-0005](../adr/0005-deployments-registry-not-a-deployer.md)). The SDK deploys nothing.
 - **Doesn't (yet):** bundle an indexer. Reverse-lookups ("who tagged this?") that need an external index are stubbed and out of scope for v1.
 
+The SDK also builds on two on-chain features: **directory filtering** (pass `excludes` to a directory listing to hide entries carrying given tags, evaluated on-chain) and folder **Overviews** (a folder's `README.md`, read via `fs.overview(path)` and written via `fs.setOverview(...)`). Both are additive and need no new schema. See [ADR-0011](../adr/0011-onchain-filter-and-overviews.md).
+
 For exact signatures, see the package READMEs and (later) the generated API reference.

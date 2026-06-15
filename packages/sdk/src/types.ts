@@ -42,12 +42,26 @@ export type ListOptions = ReadOptions & {
   limit?: number
   /** Opaque resumable cursor from a prior `Page`. */
   cursor?: string
+  /**
+   * Tag-exclusion filter (contracts ADR-0048 / SDK ADR-0011). Each entry is a
+   * TAG definition UID (`Hex`) or a human label (e.g. `'system'`/`'nsfw'`) the
+   * SDK resolves to its `/tags/<name>` definition UID. Non-empty routes the
+   * listing to the on-chain filtered view; empty/absent = unfiltered. Nothing is
+   * excluded by default — pass `SAFETY_EXCLUDES` to opt into the common policy.
+   */
+  excludes?: readonly (Hex | string)[]
+  /**
+   * Per-exclude inclusive weight threshold (`weight >= minWeights[k]`), aligned
+   * by index with `excludes`. Omitted or length-mismatched ⇒ an all-zero vector
+   * (ADR-0042 default). Capped at 8 excludes on-chain.
+   */
+  minWeights?: readonly bigint[]
 }
 
 /** A named transport for mirror/fetch resolution. Open union (review A8): the
  * known transports are autocompletable, but an unrecognized name is still
- * assignable so adding one is never breaking. Will be derived from the planned
- * `TRANSPORT` constant (ADR-0011) once it lands. */
+ * assignable so adding one is never breaking. Mirrors the `TRANSPORT` value
+ * allowlist in `mirror/transport.ts` (ADR-0010). */
 export type TransportName =
   | 'web3'
   | 'arweave'
@@ -200,3 +214,32 @@ export type FileStat =
       contentType?: string
       size?: bigint
     }
+
+// ── Folder Overviews (ADR-0011) ─────────────────────────────────────────────────
+
+/** The fixed anchor name a folder Overview is stored under (case-sensitive). */
+export const OVERVIEW_NAME = 'README.md' as const
+
+/** Opt-in directory-filter policy that hides the conventional system labels
+ * (the Overview is `system`-tagged). Pass to `ListOptions.excludes`; not applied
+ * by default (ADR-0011 §3). */
+export const SAFETY_EXCLUDES: readonly string[] = ['system', 'nsfw']
+
+/** Default cap on Overview bytes the SDK will buffer/return as text; larger
+ * payloads surface as the `too-large` variant rather than being materialized. */
+export const MAX_RENDER_BYTES = 256 * 1024
+
+/** Options for an Overview read (extends read options; reserved for future
+ * knobs following the `PreviewOptions` precedent). */
+export type OverviewOptions = ReadOptions
+
+/**
+ * Result of `fs.overview()` — a discriminated union so "absent" is distinct from
+ * "present but not markdown". `source` distinguishes an on-chain (editable) body
+ * from a mirror-hosted (read-only) one.
+ */
+export type OverviewResult =
+  | { kind: 'none' }
+  | { kind: 'markdown'; text: string; source: 'onchain' | 'mirror' }
+  | { kind: 'binary'; bytes: Uint8Array; contentType?: string; source: 'onchain' | 'mirror' }
+  | { kind: 'too-large'; size: bigint }

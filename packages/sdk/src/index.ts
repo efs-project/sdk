@@ -48,6 +48,8 @@ import type {
   FetchOptions,
   FileStat,
   ListOptions,
+  OverviewOptions,
+  OverviewResult,
   PreviewOptions,
   ReadOptions,
   ReadResult,
@@ -117,12 +119,20 @@ export type EfsFsRead = {
    * `{exists:true; …}`), never `null` — absence is modeled once (review A7). */
   stat(path: string, opts?: ReadOptions): Promise<FileStat>
   list(path: string, opts?: ListOptions): EfsList<DirEntry>
+  /** The folder Overview (`README.md`) for `path`, resolved by exact path — never
+   * a directory scan (ADR-0011). Returns a discriminated `OverviewResult`
+   * (`none` when absent). Folder-scoped: a file path has no Overview. */
+  overview(path: string, opts?: OverviewOptions): Promise<OverviewResult>
 }
 
 /** Read + write file operations (only present when a `walletClient` is set). */
 export type EfsFsWrite = EfsFsRead & {
   write(path: string, content: Uint8Array, opts?: WriteOptions): Promise<WriteReceipt>
   preview(path: string, content: Uint8Array, opts?: PreviewOptions): Promise<WriteEstimate>
+  /** Author/replace the folder Overview at `container`: composes the upload
+   * pipeline and applies the `system` TAG *before* placement, so an interrupted
+   * write never exposes a visible untagged README (ADR-0011). Folder-scoped. */
+  setOverview(container: string, markdown: string, opts?: WriteOptions): Promise<WriteReceipt>
 }
 
 export type EfsLensesNs = {
@@ -201,12 +211,19 @@ export function createEfsClient(config: EfsClientConfig): EfsClient {
           throw new NotImplemented('efs.fs.list().page()')
         },
       }),
+      overview: async (_path, _opts) => {
+        throw new NotImplemented('efs.fs.overview()')
+      },
       write: async (_path, _content, _opts) => {
         requireWallet()
         throw new NotImplemented('efs.fs.write()')
       },
       preview: async (_path, _content) => {
         throw new NotImplemented('efs.fs.preview()')
+      },
+      setOverview: async (_container, _markdown, _opts) => {
+        requireWallet()
+        throw new NotImplemented('efs.fs.setOverview()')
       },
     },
     lenses: {
@@ -280,6 +297,8 @@ export type {
   ReadResult,
   EfsFile,
   FileStat,
+  OverviewResult,
+  OverviewOptions,
   WriteReceipt,
   WriteMechanism,
   CallStatus,
@@ -288,3 +307,15 @@ export type {
   OperationKind,
   BatchReceipt,
 } from './types.js'
+// Overview convention constants (values, ADR-0011).
+export { OVERVIEW_NAME, SAFETY_EXCLUDES, MAX_RENDER_BYTES } from './types.js'
+// On-chain directory filtering (ADR-0011): vendored view ABI + pure routing helpers.
+export { fileViewAbi } from './chain/abi/fileView.js'
+export {
+  MAX_ATTESTERS_PER_QUERY,
+  MAX_EXCLUDE_TAGS_PER_QUERY,
+  shouldUseFilteredQuery,
+  reconcileMinWeights,
+  validateDirectoryQuery,
+  InvalidDirectoryQuery,
+} from './reads/directory.js'

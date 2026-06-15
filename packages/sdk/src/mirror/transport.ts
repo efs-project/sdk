@@ -16,7 +16,7 @@
 
 import type { TransportName } from '../types.js'
 
-/** Value-level allowlist of known transports (ADR-0011 seam). Keys match
+/** Value-level allowlist of known transports (ADR-0010). Keys match
  * `TransportName`. This is the *recognized* set; `TransportName` stays an open
  * union so an unknown scheme is still assignable, but only these resolve. */
 export const TRANSPORT = {

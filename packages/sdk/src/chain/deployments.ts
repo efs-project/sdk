@@ -8,7 +8,15 @@ import type { Address, Hex, PublicClient } from 'viem'
 import { DeploymentNotFound, EfsError } from '../errors.js'
 
 /** The EFS + EAS contract addresses on a chain. The view/router addresses are the
- * read-resolution trust root, so they are integrity-checked at construct time. */
+ * read-resolution trust root, so they are integrity-checked at construct time.
+ *
+ * Keys mirror the contracts repo's deployed-contract set (chain 31337 in
+ * `packages/nextjs/contracts/deployedContracts.ts`): `Indexer`, `EFSRouter`,
+ * `EFSFileView`, `EdgeResolver`, `MirrorResolver`, `EFSSortOverlay`,
+ * `ListResolver`, `ListEntryResolver`, `ListReader`, `SchemaNameIndex` — plus the
+ * two external EAS contracts EFS is registered against. There is no `aliasResolver`:
+ * schema/attestation alias-anchor resolution lives in EFSRouter (ADR-0033),
+ * not a standalone contract. */
 export type EfsContracts = {
   eas: Address
   schemaRegistry: Address
@@ -17,22 +25,32 @@ export type EfsContracts = {
   fileView: Address
   edgeResolver: Address
   mirrorResolver: Address
+  sortOverlay: Address
   listResolver: Address
   listEntryResolver: Address
-  aliasResolver: Address
+  listReader: Address
+  schemaNameIndex: Address
 }
 
-/** The frozen EFS schema-UID set (defined in the contracts repo). */
+/** The frozen EFS schema-UID set (defined in the contracts repo).
+ *
+ * Keys mirror the on-chain `*_SCHEMA_UID` getters in `deployedContracts.ts`
+ * (`Indexer` exposes ANCHOR/PROPERTY/DATA/BLOB/MIRROR/PIN/TAG/SORT_INFO;
+ * `SchemaNameIndex` exposes NAMING; `ListResolver`/`ListEntryResolver` expose
+ * LIST/LIST_ENTRY). There is no `redirect` schema — it does not exist in the
+ * contracts repo (no registration in `deploy/`, no `_SCHEMA_UID` getter). */
 export type EfsSchemaUIDs = {
   anchor: Hex
   property: Hex
   data: Hex
+  blob: Hex
   pin: Hex
   tag: Hex
   mirror: Hex
+  sortInfo: Hex
   list: Hex
   listEntry: Hex
-  redirect: Hex
+  naming: Hex
 }
 
 export type EfsDeployment = {

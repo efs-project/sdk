@@ -20,6 +20,8 @@ export type EfsErrorCode =
   | 'DeploymentNotFound'
   | 'CursorInvalid'
   | 'PartialBatchFailure'
+  /** A caller argument violated a documented bound (e.g. directory-query caps). */
+  | 'InvalidArgument'
   // --- classifier codes (ADR-0007 §Realization) ---------------------------
   /** Wallet rejected by the user (EIP-1193 `4001`). Benign, not a failure. */
   | 'UserRejected'
