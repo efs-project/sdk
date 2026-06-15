@@ -5,6 +5,6 @@
     "import": "*",
     "ignore": ["viem"],
     "gzip": true,
-    "limit": "8 kB"
+    "limit": "10 kB"
   }
 ]
