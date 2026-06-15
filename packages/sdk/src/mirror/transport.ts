@@ -262,7 +262,9 @@ function resolveData(uri: string, maxBytes?: number): ResolvedTransport {
   if (comma === -1) {
     throw new UnsupportedUriError(uri, 'malformed data: URI (no comma)')
   }
-  const meta = uri.slice('data:'.length, comma)
+  // Trim the media type BEFORE the `;base64` test (WHATWG strips leading/trailing
+  // whitespace first): `data:...;base64 ,…` is still base64, not literal text.
+  const meta = uri.slice('data:'.length, comma).trim()
   const dataPart = uri.slice(comma + 1)
   const isBase64 = /;base64$/i.test(meta)
   const mediaType = (isBase64 ? meta.replace(/;base64$/i, '') : meta).trim()
@@ -350,7 +352,21 @@ function decodeDataOctets(s: string, uri: string, maxBytes?: number): Uint8Array
       i += 2
     } else {
       literal += s[i]
-      if (literal.length >= 4096) flush() // bound the running total + encode transient
+      // Flush in chunks to bound the running total + encode transient — but never
+      // split a surrogate pair across the boundary (a lone high surrogate would
+      // UTF-8-encode to the replacement char), so hold a trailing high surrogate
+      // back for the next chunk.
+      if (literal.length >= 4096) {
+        const lastCode = literal.charCodeAt(literal.length - 1)
+        if (lastCode >= 0xd800 && lastCode <= 0xdbff) {
+          const hold = literal.slice(-1)
+          literal = literal.slice(0, -1)
+          flush()
+          literal = hold
+        } else {
+          flush()
+        }
+      }
     }
   }
   flush()

@@ -110,6 +110,20 @@ describe('resolveTransport - URI parsing (TRANSPORT allowlist)', () => {
     expect(() => resolveTransport(`data:;base64,${body}`, { maxBytes: 64 })).toThrow()
   })
 
+  it('detects ;base64 with whitespace before the comma (trimmed media type)', () => {
+    // RFC 2397 allows whitespace; `;base64 ,` must still be treated as base64.
+    const r = resolveTransport('data:text/plain;base64 ,SGVsbG8=')
+    expect(new TextDecoder().decode(r.inline!.bytes)).toBe('Hello')
+  })
+
+  it('does not split a surrogate pair across the literal flush boundary', () => {
+    // An astral char (😀 = F0 9F 98 80) landing on the 4096-char flush boundary
+    // must encode as 4 bytes, not two replacement chars.
+    const r = resolveTransport(`data:,${'a'.repeat(4095)}😀`)
+    const tail = r.inline!.bytes.slice(-4)
+    expect(Array.from(tail)).toEqual([0xf0, 0x9f, 0x98, 0x80])
+  })
+
   it('percent-decodes a base64 data: body before decoding (WHATWG order)', () => {
     // %2Fw%3D%3D percent-decodes to '/w==', which base64-decodes to the byte 0xff.
     const r = resolveTransport('data:application/octet-stream;base64,%2Fw%3D%3D')
