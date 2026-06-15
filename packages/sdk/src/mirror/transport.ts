@@ -268,6 +268,20 @@ function resolveData(uri: string, maxBytes?: number): ResolvedTransport {
   const mediaType = (isBase64 ? meta.replace(/;base64$/i, '') : meta).trim()
   const contentType = mediaType.length > 0 ? mediaType : undefined
 
+  // For a base64 payload the WHATWG data: processor percent-decodes the body
+  // BEFORE base64-decoding, so producers may percent-encode base64 specials
+  // (`%2F`→`/`, `%2B`→`+`, `%3D`→`=`). Decode to the real base64 text first so the
+  // size estimate and `atob` see actual base64 chars, not `%XX` triplets. Percent
+  // escapes here are ASCII (valid UTF-8); fall back to raw on malformed input.
+  let b64Text = dataPart
+  if (isBase64) {
+    try {
+      b64Text = decodeURIComponent(dataPart)
+    } catch {
+      // leave raw; decodeBase64's normalization/`atob` will surface the error
+    }
+  }
+
   // Pre-decode reject on a cheap LOWER bound of the decoded size, so a giant
   // payload can't force a large allocation (the decode is the bomb). base64
   // decodes to `floor(sig*3/4)` where `sig` is the significant-char count after
@@ -279,7 +293,7 @@ function resolveData(uri: string, maxBytes?: number): ResolvedTransport {
   if (maxBytes !== undefined) {
     let lowerBound: number
     if (isBase64) {
-      const sig = dataPart.replace(/\s+/g, '').replace(/=+$/, '').length
+      const sig = b64Text.replace(/\s+/g, '').replace(/=+$/, '').length
       lowerBound = Math.floor((sig * 3) / 4)
     } else {
       lowerBound = Math.ceil(dataPart.length / 3)
@@ -291,7 +305,7 @@ function resolveData(uri: string, maxBytes?: number): ResolvedTransport {
 
   let bytes: Uint8Array
   if (isBase64) {
-    bytes = decodeBase64(dataPart)
+    bytes = decodeBase64(b64Text)
   } else {
     bytes = decodeDataOctets(dataPart)
   }

@@ -103,6 +103,17 @@ describe('resolveTransport - URI parsing (TRANSPORT allowlist)', () => {
     expect(r.inline?.contentType).toBeUndefined()
   })
 
+  it('percent-decodes a base64 data: body before decoding (WHATWG order)', () => {
+    // %2Fw%3D%3D percent-decodes to '/w==', which base64-decodes to the byte 0xff.
+    const r = resolveTransport('data:application/octet-stream;base64,%2Fw%3D%3D')
+    expect(r.inline?.bytes).toEqual(new Uint8Array([0xff]))
+    // And it must not be falsely rejected at a tight cap (1 real byte).
+    const capped = resolveTransport('data:application/octet-stream;base64,%2Fw%3D%3D', {
+      maxBytes: 1,
+    })
+    expect(capped.inline?.bytes).toEqual(new Uint8Array([0xff]))
+  })
+
   it('decodes percent-escaped binary octets (not UTF-8 text) in data: URIs', () => {
     // %ff is the byte 0xFF — invalid UTF-8; decodeURIComponent would throw.
     const r = resolveTransport('data:application/octet-stream,%ff')
