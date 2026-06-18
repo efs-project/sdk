@@ -258,9 +258,11 @@ export {
   parseSchema,
   easAbi,
   schemaRegistryAbi,
+  EFS_SCHEMA_FIELDS,
   type AttestationRequest,
   type AttestationRequestData,
   type MultiAttestationRequest,
+  type EfsSchemaName,
 } from './eas/index.js'
 export {
   hashContent,

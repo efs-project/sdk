@@ -24,7 +24,7 @@ Adopt both as additive surface. Four forks resolved:
 
 Client-side we fail fast on the on-chain caps (≤20 attesters, ≤8 excludes, `maxItems>0`), derive an all-zero `minWeights` vector when omitted (avoids the length-mismatch revert), and the list iterator treats *empty-items + non-empty-cursor* as "keep paging."
 
-The SDK's deployments registry is reconciled against the contracts source-of-truth (drop phantom `redirect` schema + `aliasResolver` contract; add the real schemas/contracts) as a separate, SDK-internal, non-freeze-gated correction.
+The SDK's deployments registry is reconciled against the contracts source-of-truth (drop phantom `redirect` schema + `aliasResolver` contract; add the real schemas/contracts) as a separate, SDK-internal, non-freeze-gated correction. *(Superseded by ADR-0012: the Sepolia freeze makes `redirect`/`aliasResolver` real first-class members of the canonical set, not phantoms; the registry is reshaped to the frozen 9-schema set.)*
 
 ## Consequences
 

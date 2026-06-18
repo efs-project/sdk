@@ -25,6 +25,11 @@ export {
 } from './schema-encoder.js'
 
 export {
+  EFS_SCHEMA_FIELDS,
+  type EfsSchemaName,
+} from './schemas.js'
+
+export {
   buildAttest,
   buildMultiAttest,
   type AttestationRequest,
