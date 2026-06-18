@@ -355,7 +355,7 @@ export async function fetchVerified(
       if (ssrf.blocked) {
         attempts.push({
           uri: safeUri,
-          url: url.href,
+          url: summarizeUri(url.href),
           scheme: resolved.scheme,
           reason: `SSRF-blocked host (${ssrf.reason})`,
         })
@@ -366,7 +366,7 @@ export async function fetchVerified(
       if (opts.signal?.aborted) {
         attempts.push({
           uri: safeUri,
-          url: url.href,
+          url: summarizeUri(url.href),
           scheme: resolved.scheme,
           reason: 'aborted by caller',
         })
@@ -387,7 +387,7 @@ export async function fetchVerified(
       } catch (err) {
         attempts.push({
           uri: safeUri,
-          url: url.href,
+          url: summarizeUri(url.href),
           scheme: resolved.scheme,
           reason: errMsg(err),
         })

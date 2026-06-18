@@ -71,7 +71,7 @@ describe('resolveTransport - URI parsing (TRANSPORT allowlist)', () => {
     // must not escape the /ipfs/<cid>/ namespace onto an arbitrary gateway path.
     expect(() => resolveTransport(`ipfs://${cid}/../admin`).httpUrls()).toThrow()
     expect(() => resolveTransport(`ipfs://${cid}/%2e%2e/admin`).httpUrls()).toThrow()
-    expect(() => resolveTransport('ar://txid123/../../admin').httpUrls()).toThrow()
+    expect(() => resolveTransport(`ar://${'a'.repeat(43)}/../../admin`).httpUrls()).toThrow()
     // Sibling whose name shares the CID prefix: /ipfs/bafyadmin must NOT pass a
     // namespace check for /ipfs/bafy (needs a `/` boundary, not a raw prefix).
     expect(() => resolveTransport('ipfs://bafy/../bafyadmin').httpUrls()).toThrow()
@@ -80,12 +80,17 @@ describe('resolveTransport - URI parsing (TRANSPORT allowlist)', () => {
   })
 
   it('parses ar://TXID to arweave gateways', () => {
-    const tx = 'AbC123_txid'
+    const tx = 'a'.repeat(43) // Arweave tx ids are exactly 43 base64url chars
     const r = resolveTransport(`ar://${tx}`)
     expect(r.scheme).toBe(TRANSPORT.arweave)
     const urls = r.httpUrls()
     expect(urls).toHaveLength(DEFAULT_ARWEAVE_GATEWAYS.length)
     expect(urls[0]!.href).toBe(`https://arweave.net/${tx}`)
+  })
+
+  it('rejects an ar:// id that is not exactly 43 base64url chars', () => {
+    expect(() => resolveTransport('ar://graphql')).toThrow() // a word, not a tx id
+    expect(() => resolveTransport(`ar://${'a'.repeat(42)}`)).toThrow() // too short
   })
 
   it('decodes a base64 data: URI inline (no network)', () => {
@@ -469,6 +474,20 @@ describe('fetchVerified - verification statuses', () => {
 })
 
 describe('fetchVerified - SSRF', () => {
+  it('summarizes an oversized failed URL in error/attempt records', async () => {
+    const big = `https://127.0.0.1/${'a'.repeat(5000)}`
+    const fetchImpl = vi.fn() as unknown as typeof fetch
+    try {
+      await fetchVerified([big], undefined, { fetchImpl })
+    } catch (e) {
+      const err = e as AllMirrorsFailedError
+      expect(err.attempts[0]!.url?.length ?? 0).toBeLessThan(260)
+      expect(err.attempts[0]!.url).not.toContain('a'.repeat(5000))
+      expect(err.message).not.toContain('a'.repeat(5000))
+    }
+    expect(fetchImpl).not.toHaveBeenCalled() // blocked before any fetch
+  })
+
   it('skips an SSRF-blocked host and records it, then fails over', async () => {
     const bytes = enc('safe')
     const hash = hashContent(bytes)

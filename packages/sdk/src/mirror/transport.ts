@@ -254,10 +254,14 @@ function resolveArweave(uri: string): ResolvedTransport {
   if (txid.length === 0) {
     throw new UnsupportedUriError(uri, 'missing Arweave transaction id')
   }
-  // Arweave tx ids are base64url (43 chars of [A-Za-z0-9_-]); reject anything
-  // else so the id can't carry path/host characters.
-  if (!/^[A-Za-z0-9_-]+$/.test(txid)) {
-    throw new UnsupportedUriError(uri, 'invalid Arweave transaction id')
+  // Arweave tx ids are exactly 43 base64url chars (base64url of a 32-byte hash).
+  // Require the exact length, not just the charset, so a short word like
+  // `ar://graphql` is rejected instead of resolving to a gateway root path.
+  if (!/^[A-Za-z0-9_-]{43}$/.test(txid)) {
+    throw new UnsupportedUriError(
+      uri,
+      'invalid Arweave transaction id (expected 43 base64url chars)',
+    )
   }
   return {
     scheme: TRANSPORT.arweave,
