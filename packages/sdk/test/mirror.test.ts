@@ -293,6 +293,22 @@ describe('fetchVerified - happy paths per transport', () => {
     expect(res.bytes).toEqual(bytes)
   })
 
+  it('elides the data: payload from error + attempt records (no full-payload copies)', async () => {
+    const body = 'A'.repeat(5000)
+    const uri = `data:;base64,${body}`
+    await expect(fetchVerified([uri], undefined, { maxBytes: 64 })).rejects.toMatchObject({
+      name: 'AllMirrorsFailedError',
+    })
+    try {
+      await fetchVerified([uri], undefined, { maxBytes: 64 })
+    } catch (e) {
+      const err = e as AllMirrorsFailedError
+      expect(err.attempts[0]!.uri).toContain('elided')
+      expect(err.attempts[0]!.uri).not.toContain(body)
+      expect(err.message).not.toContain(body)
+    }
+  })
+
   it('aborts a large literal data: payload during decode (bound-aware)', () => {
     // A mostly-literal payload well over the cap must be rejected by the decoder
     // itself, not allocated in full and then rejected after the fact.

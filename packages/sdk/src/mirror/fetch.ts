@@ -21,7 +21,12 @@
 import { type ContentHash, type VerificationStatus, hashContent } from '../content/hash.js'
 import type { TransportName } from '../types.js'
 import { type SsrfGuardOptions, checkSsrf } from './ssrf.js'
-import { type ResolveOptions, type ResolvedTransport, resolveTransport } from './transport.js'
+import {
+  type ResolveOptions,
+  type ResolvedTransport,
+  resolveTransport,
+  summarizeUri,
+} from './transport.js'
 
 /** Default per-attempt timeout (ms). */
 export const DEFAULT_TIMEOUT_MS = 10_000
@@ -282,19 +287,22 @@ export async function fetchVerified(
 
   for (const mirror of mirrors) {
     const uri = mirrorUri(mirror)
+    // A short, safe form for error/attempt records — never copies a full (possibly
+    // oversized) data: payload into an Error message or AllMirrorsFailedError.
+    const safeUri = summarizeUri(uri)
     // Honor cancellation BEFORE resolving — resolveTransport decodes inline data:
     // payloads, so an already-aborted caller must not pay that allocation/hash.
     if (opts.signal?.aborted) {
       const scheme = (uri.match(/^([a-zA-Z][a-zA-Z0-9+.-]*):/)?.[1]?.toLowerCase() ??
         'https') as TransportName
-      attempts.push({ uri, scheme, reason: 'aborted by caller' })
+      attempts.push({ uri: safeUri, scheme, reason: 'aborted by caller' })
       throw new AllMirrorsFailedError(attempts)
     }
     let resolved: ResolvedTransport
     try {
       resolved = resolveTransport(uri, { maxBytes: opts.maxBytes ?? DEFAULT_MAX_BYTES })
     } catch (err) {
-      attempts.push({ uri, scheme: 'https', reason: errMsg(err) })
+      attempts.push({ uri: safeUri, scheme: 'https', reason: errMsg(err) })
       continue
     }
 
@@ -306,7 +314,7 @@ export async function fetchVerified(
       const maxBytes = opts.maxBytes ?? DEFAULT_MAX_BYTES
       if (bytes.byteLength > maxBytes) {
         attempts.push({
-          uri,
+          uri: safeUri,
           scheme: resolved.scheme,
           reason: `inline payload ${bytes.byteLength} bytes exceeds cap (${maxBytes})`,
         })
@@ -329,12 +337,12 @@ export async function fetchVerified(
     try {
       urls = resolved.httpUrls(opts)
     } catch (err) {
-      attempts.push({ uri, scheme: resolved.scheme, reason: errMsg(err) })
+      attempts.push({ uri: safeUri, scheme: resolved.scheme, reason: errMsg(err) })
       continue
     }
     if (urls.length === 0) {
       attempts.push({
-        uri,
+        uri: safeUri,
         scheme: resolved.scheme,
         reason: `transport "${resolved.scheme}" has no HTTP resolution path`,
       })
@@ -346,7 +354,7 @@ export async function fetchVerified(
       const ssrf = checkSsrf(url, opts)
       if (ssrf.blocked) {
         attempts.push({
-          uri,
+          uri: safeUri,
           url: url.href,
           scheme: resolved.scheme,
           reason: `SSRF-blocked host (${ssrf.reason})`,
@@ -357,7 +365,7 @@ export async function fetchVerified(
       // Cooperative cancellation between attempts.
       if (opts.signal?.aborted) {
         attempts.push({
-          uri,
+          uri: safeUri,
           url: url.href,
           scheme: resolved.scheme,
           reason: 'aborted by caller',
@@ -378,7 +386,7 @@ export async function fetchVerified(
         }
       } catch (err) {
         attempts.push({
-          uri,
+          uri: safeUri,
           url: url.href,
           scheme: resolved.scheme,
           reason: errMsg(err),

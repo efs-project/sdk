@@ -13,6 +13,7 @@
 export {
   TRANSPORT,
   resolveTransport,
+  summarizeUri,
   DEFAULT_IPFS_GATEWAYS,
   DEFAULT_ARWEAVE_GATEWAYS,
   TransportNotImplementedError,

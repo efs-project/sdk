@@ -90,11 +90,27 @@ export class TransportNotImplementedError extends Error {
   }
 }
 
+/**
+ * Short, safe summary of a mirror URI for error/log output. A `data:` body is
+ * elided (just scheme+media type + a byte count) and any over-long URI is
+ * truncated — so rejecting an oversized untrusted payload never copies the whole
+ * thing into an Error message or attempt record.
+ */
+export function summarizeUri(uri: string): string {
+  if (/^data:/i.test(uri)) {
+    const comma = uri.indexOf(',')
+    const meta = (comma === -1 ? uri : uri.slice(0, comma)).slice(0, 80)
+    const bodyLen = comma === -1 ? 0 : uri.length - comma - 1
+    return `${meta},<${bodyLen} chars elided>`
+  }
+  return uri.length > 200 ? `${uri.slice(0, 200)}… (${uri.length} chars)` : uri
+}
+
 /** Thrown when a URI cannot be parsed or its scheme is unrecognized. */
 export class UnsupportedUriError extends Error {
   override readonly name = 'UnsupportedUriError'
   constructor(uri: string, detail: string) {
-    super(`unsupported mirror URI "${uri}": ${detail}`)
+    super(`unsupported mirror URI "${summarizeUri(uri)}": ${detail}`)
   }
 }
 
