@@ -256,6 +256,7 @@ export {
   computeAttestationUID,
   verifyAttestationUID,
   parseSchema,
+  parseSchemaParameters,
   easAbi,
   schemaRegistryAbi,
   EFS_SCHEMA_FIELDS,

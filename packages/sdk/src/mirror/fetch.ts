@@ -282,6 +282,14 @@ export async function fetchVerified(
 
   for (const mirror of mirrors) {
     const uri = mirrorUri(mirror)
+    // Honor cancellation BEFORE resolving — resolveTransport decodes inline data:
+    // payloads, so an already-aborted caller must not pay that allocation/hash.
+    if (opts.signal?.aborted) {
+      const scheme = (uri.match(/^([a-zA-Z][a-zA-Z0-9+.-]*):/)?.[1]?.toLowerCase() ??
+        'https') as TransportName
+      attempts.push({ uri, scheme, reason: 'aborted by caller' })
+      throw new AllMirrorsFailedError(attempts)
+    }
     let resolved: ResolvedTransport
     try {
       resolved = resolveTransport(uri, { maxBytes: opts.maxBytes ?? DEFAULT_MAX_BYTES })

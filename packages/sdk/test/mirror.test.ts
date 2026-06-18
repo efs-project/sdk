@@ -527,4 +527,13 @@ describe('fetchVerified - AbortSignal', () => {
     ).rejects.toBeInstanceOf(AllMirrorsFailedError)
     expect(fetchImpl).not.toHaveBeenCalled()
   })
+
+  it('does not decode an inline data: mirror when already aborted', async () => {
+    // The abort check must run BEFORE resolveTransport decodes the inline payload.
+    const ac = new AbortController()
+    ac.abort()
+    await expect(
+      fetchVerified(['data:text/plain;base64,aGVsbG8='], undefined, { signal: ac.signal }),
+    ).rejects.toBeInstanceOf(AllMirrorsFailedError)
+  })
 })

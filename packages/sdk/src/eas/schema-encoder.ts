@@ -13,7 +13,13 @@
  * (`0x`) and decodes back to an empty value list.
  */
 
-import { type AbiParameter, type Hex, decodeAbiParameters, encodeAbiParameters } from 'viem'
+import {
+  type AbiParameter,
+  type Hex,
+  decodeAbiParameters,
+  encodeAbiParameters,
+  parseAbiParameters,
+} from 'viem'
 
 /** A single parsed schema field. `name` may be empty (EAS allows unnamed fields). */
 export interface SchemaField {
@@ -26,30 +32,31 @@ export interface SchemaField {
 /**
  * Parse an EAS schema field string into viem `AbiParameter`s.
  *
- * Accepts the EAS comma-separated `"<type> <name>"` form, with arbitrary inner
- * whitespace. Unnamed fields (`"uint256"`) are allowed. The empty/whitespace
- * schema parses to `[]`.
+ * Delegates to viem's ABI-aware `parseAbiParameters`, so tuple and array fields
+ * (e.g. `"(uint256 score, string label) result"`, `"uint256[] xs"`) parse
+ * correctly — a naive top-level `split(',')` would break on the comma inside a
+ * tuple and produce the wrong ABI. The empty/whitespace schema parses to `[]`.
  *
- * @throws if a field has no type token.
+ * @throws if the schema string is malformed (propagated from viem).
  */
-export function parseSchema(schema: string): readonly SchemaField[] {
-  const trimmed = schema.trim()
-  if (trimmed === '') return []
-  return trimmed.split(',').map((raw) => {
-    const parts = raw.trim().split(/\s+/)
-    const type = parts[0]
-    if (type === undefined || type === '') {
-      throw new Error(`Invalid EAS schema field: ${JSON.stringify(raw)}`)
-    }
-    // Everything after the type token is the (optional) field name.
-    const name = parts.slice(1).join(' ')
-    return { type, name }
-  })
+export function parseSchemaParameters(schema: string): readonly AbiParameter[] {
+  // Normalize ragged whitespace (the EAS form tolerates it; viem's parser is
+  // stricter) before delegating: collapse internal runs and tidy around commas.
+  const normalized = schema
+    .trim()
+    .replace(/\s+/g, ' ')
+    .replace(/\s*,\s*/g, ', ')
+  if (normalized === '') return []
+  return parseAbiParameters(normalized)
 }
 
-/** Convert parsed schema fields to the viem `AbiParameter[]` shape. */
-function toAbiParameters(fields: readonly SchemaField[]): AbiParameter[] {
-  return fields.map((f) => ({ type: f.type, name: f.name }))
+/**
+ * Parse an EAS schema into the lightweight `{ type, name }` introspection view
+ * (a tuple field surfaces as `type: 'tuple'`; use {@link parseSchemaParameters}
+ * for the full encodable shape). Unnamed fields report `name: ''`.
+ */
+export function parseSchema(schema: string): readonly SchemaField[] {
+  return parseSchemaParameters(schema).map((p) => ({ type: p.type, name: p.name ?? '' }))
 }
 
 /**
@@ -63,12 +70,14 @@ export class SchemaEncoder {
   readonly schema: string
   /** The parsed schema fields, in declaration order. */
   readonly fields: readonly SchemaField[]
-  private readonly params: AbiParameter[]
+  private readonly params: readonly AbiParameter[]
 
   constructor(schema: string) {
     this.schema = schema
-    this.fields = parseSchema(schema)
-    this.params = toAbiParameters(this.fields)
+    // `params` carries the full ABI shape (tuple components, arrays) for encode/
+    // decode; `fields` is the flat introspection view derived from the same parse.
+    this.params = parseSchemaParameters(schema)
+    this.fields = this.params.map((p) => ({ type: p.type, name: p.name ?? '' }))
   }
 
   /** Number of fields in the schema (`0` for the empty schema). */

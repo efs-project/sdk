@@ -31,6 +31,15 @@ describe('parseSchema', () => {
     expect(parseSchema('')).toEqual([])
     expect(parseSchema('   ')).toEqual([])
   })
+
+  it('parses a tuple field without splitting on its inner comma', () => {
+    // A naive top-level split(',') would wrongly yield 3+ fields here.
+    const fields = parseSchema('(uint256 score, string label) result, bool ok')
+    expect(fields).toEqual([
+      { type: 'tuple', name: 'result' },
+      { type: 'bool', name: 'ok' },
+    ])
+  })
 })
 
 describe('SchemaEncoder round-trip', () => {
@@ -60,6 +69,14 @@ describe('SchemaEncoder round-trip', () => {
     expect(enc.length).toBe(0)
     expect(enc.encodeData([])).toBe('0x')
     expect(enc.decodeData('0x')).toEqual([])
+  })
+
+  it('round-trips a schema with a tuple field', () => {
+    const enc = new SchemaEncoder('(uint256 score, string label) result, bool ok')
+    expect(enc.length).toBe(2)
+    const value = [{ score: 7n, label: 'hi' }, true] as const
+    const data = enc.encodeData(value)
+    expect(enc.decodeData(data)).toEqual([{ score: 7n, label: 'hi' }, true])
   })
 
   it('rejects arity mismatches', () => {

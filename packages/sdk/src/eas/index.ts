@@ -21,6 +21,7 @@ export {
 export {
   SchemaEncoder,
   parseSchema,
+  parseSchemaParameters,
   type SchemaField,
 } from './schema-encoder.js'
 
