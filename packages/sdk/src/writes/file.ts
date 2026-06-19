@@ -204,9 +204,12 @@ export async function writeFileTier1(
     content: { kind: 'bytes', bytes: content },
     mirrors,
     ...(opts?.contentType !== undefined ? { contentType: opts.contentType } : {}),
-    // `buildFileWriteGraph` wants the contentHash as 0x-hex; hashContent returns
-    // a bare digest (ADR-0006), so prefix it for the PROPERTY value encoding.
-    contentHash: `0x${contentHash}` as Hex,
+    // ADR-0006: the `contentHash` PROPERTY value is the BARE SHA-256 digest
+    // (lowercase 64-hex, NO `0x` prefix) — byte-identical to `sha256sum`. The read
+    // path (`verifyContent` / `statusFor`) validates exactly this canonical form,
+    // so prefixing `0x` here would store a 66-char value that reads back as
+    // `malformed-claim`. `hashContent` already returns the bare digest.
+    contentHash,
     size,
     schemas: deployment.schemas,
     transportDefinition,

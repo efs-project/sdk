@@ -32,22 +32,12 @@
  * MIRROR `onAttest` validation AND the real fetch+verify read path.
  */
 
-import { createServer, type Server } from 'node:http'
+import { type Server, createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
-import {
-  http,
-  type Chain,
-  type Hex,
-  createPublicClient,
-  createWalletClient,
-} from 'viem'
+import { http, type Chain, type Hex, createPublicClient, createWalletClient } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import {
-  type DeploymentsMap,
-  type EfsDeployment,
-  createEfsClient,
-} from '../src/index.js'
+import { type DeploymentsMap, type EfsDeployment, createEfsClient } from '../src/index.js'
 import {
   type AnvilFork,
   FORK_EAS_ADDRESS,
@@ -107,32 +97,77 @@ const deployment: EfsDeployment = {
     edgeResolver: env('EFS_FORK_EDGE_RESOLVER', '0xb40297CC4ccD2f837CcF75831B5fA2cAb96C1CFe'),
     mirrorResolver: env('EFS_FORK_MIRROR_RESOLVER', '0xf844378a282FB3F9A4c2A47DaD3Be1706c6f3226'),
     listResolver: env('EFS_FORK_LIST_RESOLVER', '0xdEAb8859ab356B5db7c27313eE079461cB87e137'),
-    listEntryResolver: env('EFS_FORK_LIST_ENTRY_RESOLVER', '0x9Dd2CAE58F9F46280D84aE0ef31c243dc5dAd8aA'),
+    listEntryResolver: env(
+      'EFS_FORK_LIST_ENTRY_RESOLVER',
+      '0x9Dd2CAE58F9F46280D84aE0ef31c243dc5dAd8aA',
+    ),
     listReader: env('EFS_FORK_LIST_READER', '0x2AFe2Bc4A10505fDf765F5709eD13355c68e6287'),
     aliasResolver: env('EFS_FORK_ALIAS_RESOLVER', '0xB0B76064eE417f7568427cbd3fDAcB2e5589743d'),
     systemAccount: env('EFS_FORK_SYSTEM_ACCOUNT', '0x19b249b3E733049f7B97DFddb6dE60c4Bf95C205'),
   },
   schemas: {
-    anchor: env('EFS_FORK_SCHEMA_ANCHOR', '0x1a17b1f94e15395122748852d9a45723bfd7089d730cdddb498b172f5bee7176'),
-    property: env('EFS_FORK_SCHEMA_PROPERTY', '0x88cba9fc420b0d5394ed03a581fca70ad5ea6253fcb5a2196dad86dd057860ba'),
-    data: env('EFS_FORK_SCHEMA_DATA', '0xfa3fb79f9180a924856557413de8f379538148e8a47c5881271c32830a6cadff'),
-    pin: env('EFS_FORK_SCHEMA_PIN', '0x06d8d3628e7bc1e8a33cd54dcefdb70c877afa2c7179e3b188661f07a3c22b4e'),
-    tag: env('EFS_FORK_SCHEMA_TAG', '0x53ae8b0f792a49ce8fb480049e90aa0116fa52f73cf01b08b18f0327b5df22fe'),
-    mirror: env('EFS_FORK_SCHEMA_MIRROR', '0x2d7cf6abc5080ce36256dfcfb9e0dacc01658f1113998c1873348f79611dc6a7'),
-    list: env('EFS_FORK_SCHEMA_LIST', '0x47e63dd52508e29912f14ff549a1eedc2c443b640fb15c0d9657a46a9f61db89'),
-    listEntry: env('EFS_FORK_SCHEMA_LIST_ENTRY', '0xc607c28b4b4c21888a9aca34ad8e02d2a268a31e7a830321f3083dc476b1edd7'),
-    redirect: env('EFS_FORK_SCHEMA_REDIRECT', '0x17fbaa8e0cc14d91b95b4d8417b79d068dfacc8b1273ea2ca5da532e2d0c9e0d'),
+    anchor: env(
+      'EFS_FORK_SCHEMA_ANCHOR',
+      '0x1a17b1f94e15395122748852d9a45723bfd7089d730cdddb498b172f5bee7176',
+    ),
+    property: env(
+      'EFS_FORK_SCHEMA_PROPERTY',
+      '0x88cba9fc420b0d5394ed03a581fca70ad5ea6253fcb5a2196dad86dd057860ba',
+    ),
+    data: env(
+      'EFS_FORK_SCHEMA_DATA',
+      '0xfa3fb79f9180a924856557413de8f379538148e8a47c5881271c32830a6cadff',
+    ),
+    pin: env(
+      'EFS_FORK_SCHEMA_PIN',
+      '0x06d8d3628e7bc1e8a33cd54dcefdb70c877afa2c7179e3b188661f07a3c22b4e',
+    ),
+    tag: env(
+      'EFS_FORK_SCHEMA_TAG',
+      '0x53ae8b0f792a49ce8fb480049e90aa0116fa52f73cf01b08b18f0327b5df22fe',
+    ),
+    mirror: env(
+      'EFS_FORK_SCHEMA_MIRROR',
+      '0x2d7cf6abc5080ce36256dfcfb9e0dacc01658f1113998c1873348f79611dc6a7',
+    ),
+    list: env(
+      'EFS_FORK_SCHEMA_LIST',
+      '0x47e63dd52508e29912f14ff549a1eedc2c443b640fb15c0d9657a46a9f61db89',
+    ),
+    listEntry: env(
+      'EFS_FORK_SCHEMA_LIST_ENTRY',
+      '0xc607c28b4b4c21888a9aca34ad8e02d2a268a31e7a830321f3083dc476b1edd7',
+    ),
+    redirect: env(
+      'EFS_FORK_SCHEMA_REDIRECT',
+      '0x17fbaa8e0cc14d91b95b4d8417b79d068dfacc8b1273ea2ca5da532e2d0c9e0d',
+    ),
   },
   // Per-scheme `/transports/<scheme>` anchor UIDs (read back via
   // EFSIndexer.resolvePath). `web3://` lives under the `onchain` anchor; `ar://`
   // under `arweave`. There is deliberately NO `data` transport (the bootstrap
   // seeds none, and MirrorResolver rejects the data: scheme).
   transports: {
-    web3: env('EFS_FORK_T_ONCHAIN', '0x17e6765916820cecd625c1c0d84b737022480534797e475ed3e3484d525a316c'),
-    ipfs: env('EFS_FORK_T_IPFS', '0xf0325588de1b28f6c0de49192443c06a42823be97d1a9c2bde2bcb6cd66ab114'),
-    arweave: env('EFS_FORK_T_ARWEAVE', '0xdec9de755af10d6b7a64d7eb2301a3d666e1ccc959c5567d5be79906b663aff7'),
-    magnet: env('EFS_FORK_T_MAGNET', '0x3724c1e9b19755f5535e3781ea90c53703e4fb0494415d9b0bd3247063bab7b6'),
-    https: env('EFS_FORK_T_HTTPS', '0x38dd5d54209e9d1db3afcbf11a86f807c1a822130ba1ce8507d9627616f9d725'),
+    web3: env(
+      'EFS_FORK_T_ONCHAIN',
+      '0x17e6765916820cecd625c1c0d84b737022480534797e475ed3e3484d525a316c',
+    ),
+    ipfs: env(
+      'EFS_FORK_T_IPFS',
+      '0xf0325588de1b28f6c0de49192443c06a42823be97d1a9c2bde2bcb6cd66ab114',
+    ),
+    arweave: env(
+      'EFS_FORK_T_ARWEAVE',
+      '0xdec9de755af10d6b7a64d7eb2301a3d666e1ccc959c5567d5be79906b663aff7',
+    ),
+    magnet: env(
+      'EFS_FORK_T_MAGNET',
+      '0x3724c1e9b19755f5535e3781ea90c53703e4fb0494415d9b0bd3247063bab7b6',
+    ),
+    https: env(
+      'EFS_FORK_T_HTTPS',
+      '0x38dd5d54209e9d1db3afcbf11a86f807c1a822130ba1ce8507d9627616f9d725',
+    ),
   },
 }
 

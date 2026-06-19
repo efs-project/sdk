@@ -155,9 +155,11 @@ export interface FileWriteGraphInput {
   readonly mirrors: readonly string[]
   /** Optional MIME content type; when present, emits the `contentType` reserved triplet. */
   readonly contentType?: string
-  /** Bare SHA-256 content digest (ADR-0006) as `0x`-hex, emitted as the
-   * `contentHash` reserved triplet's PROPERTY value. */
-  readonly contentHash: Hex
+  /** Bare SHA-256 content digest (ADR-0006): lowercase 64-hex with NO `0x`
+   * prefix (byte-identical to `sha256sum`). Emitted verbatim as the `contentHash`
+   * reserved triplet's PROPERTY `string value`. NOT `0x`-prefixed — the read path
+   * validates the canonical bare form and would otherwise report `malformed-claim`. */
+  readonly contentHash: string
   /** File byte length, emitted as the `size` reserved triplet's PROPERTY value. */
   readonly size: bigint
   /** The frozen schema UID set for the target deployment. */
@@ -214,8 +216,10 @@ const GENERIC_FOR_SCHEMA = ZERO_UID
  * Pure: it allocates the attestation graph and returns it; it performs no I/O and
  * resolves nothing on-chain. See the module doc for the layer/ref model.
  *
- * @throws never for valid input; the encoders throw on a malformed value (e.g. a
- *   non-hex `contentHash`) — that is a programming error, surfaced eagerly.
+ * @throws never for valid input; the schema encoders throw on a malformed field
+ *   value — that is a programming error, surfaced eagerly. (Reserved-key values
+ *   like `contentHash` are plain `string value` PROPERTYs, so any string encodes;
+ *   well-formedness of the hash is the caller's contract per ADR-0006.)
  */
 export function buildFileWriteGraph(input: FileWriteGraphInput): FileWriteGraph {
   const { schemas } = input
@@ -393,7 +397,8 @@ function buildBindingPin(schemas: EfsSchemaUIDs, key: ReservedKey): PlannedAttes
 /**
  * The reserved-key entries to emit, in canonical order (contentType, contentHash,
  * size), skipping `contentType` when no MIME type is supplied. `contentHash` is
- * already `0x`-hex; `size` is rendered as a decimal string for the PROPERTY value.
+ * the bare SHA-256 digest (ADR-0006, no `0x` prefix); `size` is rendered as a
+ * decimal string for the PROPERTY value.
  */
 function reservedEntries(
   input: FileWriteGraphInput,
