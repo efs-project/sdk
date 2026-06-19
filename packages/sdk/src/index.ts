@@ -274,6 +274,20 @@ export {
 } from './content/hash.js'
 // Off-chain fetch/verify/mirror engine (freeze-independent; see future-proofing.md §2).
 export * from './mirror/index.js'
+// Pure file-write graph builder (chain-free; the shared Tier-1/Tier-2 write core).
+export {
+  buildFileWriteGraph,
+  isSymbolicRef,
+  REF,
+  type FileWriteGraph,
+  type FileWriteGraphInput,
+  type PlannedAttestation,
+  type SymbolicRef,
+  type RefOrUID,
+  type PinDataRef,
+  type ReservedKey,
+  type WriteLayer,
+} from './writes/index.js'
 export { lens, identity, resolveLens, MAX_LENSES, type Lens } from './lenses/resolve.js'
 export {
   deployments,
