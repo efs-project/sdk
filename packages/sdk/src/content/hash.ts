@@ -46,10 +46,10 @@ export function verifyContent(
   claimedHash: string | undefined,
 ): VerificationStatus {
   if (claimedHash === undefined) return 'no-claim'
-  const claim = claimedHash.toLowerCase()
-  // A claim that isn't a well-formed bare SHA-256 (0x-prefixed, padded, wrong
-  // length) is an authoring bug, not content tampering (review A9) — distinguish
-  // it from a real content/hash divergence so callers can tell the two apart.
-  if (!/^[0-9a-f]{64}$/.test(claim)) return 'malformed-claim'
-  return hashContent(bytes) === claim ? 'matches-author' : 'mismatch'
+  // A claim that isn't a canonical bare SHA-256 — 0x-prefixed, padded, wrong
+  // length, OR non-lowercase (ADR-0006 requires lowercase 64-hex) — is an
+  // authoring bug, not content tampering (review A9). Validate the ORIGINAL claim
+  // (do not lowercase first, or an uppercase hash would silently "match").
+  if (!/^[0-9a-f]{64}$/.test(claimedHash)) return 'malformed-claim'
+  return hashContent(bytes) === claimedHash ? 'matches-author' : 'mismatch'
 }

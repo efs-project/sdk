@@ -465,6 +465,15 @@ describe('fetchVerified - verification statuses', () => {
     expect(res.verification).toBe('malformed-claim')
   })
 
+  it('malformed-claim for a non-canonical (uppercase) hash, not a silent match', async () => {
+    const bytes = enc('payload')
+    const upper = (hashContent(bytes) as string).toUpperCase() // valid bytes, uppercased claim
+    const res = await fetchVerified(['https://a.example/x'], upper, {
+      fetchImpl: vi.fn(async () => mockResponse(bytes)) as unknown as typeof fetch,
+    })
+    expect(res.verification).toBe('malformed-claim')
+  })
+
   it('no-claim when expectedHash is undefined', async () => {
     const res = await fetchVerified(['https://a.example/x'], undefined, {
       fetchImpl: makeFetch(),
@@ -549,6 +558,8 @@ describe('fetchVerified - SSRF', () => {
     expect(res.verification).toBe('matches-author')
     expect(fetchImpl).toHaveBeenCalledTimes(2)
     expect(fetchImpl).toHaveBeenLastCalledWith('https://cdn.example/b', expect.anything())
+    // urlUsed reports the FINAL fetched URL, not the original candidate.
+    expect(res.urlUsed).toBe('https://cdn.example/b')
   })
 })
 

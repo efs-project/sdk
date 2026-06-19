@@ -31,5 +31,10 @@ describe('content hashing (ADR-0006: bare SHA-256)', () => {
     const bytes = enc('gm')
     expect(verifyContent(bytes, `0x${hashContent(bytes)}`)).toBe('malformed-claim')
     expect(verifyContent(bytes, 'deadbeef')).toBe('malformed-claim')
+    // Uppercase is non-canonical (ADR-0006 = lowercase 64-hex): malformed, not a
+    // silent match — must NOT be lowercased before the shape check.
+    expect(verifyContent(bytes, (hashContent(bytes) as string).toUpperCase())).toBe(
+      'malformed-claim',
+    )
   })
 })

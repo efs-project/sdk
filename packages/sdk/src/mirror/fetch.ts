@@ -88,18 +88,20 @@ export class AllMirrorsFailedError extends Error {
   }
 }
 
-/** A 64-hex bare SHA-256 (an unbranded shape `expectedHash` may arrive as). */
+/** A canonical bare SHA-256: lowercase 64-hex (ADR-0006). An uppercase or other
+ * non-canonical claim is NOT well-formed — it's a malformed claim, not a match. */
 function isWellFormedHash(s: string): boolean {
-  return /^[0-9a-f]{64}$/.test(s.toLowerCase())
+  return /^[0-9a-f]{64}$/.test(s)
 }
 
 /** Compute the trust-relative status without re-importing verifyContent's
  * branching (we already have the bytes hashed once on the success path). */
 function statusFor(bytes: Uint8Array, expectedHash: string | undefined): VerificationStatus {
   if (expectedHash === undefined) return 'no-claim'
-  const claim = expectedHash.toLowerCase()
-  if (!isWellFormedHash(claim)) return 'malformed-claim'
-  return (hashContent(bytes) as string) === claim ? 'matches-author' : 'mismatch'
+  // Validate the ORIGINAL claim (no lowercasing) — a non-canonical on-chain hash
+  // is malformed, not a silent match. hashContent returns canonical lowercase.
+  if (!isWellFormedHash(expectedHash)) return 'malformed-claim'
+  return (hashContent(bytes) as string) === expectedHash ? 'matches-author' : 'mismatch'
 }
 
 /**
@@ -198,11 +200,12 @@ async function finishResponse(
   return declaredType !== undefined ? { bytes, contentType: declaredType } : { bytes }
 }
 
-/** Try a single concrete HTTP(S) URL. Returns bytes + declared type, or throws. */
+/** Try a single concrete HTTP(S) URL. Returns bytes + declared type + the FINAL
+ * URL actually fetched (after any redirects), or throws. */
 async function fetchOne(
   url: URL,
   opts: FetchVerifiedOptions,
-): Promise<{ bytes: Uint8Array; contentType?: string }> {
+): Promise<{ bytes: Uint8Array; contentType?: string; finalUrl: string }> {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS
   const maxBytes = opts.maxBytes ?? DEFAULT_MAX_BYTES
   const doFetch = opts.fetchImpl ?? globalThis.fetch
@@ -234,7 +237,7 @@ async function fetchOne(
           headers: { accept: 'application/octet-stream, */*', 'accept-encoding': 'identity' },
         })
         if (!followed.ok) throw new Error(`HTTP ${followed.status} ${followed.statusText}`)
-        return finishResponse(followed, maxBytes, controller)
+        return { ...(await finishResponse(followed, maxBytes, controller)), finalUrl: current.href }
       }
 
       if (res.status >= 300 && res.status < 400) {
@@ -259,7 +262,7 @@ async function fetchOne(
       if (!res.ok) {
         throw new Error(`HTTP ${res.status} ${res.statusText}`)
       }
-      return finishResponse(res, maxBytes, controller)
+      return { ...(await finishResponse(res, maxBytes, controller)), finalUrl: current.href }
     }
   } finally {
     clearTimeout(timer)
@@ -374,14 +377,14 @@ export async function fetchVerified(
       }
 
       try {
-        const { bytes, contentType } = await fetchOne(url, opts)
+        const { bytes, contentType, finalUrl } = await fetchOne(url, opts)
         const verification = statusFor(bytes, expectedHash)
         return {
           bytes,
           verification,
           ...(contentType !== undefined ? { contentType } : {}),
           mirrorUsed: uri,
-          urlUsed: url.href,
+          urlUsed: finalUrl,
           attempts,
         }
       } catch (err) {
