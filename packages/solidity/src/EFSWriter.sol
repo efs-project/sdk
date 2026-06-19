@@ -1,72 +1,72 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.26;
 
+import {IEAS} from "@ethereum-attestation-service/eas-contracts/contracts/IEAS.sol";
 import {EFSLib} from "./EFSLib.sol";
 
 /// @title EFSWriter
-/// @notice Inheritable base contract — the happy path for adding EFS to your contract.
-///         Inherit it and call the wrapped helpers; because the base runs in your
-///         contract's context, your contract stays the EAS attester (ADR-0003).
-/// @dev    Status: scaffold. Methods delegate to {EFSLib}, whose bodies revert until the
-///         build lands. EFS-level events/errors live here (EAS events are UID-keyed, not
-///         domain-keyed, so domain consumers need these).
+/// @notice Inheritable base contract — the happy path for adding EFS *writes* to your contract.
+///         Inherit it, hold an {IEAS} reference, and call the wrapped helpers; because {EFSLib}
+///         is `internal` and inlines into your contract's context, **your contract stays the EAS
+///         attester** (ADR-0003). Run by an EIP-7702 account or an app contract, that is what
+///         gives wallet users a one-signature file write (planning/Designs/sdk-minimal-clicks.md).
+/// @dev    EFS-level events live here: EAS events are UID-keyed, not domain-keyed, so domain
+///         consumers need a path/data-keyed signal. The composition itself lives in {EFSLib}.
 abstract contract EFSWriter {
-    /// @notice Emitted when this contract pins a file at a path.
-    /// @dev    `path` is indexed so domain consumers can filter pins by path hash
-    ///         (indexed strings are stored as their keccak256 hash in the topic).
-    event EFSFilePinned(string indexed path, bytes32 indexed dataUID, bytes32 pinUID);
+    /// @notice The EAS instance every write attests against. Set once at construction.
+    IEAS internal immutable EAS;
 
-    // --- Reads (view) ---
+    /// @notice Emitted when this contract composes a full file write at a path.
+    /// @dev    `fileAnchor` is indexed so domain consumers can filter writes by the path node
+    ///         (the file-ANCHOR UID that the placement PIN's `definition` names). `dataUID` is
+    ///         indexed so consumers can follow a file's identity across placements.
+    /// @param  fileAnchor     The created file-ANCHOR UID (names the path).
+    /// @param  dataUID        The DATA (file identity) UID the write placed.
+    /// @param  placementPin   The placement-PIN UID that makes the file appear at the path.
+    event EFSFileWritten(bytes32 indexed fileAnchor, bytes32 indexed dataUID, bytes32 placementPin);
 
-    /// @notice Read this contract's own file at `path`.
-    function _efsRead(string memory path) internal view returns (bool exists, bytes32 dataUID) {
-        return EFSLib.read(path);
+    /// @param eas The EAS instance this writer attests against.
+    constructor(IEAS eas) {
+        EAS = eas;
     }
 
-    /// @notice Read `path` resolved through an explicit author address.
-    function _efsReadAs(string memory path, address author)
+    /// @notice Compose a full file write (DATA + file-ANCHOR + MIRRORs + reserved-key triplets +
+    ///         placement PIN) in one transaction; emits {EFSFileWritten}.
+    /// @dev    Delegates to {EFSLib.writeFile}, which threads the EAS-returned UIDs in memory. The
+    ///         attester of every node is `address(this)` (this contract), because the lib inlines.
+    /// @param  w The file-write inputs (schemas, parent anchor, name, mirrors, reserved keys).
+    /// @return dataUID         The created DATA UID.
+    /// @return fileAnchorUID   The created file-ANCHOR UID.
+    /// @return placementPinUID The created placement-PIN UID.
+    function _efsWriteFile(EFSLib.FileWrite memory w)
         internal
-        view
-        returns (bool exists, bytes32 dataUID)
+        returns (bytes32 dataUID, bytes32 fileAnchorUID, bytes32 placementPinUID)
     {
-        return EFSLib.readAs(path, author);
+        (dataUID, fileAnchorUID, placementPinUID) = EFSLib.writeFile(EAS, w);
+        emit EFSFileWritten(fileAnchorUID, dataUID, placementPinUID);
     }
 
-    /// @notice Read `path` resolved through an explicit, ordered lens stack.
-    function _efsRead(string memory path, address[] memory lens)
-        internal
-        view
-        returns (bool exists, bytes32 dataUID)
-    {
-        return EFSLib.read(path, lens);
-    }
-
-    // --- Writes ---
-
-    /// @notice Pin a file at `path`; emits {EFSFilePinned} for domain consumers.
-    /// @dev    {EFSLib.pinFile} reverts until implemented, so the emit is unreachable
-    ///         for now — but this locks the happy-path shape (capture, emit, return)
-    ///         so inheritors get the event without writing their own wrapper.
-    function _efsPinFile(string memory path, bytes32 dataUID) internal returns (bytes32 pinUID) {
-        pinUID = EFSLib.pinFile(path, dataUID);
-        emit EFSFilePinned(path, dataUID, pinUID);
-    }
-
-    /// @notice Pin a file at `path` with EAS-native lifecycle controls (`opts`); emits {EFSFilePinned}.
-    /// @dev    Overload mirroring {EFSLib.pinFile} with {EFSLib.PinOpts} (B2). Emits the same
-    ///         event as the 2-arg form so consumers index pins uniformly regardless of opts.
-    function _efsPinFile(string memory path, bytes32 dataUID, EFSLib.PinOpts memory opts)
-        internal
-        returns (bytes32 pinUID)
-    {
-        pinUID = EFSLib.pinFile(path, dataUID, opts);
-        emit EFSFilePinned(path, dataUID, pinUID);
-    }
-
-    /// @notice Create a folder hierarchy for `path` (mkdir -p).
-    /// @dev    No event yet: mkdir has no EFS-level event in the design, so this wrapper
-    ///         intentionally does not emit. Add one here if/when the design defines it.
-    function _efsMkdir(string memory path) internal returns (bytes32 dirUID) {
-        return EFSLib.mkdir(path);
+    /// @notice Hardlink an existing DATA at a new path with a single placement PIN; emits
+    ///         {EFSFileWritten}.
+    /// @dev    Delegates to {EFSLib.placeExisting} (the dedup short-circuit). Emits the same event
+    ///         as a full write so consumers index placements uniformly.
+    /// @param  schemas         The frozen schema UID set (only `anchor` and `pin` are used).
+    /// @param  dataUID         The pre-existing DATA UID to place.
+    /// @param  parentAnchorUID Pre-existing parent folder anchor UID.
+    /// @param  fileName        The file's anchor name (verbatim).
+    /// @param  forSchema       The file-ANCHOR's `forSchema` field (generic = bytes32(0)).
+    /// @return fileAnchorUID   The created file-ANCHOR UID.
+    /// @return placementPinUID The created placement-PIN UID.
+    function _efsPlaceExisting(
+        EFSLib.SchemaUIDs memory schemas,
+        bytes32 dataUID,
+        bytes32 parentAnchorUID,
+        string memory fileName,
+        bytes32 forSchema
+    ) internal returns (bytes32 fileAnchorUID, bytes32 placementPinUID) {
+        (fileAnchorUID, placementPinUID) = EFSLib.placeExisting(
+            EAS, schemas, dataUID, parentAnchorUID, fileName, forSchema
+        );
+        emit EFSFileWritten(fileAnchorUID, dataUID, placementPinUID);
     }
 }

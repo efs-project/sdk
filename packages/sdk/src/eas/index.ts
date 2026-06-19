@@ -13,6 +13,7 @@ export {
   attestAbi,
   multiAttestAbi,
   getAttestationAbi,
+  attestedEventAbi,
   getSchemaAbi,
   easAbi,
   schemaRegistryAbi,

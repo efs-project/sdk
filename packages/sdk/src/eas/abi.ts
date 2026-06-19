@@ -109,6 +109,30 @@ export const getAttestationAbi = [
   },
 ] as const
 
+/**
+ * `IEAS.Attested(address indexed recipient, address indexed attester, bytes32 uid,
+ * bytes32 indexed schemaUID)` (IEAS.sol). Emitted once per created attestation, in
+ * submission order, by both `attest` and `multiAttest`. Only `uid` is non-indexed
+ * (carried in the log `data`); `recipient`/`attester`/`schemaUID` are topics.
+ *
+ * The Tier-1 submitter parses these out of a mined receipt — in log order — to
+ * recover the real UID minted for each planned attestation (EAS does not return
+ * the UIDs in a way the tx receipt exposes other than this event).
+ */
+export const attestedEventAbi = [
+  {
+    type: 'event',
+    name: 'Attested',
+    anonymous: false,
+    inputs: [
+      { name: 'recipient', type: 'address', indexed: true },
+      { name: 'attester', type: 'address', indexed: true },
+      { name: 'uid', type: 'bytes32', indexed: false },
+      { name: 'schemaUID', type: 'bytes32', indexed: true },
+    ],
+  },
+] as const
+
 /** `ISchemaRegistry.getSchema(bytes32) -> SchemaRecord`. */
 export const getSchemaAbi = [
   {
@@ -173,6 +197,7 @@ export const easAbi = [
   ...attestAbi,
   ...multiAttestAbi,
   ...getAttestationAbi,
+  ...attestedEventAbi,
   ...easErrorsAbi,
 ] as const
 

@@ -8,6 +8,12 @@ optimizer = true
 optimizer_runs = 200
 remappings = [
   "forge-std/=lib/forge-std/src/",
+  # EAS interfaces (IEAS / AttestationRequest / Common) — vendored under vendor/
+  # (committed, not a clone-on-setup dep like lib/) so the import paths are
+  # BYTE-IDENTICAL to the frozen EFS contracts
+  # (@ethereum-attestation-service/eas-contracts@1.7.1). A consumer that already
+  # has eas-contracts installed can override this remapping to point at theirs.
+  "@ethereum-attestation-service/eas-contracts/=vendor/eas-contracts/",
   # Consumers remap this package as:
   #   @efs/solidity/=node_modules/@efs/solidity/
   "@efs/solidity/=src/",

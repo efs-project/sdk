@@ -274,20 +274,8 @@ export {
 } from './content/hash.js'
 // Off-chain fetch/verify/mirror engine (freeze-independent; see future-proofing.md §2).
 export * from './mirror/index.js'
-// Pure file-write graph builder (chain-free; the shared Tier-1/Tier-2 write core).
-export {
-  buildFileWriteGraph,
-  isSymbolicRef,
-  REF,
-  type FileWriteGraph,
-  type FileWriteGraphInput,
-  type PlannedAttestation,
-  type SymbolicRef,
-  type RefOrUID,
-  type PinDataRef,
-  type ReservedKey,
-  type WriteLayer,
-} from './writes/index.js'
+// Write path: pure graph builder + Tier-1 submitter (writes/index barrels both).
+export * from './writes/index.js'
 export { lens, identity, resolveLens, MAX_LENSES, type Lens } from './lenses/resolve.js'
 export {
   deployments,
@@ -326,8 +314,8 @@ export type {
 } from './types.js'
 // Overview convention constants (values, ADR-0011).
 export { OVERVIEW_NAME, SAFETY_EXCLUDES, MAX_RENDER_BYTES } from './types.js'
-// On-chain directory filtering (ADR-0011): vendored view ABI + pure routing helpers.
-export { fileViewAbi } from './chain/abi/fileView.js'
+// Vendored contract ABIs (view + resolvers) for reads + writes (ADR-0010/0011).
+export * from './chain/abi/index.js'
 export {
   MAX_ATTESTERS_PER_QUERY,
   MAX_EXCLUDE_TAGS_PER_QUERY,

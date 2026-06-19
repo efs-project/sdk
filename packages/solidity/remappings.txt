@@ -1,2 +1,3 @@
 forge-std/=lib/forge-std/src/
+@ethereum-attestation-service/eas-contracts/=vendor/eas-contracts/
 @efs/solidity/=src/
