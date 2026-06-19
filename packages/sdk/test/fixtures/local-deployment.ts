@@ -45,6 +45,29 @@
  *
  * eas + schemaRegistry are the canonical Sepolia (CREATE2) addresses, present on the fork.
  *
+ * ── Transport anchors (added 2026-06-19) ─────────────────────────────────────────────────
+ * The full ceremony now includes `SystemAccount.bootstrap` (ADR-0011 / ADR-0053), which authors
+ * the canonical `/transports/*` scaffolding as ANCHOR attestations from the SystemAccount address.
+ * `bootstrap` seeds the `/transports` root anchor plus eleven `/transports/<scheme>` children:
+ *   onchain (web3://), ipfs, arweave (ar://), magnet, https, ftp, s3, gs, dat, rsync, bittorrent.
+ * A MIRROR's `transportDefinition` field MUST point at the `/transports/<scheme>` child anchor for
+ * its URI scheme (MirrorResolver enforces the anchor is a descendant of `/transports`).
+ *
+ * ⚠️ Unlike the proxies + schema UIDs, these anchor UIDs are NOT deterministic: an ANCHOR UID is an
+ * EAS attestation UID, which folds in the block timestamp/bump, so a fresh fork run yields different
+ * `/transports/*` UIDs (the addresses + 9 schema UIDs above DID reproduce byte-identically). The
+ * values below are from the run that completed the full sealed bootstrap on 2026-06-19. If you
+ * redeploy, re-read them with `EFSIndexer.resolvePath(root, "transports")` then `resolvePath(transports,
+ * "<scheme>")` and update {@link LOCAL_TRANSPORT_ANCHORS} / {@link LOCAL_TRANSPORTS}.
+ *
+ * {@link LOCAL_TRANSPORTS} is the SDK-consumable map: it is keyed by the SDK's URI-scheme strings
+ * (`web3`, `arweave`, `ipfs`, `magnet`, `https` — the `TRANSPORT` allowlist in `mirror/transport.ts`,
+ * which the write path uses via `transports[schemeOf(uri)]`), so `web3` maps to the on-chain anchor
+ * named `onchain`. There is no on-chain `data` anchor, so the inline `data:` scheme is intentionally
+ * absent (a `data:` write must pass `opts.transportDefinition`). {@link LOCAL_TRANSPORT_ANCHORS}
+ * records EVERY on-chain anchor by its literal `/transports/<name>` path segment plus the `/transports`
+ * root, for fidelity / tests that need the schemes the SDK doesn't surface by name.
+ *
  * ⚠️ View-address caveat: EFSFileView / EFSRouter / ListReader are deployed with plain CREATE
  * (nonce-based), NOT CREATE3 — they are non-frozen and in no schema UID (DEPLOYMENT.md §0). The
  * addresses below are from a run where the deployer's nonce was post-core-deploy; if you redeploy
@@ -62,6 +85,7 @@ import type {
   EfsContracts,
   EfsDeployment,
   EfsSchemaUIDs,
+  EfsTransports,
 } from '../../src/chain/deployments.js'
 
 /** The local Anvil/Hardhat Sepolia-fork chain id. */
@@ -113,11 +137,49 @@ export const LOCAL_SCHEMA_UIDS: EfsSchemaUIDs = {
   redirect: '0x17fbaa8e0cc14d91b95b4d8417b79d068dfacc8b1273ea2ca5da532e2d0c9e0d' as Hex,
 }
 
+/**
+ * Every `/transports/*` anchor the sealed `SystemAccount.bootstrap` authored, keyed by its literal
+ * on-chain path-segment name, plus the `/transports` root under the `root` key. These are the anchor
+ * UIDs a MIRROR's `transportDefinition` points at (the per-scheme child, never the root). Read back
+ * from the index after the full ceremony (block 10_691_000 Sepolia fork, run of 2026-06-19); also
+ * verified `MirrorResolver.transportsAnchorUID()` equals the `/transports` root recorded here.
+ */
+export const LOCAL_TRANSPORT_ANCHORS = {
+  /** `/transports` root anchor (== `MirrorResolver.transportsAnchorUID()`). Not a valid mirror target. */
+  root: '0xd03b40868ad854fd22668982e24c3ca6fdab47d181d06c2efa27b9b63648aefb' as Hex,
+  onchain: '0xcaa6d3c1a1d1092bb3704f5bfac0be5f3f50bda1e0570fbf2721c3c7e97d2b57' as Hex,
+  ipfs: '0x86abc1ec1cb6f71af19ae07144ea244744454bdeb06d9bb04b027ebeccce1601' as Hex,
+  arweave: '0x11fbafb5405ea6b0295b3a8f96068d826e3c57ba6cbac79318d93dfd1d349004' as Hex,
+  magnet: '0x8b8bba44fffe80896e83e27281219df68b9dc96af270eeddd1f6c2fdaa8bf705' as Hex,
+  https: '0x776d71db0e002480c99239048a70f00dcb7f65e686569ab939594440e7a826b2' as Hex,
+  ftp: '0xaab789a84418bbc98fe6478ef242431212c8727c63d8b870b878351579c99a37' as Hex,
+  s3: '0xc6d3e38114304c9fc6c23dda8013af853f6921cbc5cb69a9d515e04056053961' as Hex,
+  gs: '0x42cef429d1119e17c085ecc95fe5058b032cee77cde93500916bf56258c180ad' as Hex,
+  dat: '0x4322e0c1c0a982fdd5422a26f029f1e95108e1a1f0b85f667be1cf979b50d313' as Hex,
+  rsync: '0xda2f342e0170fdbeb25cb9c8a2803ecdb5f830ed53e7307acf57e659c98848a6' as Hex,
+  bittorrent: '0x3e50eb60ca2b917feaf8539e7d54f852f4ee4972fab74ec9b05e0e9126c2e5ab' as Hex,
+} as const
+
+/**
+ * SDK-consumable transports map (the `EfsDeployment.transports` shape). Keyed by the SDK's URI-scheme
+ * strings (`mirror/transport.ts` → `TRANSPORT`): the write path resolves `transports[schemeOf(uri)]`.
+ * `web3` maps to the on-chain `/transports/onchain` anchor; `ar://` URIs resolve as `arweave`. The
+ * inline `data:` scheme has no on-chain anchor, so it is intentionally omitted.
+ */
+export const LOCAL_TRANSPORTS: EfsTransports = {
+  web3: LOCAL_TRANSPORT_ANCHORS.onchain,
+  arweave: LOCAL_TRANSPORT_ANCHORS.arweave,
+  ipfs: LOCAL_TRANSPORT_ANCHORS.ipfs,
+  magnet: LOCAL_TRANSPORT_ANCHORS.magnet,
+  https: LOCAL_TRANSPORT_ANCHORS.https,
+}
+
 /** The chainId-31337 deployment entry. */
 export const LOCAL_DEPLOYMENT: EfsDeployment = {
   chainId: LOCAL_CHAIN_ID,
   contracts: LOCAL_CONTRACTS,
   schemas: LOCAL_SCHEMA_UIDS,
+  transports: LOCAL_TRANSPORTS,
 }
 
 /** A {@link DeploymentsMap} ready to pass as the `deployments` client-config override. */

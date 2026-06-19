@@ -9,6 +9,7 @@ import {
 import { sepolia } from 'viem/chains'
 import { describe, expect, it } from 'vitest'
 import {
+  DeploymentNotFound,
   MaxLensesExceeded,
   NotImplemented,
   WalletRequired,
@@ -22,17 +23,26 @@ const walletClient = createWalletClient({ chain: sepolia, transport: http() }) a
 const addr = (n: number) => `0x${n.toString(16).padStart(40, '0')}` as Address
 
 describe('namespaced client (Decision F)', () => {
-  it('read-only verbs reject with NotImplemented (async contract)', async () => {
+  it('read verbs are wired (resolve/list reach deployment resolution, not NotImplemented)', async () => {
+    // The read verbs (resolve/stat/cat/fetch/list) are now implemented. On sepolia,
+    // where no EFS deployment is registered, a read passes the wiring and reaches
+    // deployment resolution → DeploymentNotFound. That it is no longer
+    // NotImplemented proves the verb is wired (same pattern as the write gate test).
     const efs = createEfsClient({ publicClient })
-    await expect(efs.fs.read('/x')).rejects.toThrow(NotImplemented)
+    await expect(efs.fs.read('/x')).rejects.toThrow(DeploymentNotFound)
     await expect(
       (async () => {
         for await (const _ of efs.fs.list('/x')) break
       })(),
-    ).rejects.toThrow(NotImplemented)
+    ).rejects.toThrow(DeploymentNotFound)
   })
 
-  it('write methods are gated: WalletRequired without a wallet, NotImplemented with one', async () => {
+  it('overview is still NotImplemented (later slice)', async () => {
+    const efs = createEfsClient({ publicClient })
+    await expect(efs.fs.overview('/x')).rejects.toThrow(NotImplemented)
+  })
+
+  it('write methods are gated: WalletRequired without a wallet, wired with one', async () => {
     // The type hides `write` on a read-only client; at runtime the verb exists and
     // guards with WalletRequired (the backstop behind the type gate).
     const readOnly = createEfsClient({ publicClient }) as {
@@ -40,8 +50,11 @@ describe('namespaced client (Decision F)', () => {
     }
     await expect(readOnly.fs.write('/x', new Uint8Array())).rejects.toThrow(WalletRequired)
 
+    // With a wallet the write is now wired (Tier-1). On a chain with no registered
+    // EFS deployment it passes the wallet gate and reaches deployment resolution —
+    // DeploymentNotFound proves it's wired (it is no longer NotImplemented).
     const writable = createEfsClient({ publicClient, walletClient })
-    await expect(writable.fs.write('/x', new Uint8Array())).rejects.toThrow(NotImplemented)
+    await expect(writable.fs.write('/x', new Uint8Array())).rejects.toThrow(DeploymentNotFound)
   })
 
   it('exposes lens helpers under efs.lenses', () => {
@@ -60,13 +73,16 @@ describe('namespaced client (Decision F)', () => {
       removeListener: () => {},
     } as unknown as EIP1193Provider
 
-    // No account → read-only client; read verb still resolves to NotImplemented.
+    // No account → read-only client; the read verb is wired and reaches deployment
+    // resolution (DeploymentNotFound on sepolia, where none is registered).
     const ro = createEfsClient({ provider, chain: sepolia })
-    await expect(ro.fs.read('/x')).rejects.toThrow(NotImplemented)
+    await expect(ro.fs.read('/x')).rejects.toThrow(DeploymentNotFound)
 
-    // With an account → write-capable; write resolves to NotImplemented (not WalletRequired).
+    // With an account → write-capable; write is wired (Tier-1) and passes the
+    // wallet gate, reaching deployment resolution (DeploymentNotFound on a chain
+    // with no registered EFS deployment) — not WalletRequired, not NotImplemented.
     const rw = createEfsClient({ provider, chain: sepolia, account: addr(1) })
-    await expect(rw.fs.write('/x', new Uint8Array())).rejects.toThrow(NotImplemented)
+    await expect(rw.fs.write('/x', new Uint8Array())).rejects.toThrow(DeploymentNotFound)
   })
 })
 

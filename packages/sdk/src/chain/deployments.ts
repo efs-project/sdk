@@ -56,10 +56,23 @@ export type EfsSchemaUIDs = {
   redirect: Hex
 }
 
+/**
+ * The on-chain `/transports/<scheme>` anchor UIDs, keyed by URI scheme (`web3`,
+ * `ipfs`, `arweave`, `https`, `magnet`, `data`, …). A MIRROR's `transportDefinition`
+ * field is the anchor UID for its scheme (ADR-0011, contracts: transports are
+ * anchors under `/transports/`). The deploy seeds these; the write path reads the
+ * relevant one when authoring a MIRROR. Optional + additive — absent on a
+ * deployment that hasn't recorded them, in which case a write must supply the UID
+ * via `WriteOptions.transportDefinition` (or fail with a clear `MissingTransport`).
+ */
+export type EfsTransports = Partial<Record<string, Hex>>
+
 export type EfsDeployment = {
   chainId: number
   contracts: EfsContracts
   schemas: EfsSchemaUIDs
+  /** Per-scheme `/transports/<scheme>` anchor UIDs (ADR-0011); optional/additive. */
+  transports?: EfsTransports
 }
 
 export type DeploymentsMap = Record<number, EfsDeployment>

@@ -71,16 +71,20 @@ describe('createEfsClient — ProviderConfig normalization (EIP-1193 boundary)',
   it('builds a read-only client from a provider with no account', async () => {
     const provider = createMockProvider({ chainId: CHAIN_ID })
     const efs = createEfsClient({ provider, chain: localChain })
-    // The read namespaces exist; the read verb is shaped but not implemented yet.
+    // The read namespaces exist; the read verb is wired. Without a `deployments`
+    // override for this chain it reaches deployment resolution → DeploymentNotFound
+    // (proving it's wired, no longer the NotImplemented stub).
     expect(typeof efs.lenses.lens).toBe('function')
-    await expect(efs.fs.read('/x')).rejects.toThrow(NotImplemented)
+    await expect(efs.fs.read('/x')).rejects.toThrow(DeploymentNotFound)
   })
 
   it('builds a write-capable client when an account is supplied', async () => {
     const provider = createMockProvider({ chainId: CHAIN_ID })
     const efs = createEfsClient({ provider, chain: localChain, account: addr(99) })
-    // `write` is present and reaches NotImplemented (not WalletRequired).
-    await expect(efs.fs.write('/x', new Uint8Array())).rejects.toThrow(NotImplemented)
+    // `write` is present and wired (Tier-1): it passes the wallet gate and reaches
+    // deployment resolution (DeploymentNotFound — no deployment for this chain),
+    // proving it's no longer the NotImplemented stub and no longer WalletRequired.
+    await expect(efs.fs.write('/x', new Uint8Array())).rejects.toThrow(DeploymentNotFound)
   })
 })
 
@@ -98,10 +102,12 @@ describe('createEfsClient — runtime write gate', () => {
     expect(() => readOnly.batch()).toThrow(WalletRequired)
   })
 
-  it('a write client reaches NotImplemented for write and batch', async () => {
+  it('a write client wires write (Tier-1) and still stubs batch', async () => {
     const provider = createMockProvider({ chainId: CHAIN_ID })
     const efs = createEfsClient({ provider, chain: localChain, account: addr(1) })
-    await expect(efs.fs.write('/x', new Uint8Array())).rejects.toThrow(NotImplemented)
+    // write is wired: passes the wallet gate, reaches deployment resolution.
+    await expect(efs.fs.write('/x', new Uint8Array())).rejects.toThrow(DeploymentNotFound)
+    // batch is still the NotImplemented stub (a later slice).
     expect(() => efs.batch()).toThrow(NotImplemented)
   })
 })

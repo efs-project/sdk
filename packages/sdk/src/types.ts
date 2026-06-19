@@ -75,6 +75,30 @@ export type FetchOptions = {
   verify?: boolean
   /** Restrict/prioritize transports (e.g. `['ipfs', 'https']`); default = all by priority. */
   transports?: readonly TransportName[]
+  /** IPFS gateway origins (e.g. `https://ipfs.io`), tried in order. Overrides the
+   * built-in defaults for `ipfs://` mirror resolution. */
+  ipfsGateways?: readonly string[]
+  /** Arweave gateway origins (e.g. `https://arweave.net`), tried in order.
+   * Overrides the built-in defaults for `ar://` mirror resolution. */
+  arweaveGateways?: readonly string[]
+  /**
+   * Allow fetching from private/loopback/link-local hosts (disable the SSRF
+   * guard). Default `false`. Set `true` ONLY when the caller has its own egress
+   * controls — e.g. a local dev/fork node serving a `https://127.0.0.1` mirror.
+   * The guard exists to stop an attacker-chosen mirror steering a server-side
+   * fetch at internal endpoints, so leaving it on is the safe default.
+   */
+  allowPrivateHosts?: boolean
+  /** Extra hostnames to allow past the SSRF guard even if they look private
+   * (exact match, lowercased). A narrower alternative to `allowPrivateHosts`. */
+  allowHosts?: readonly string[]
+  /**
+   * Inject a `fetch` implementation for byte retrieval (the off-chain engine
+   * defaults to the global `fetch`). Escape hatch for callers that must control
+   * egress at the transport level — a custom undici `Agent` (self-signed certs,
+   * pinned DNS), a test stub, or a dev proxy. Most callers leave this unset.
+   */
+  fetchImpl?: typeof fetch
 }
 
 // ── Pagination ─────────────────────────────────────────────────────────────────
@@ -125,6 +149,29 @@ export type WriteOptions = {
   onProgress?: (p: { step: number; total: number; phase: string }) => void
   resume?: WriteReceipt
   signal?: AbortSignal
+  /**
+   * Retrieval URIs where the bytes live (one MIRROR per entry). When supplied,
+   * the SDK does NOT inline the content — it publishes these as the file's
+   * mirrors. The URI scheme of the FIRST entry selects the transport definition
+   * (the on-chain `/transports/<scheme>` anchor) unless `transportDefinition` is
+   * given. Omit to fall back to a self-contained inline `data:` URI (guarded by a
+   * size cap — large content must supply `mirrors`).
+   */
+  mirrors?: readonly string[]
+  /**
+   * The on-chain `/transports/<scheme>` anchor UID for the MIRROR's
+   * `transportDefinition` field. Overrides the per-scheme lookup in the resolved
+   * deployment's `transports` map. Required when the deployment has not recorded
+   * the relevant transport anchor (else the write throws `MissingTransport`).
+   */
+  transportDefinition?: Hex
+  /**
+   * The attester/lens the write authors under. Default: the connected wallet's
+   * account (lenses key on the attester — ADR-0013/0014). Reserved additively;
+   * the Tier-1 path always attests as the wallet account, so a value other than
+   * the connected account is not yet honored (a later slice).
+   */
+  lens?: Address
 }
 
 /** Options for `fs.preview`. Reserved now (review A12) so the write-simulation

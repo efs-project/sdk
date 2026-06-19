@@ -39,6 +39,10 @@ import {
 } from './eas/index.js'
 import { EfsError, NotImplemented, WalletRequired } from './errors.js'
 import { type Lens, identity, lens, resolveLens } from './lenses/resolve.js'
+import type { ReadContext } from './reads/context.js'
+import { cat as catRead, fetchRef } from './reads/fetch.js'
+import { resolve as resolveRead, stat as statRead } from './reads/file.js'
+import { list as listRead } from './reads/list.js'
 import type {
   BatchReceipt,
   DataRef,
@@ -57,6 +61,7 @@ import type {
   WriteOptions,
   WriteReceipt,
 } from './types.js'
+import { type FileWriteContext, writeFileTier1 } from './writes/file.js'
 
 /**
  * The SDK's boundary is the **standard** (EIP-1193 provider + EIP-155 chain), not
@@ -113,7 +118,15 @@ function resolveClients(config: EfsClientConfig): {
 
 /** Read-only file operations. */
 export type EfsFsRead = {
+  /** Resolve a path to its active {@link DataRef} under the lens (no byte fetch).
+   * `null` when nothing is placed there under the lens. */
   read(path: string, opts?: ReadOptions): Promise<ReadResult | null>
+  /** Resolve a path AND fetch + verify its bytes — the full read pipeline. Returns
+   * an {@link EfsFile} with a trust-relative verification status; throws
+   * `FileNotFoundError` when nothing is placed at the path under the lens. (The
+   * `read` verb keeps its resolve-only `ReadResult | null` shape; `cat` is the
+   * byte-returning sibling.) */
+  cat(path: string, opts?: ReadOptions & FetchOptions): Promise<EfsFile>
   fetch(ref: DataRef, opts?: FetchOptions): Promise<EfsFile>
   /** Metadata at a path. Returns a discriminated `FileStat` (`{exists:false}` vs
    * `{exists:true; …}`), never `null` — absence is modeled once (review A7). */
@@ -192,31 +205,60 @@ export function createEfsClient(config: EfsClientConfig): EfsClient {
     if (!walletClient) throw new WalletRequired()
   }
 
+  // The connected wallet account address, if any — the last-resort default lens
+  // for reads (ADR-0039: a read with no explicit lens resolves through the
+  // connected wallet, then errors if there is none).
+  const account = walletClient?.account?.address
+
+  // Assemble the lens-scoped read context the read verbs operate over. Built fresh
+  // per call so a deployment override / account change is always reflected (cheap;
+  // the narrow `readContract` surface is the only viem coupling).
+  const readContext = (): ReadContext => ({
+    publicClient: publicClient as unknown as ReadContext['publicClient'],
+    deployment: getDeployment(),
+    ...(config.defaultLens !== undefined ? { defaultLens: config.defaultLens } : {}),
+    ...(account !== undefined ? { account } : {}),
+  })
+
   return {
     fs: {
-      read: async (_path, _opts) => {
-        throw new NotImplemented('efs.fs.read()')
-      },
-      fetch: async (_ref, _opts) => {
-        throw new NotImplemented('efs.fs.fetch()')
-      },
-      stat: async (_path, _opts) => {
-        throw new NotImplemented('efs.fs.stat()')
-      },
-      list: (_path, _opts) => ({
-        [Symbol.asyncIterator]() {
-          throw new NotImplemented('efs.fs.list()')
-        },
-        page: async () => {
-          throw new NotImplemented('efs.fs.list().page()')
-        },
-      }),
+      // `async` so a synchronous throw from `readContext()` (e.g. DeploymentNotFound)
+      // surfaces as a rejected promise, not a sync throw at the call site.
+      read: async (path, opts) => resolveRead(readContext(), path, opts),
+      cat: async (path, opts) => catRead(readContext(), path, opts),
+      fetch: async (ref, opts) => fetchRef(readContext(), ref, opts),
+      stat: async (path, opts) => statRead(readContext(), path, opts),
+      // `list` is synchronous (returns a lazy EfsList). Defer deployment + lens +
+      // anchor resolution into the first read so the sync method never throws and a
+      // bad deployment surfaces on `.page()`/iteration (consistent with the async
+      // verbs). The thunk is evaluated inside `listRead`'s lazy `prime()`.
+      list: (path, opts) => listRead(readContext, path, opts),
       overview: async (_path, _opts) => {
         throw new NotImplemented('efs.fs.overview()')
       },
-      write: async (_path, _content, _opts) => {
+      write: async (path, content, opts) => {
         requireWallet()
-        throw new NotImplemented('efs.fs.write()')
+        // requireWallet() guarantees `walletClient` is defined here.
+        const wallet = walletClient as WalletClient
+        // Tier-1 (any-wallet, multi-signature) write: one multiAttest per DAG
+        // layer. The Tier-2 one-signature path (7702/5792 via @efs/solidity) is a
+        // later slice; both consume the same `buildFileWriteGraph` plan.
+        //
+        // The orchestrator takes the *narrow* client surfaces it needs (typed
+        // `readContract`/`writeContract` for the EFS ABIs). viem's full clients
+        // satisfy those calls at runtime, but their broadly-generic method
+        // signatures don't structurally unify with the narrow interfaces at the
+        // type level — so cast through `FileWriteContext` at this boundary.
+        const ctx = {
+          publicClient,
+          walletClient: wallet,
+          deployment: getDeployment(),
+          // viem binds `account`/`chain` on a wallet client built from the
+          // provider/account config; forward them so `writeContract` has them.
+          account: wallet.account,
+          chain: wallet.chain,
+        } as unknown as FileWriteContext
+        return writeFileTier1(path, content, ctx, opts)
       },
       preview: async (_path, _content) => {
         throw new NotImplemented('efs.fs.preview()')
@@ -285,6 +327,7 @@ export {
   type EfsDeployment,
   type EfsContracts,
   type EfsSchemaUIDs,
+  type EfsTransports,
 } from './chain/deployments.js'
 export * from './errors.js'
 export type {
@@ -324,3 +367,22 @@ export {
   validateDirectoryQuery,
   InvalidDirectoryQuery,
 } from './reads/directory.js'
+// Path resolution (write-path parent lookup; read-path single-segment walk).
+export {
+  resolvePathToAnchor,
+  resolveParentAnchor,
+  splitPath,
+  ParentNotFoundError,
+  type ResolvePublicClient,
+} from './reads/resolve.js'
+// Lens-scoped read engine (resolve/stat/cat/fetch/list internals + context).
+export {
+  type ReadContext,
+  type ReadPublicClient,
+  type FileSystemItem,
+  type DirectoryPageRaw,
+  resolveAttesters,
+} from './reads/context.js'
+export { resolve, stat, resolvePlacement, readReservedProperty } from './reads/file.js'
+export { cat, fetchRef } from './reads/fetch.js'
+export { list, DEFAULT_PAGE_SIZE } from './reads/list.js'

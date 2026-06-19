@@ -195,10 +195,13 @@ describe('reserved-key triplets (contentType / contentHash / size)', () => {
       const property = find(atts, REF.property(key))
       const bindingPin = find(atts, REF.bindingPin(key))
 
-      it('key-ANCHOR: name=key, refUID=DATA, non-revocable', () => {
+      it('key-ANCHOR: name=key, forSchema=PROPERTY_SCHEMA, refUID=DATA, non-revocable', () => {
         expect(keyAnchor.revocable).toBe(false)
         expect(keyAnchor.refUID).toEqual({ ref: REF.DATA })
-        expect(anchorEnc.decodeData(keyAnchor.data)).toEqual([key, ZERO_UID])
+        // forSchema MUST be the PROPERTY schema UID so the kernel files the anchor
+        // at `_nameToAnchor[DATA][key][PROPERTY_SCHEMA]`, where the canonical reader
+        // (EFSRouter._getContentType / readReservedProperty) resolves it.
+        expect(anchorEnc.decodeData(keyAnchor.data)).toEqual([key, SCHEMAS.property])
       })
 
       it('PROPERTY: value, refUID=0x0, non-revocable (EFSIndexer.sol:488-489)', () => {

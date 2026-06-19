@@ -277,12 +277,22 @@ export function buildFileWriteGraph(input: FileWriteGraphInput): FileWriteGraph 
     // L2 key-ANCHOR: name = the reserved key, refUID = DATA (binds the metadata
     // anchor to the file identity). ANCHOR onAttest rejects revocable
     // (EFSIndexer.sol:376 — `if (attestation.revocable) return false`).
+    //
+    // `forSchema` MUST be the PROPERTY schema UID, NOT the generic sentinel: the
+    // kernel indexes the anchor at `_nameToAnchor[DATA][key][forSchema]`
+    // (EFSIndexer.sol:432), and the canonical reader (`EFSRouter._getContentType`,
+    // mirrored by the SDK's `readReservedProperty`) resolves it via
+    // `resolveAnchor(DATA, key, PROPERTY_SCHEMA_UID)`. Writing the key anchor with a
+    // generic `forSchema` files it under the wrong third-level key, so the read
+    // returns 0 and every reserved PROPERTY (contentType/contentHash/size) is
+    // invisible — verification degrades to `no-claim`. (Live-fork bug; the mocks
+    // never exercised the real `resolveAnchor` keying.)
     attestations.push({
       ref: REF.keyAnchor(key),
       layer: 2,
       kind: 'ANCHOR',
       schema: schemas.anchor,
-      data: anchorEncoder.encodeData([key, GENERIC_FOR_SCHEMA]),
+      data: anchorEncoder.encodeData([key, schemas.property]),
       revocable: false, // EFSIndexer.sol:376 — anchors are non-revocable
       refUID: { ref: REF.DATA }, // key-ANCHOR is bound to the DATA identity (spec L2 row 4)
       dataRefs: [],

@@ -29,3 +29,10 @@ export {
   type LayerResult,
   type RefMap,
 } from './submit.js'
+
+export {
+  writeFileTier1,
+  resolveMirrors,
+  MAX_INLINE_BYTES,
+  type FileWriteContext,
+} from './file.js'

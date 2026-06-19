@@ -20,6 +20,13 @@ export type EfsErrorCode =
   | 'DeploymentNotFound'
   | 'CursorInvalid'
   | 'PartialBatchFailure'
+  /** A path's parent folder does not exist on-chain (write requires it to). */
+  | 'ParentNotFound'
+  /** No file is placed at a path under the read's lens (a byte read needs one). */
+  | 'FileNotFound'
+  /** A write is missing a required input the deployment/opts should supply
+   * (e.g. a transport-definition anchor UID for a mirror scheme). */
+  | 'MissingTransport'
   /** A caller argument violated a documented bound (e.g. directory-query caps). */
   | 'InvalidArgument'
   // --- classifier codes (ADR-0007 §Realization) ---------------------------
@@ -144,6 +151,20 @@ export class PartialBatchFailure extends EfsError {
   override name = 'PartialBatchFailure'
   constructor(message: string, cause?: unknown) {
     super(message, { code: 'PartialBatchFailure', cause })
+  }
+}
+
+/** No file is placed at a path under the read's lens. A byte read (`fs.cat`)
+ * needs an active placement; resolve/stat instead model absence as `null` /
+ * `{exists:false}`. Carries the path so a caller can surface a precise message. */
+export class FileNotFoundError extends EfsError {
+  override name = 'FileNotFoundError'
+  readonly path: string
+  constructor(path: string) {
+    super(`EFS read: no file is placed at '${path}' under the resolving lens.`, {
+      code: 'FileNotFound',
+    })
+    this.path = path
   }
 }
 
