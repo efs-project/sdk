@@ -140,6 +140,7 @@ function isBlockedIpv6(addr: string): string | undefined {
   if (at(0) === 0xfe && (at(1) & 0xc0) === 0x80) return 'link-local (fe80::/10)'
   if ((at(0) & 0xfe) === 0xfc) return 'unique-local (fc00::/7)'
   if (at(0) === 0xfe && (at(1) & 0xc0) === 0xc0) return 'site-local (fec0::/10, deprecated)'
+  if (at(0) === 0xff) return 'multicast (ff00::/8)' // parity with the IPv4 >=224 block
   if (at(0) === 0x20 && at(1) === 0x01 && at(2) === 0x00 && at(3) === 0x00)
     return 'Teredo (2001::/32)'
 

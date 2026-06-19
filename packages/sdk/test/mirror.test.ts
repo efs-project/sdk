@@ -207,6 +207,8 @@ describe('checkSsrf - host guard', () => {
     expect(block('http://[2002:7f00:1::]/x').blocked).toBe(true) // 6to4 -> 127.0.0.1
     expect(block('http://[fec0::1]/x').blocked).toBe(true) // site-local (deprecated)
     expect(block('http://[2001::1]/x').blocked).toBe(true) // Teredo
+    expect(block('http://[ff02::1]/x').blocked).toBe(true) // multicast (ff00::/8)
+    expect(block('http://[ff05::1:3]/x').blocked).toBe(true) // site-local multicast
     // Public IPv6 and a public IPv4-mapped address stay allowed.
     expect(block('https://[2606:4700:4700::1111]/x').blocked).toBe(false) // Cloudflare DNS
     expect(block('http://[::ffff:8.8.8.8]/x').blocked).toBe(false)
