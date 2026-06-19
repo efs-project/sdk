@@ -251,17 +251,17 @@ describe.skipIf(!liveEnabled)('fork write→read round-trip (live deploy)', () =
     // + placement-PIN = 12 attestations across 3 layers.
     expect(receipt.steps.every((s) => s.done)).toBe(true)
 
-    // ── READ (resolve-only) ──────────────────────────────────────────────────
-    const resolved = await efs.fs.read(filePath)
-    expect(resolved).not.toBeNull()
-    expect(resolved?.data.uid).toBe(receipt.data?.uid)
+    // ── LOCATE (pointer-only) ─────────────────────────────────────────────────
+    const located = await efs.fs.locate(filePath)
+    expect(located).not.toBeNull()
+    expect(located?.data.uid).toBe(receipt.data?.uid)
     // The winning lens is the wallet account (the attester).
-    expect(resolved?.resolvedBy.toLowerCase()).toBe(account.address.toLowerCase())
+    expect(located?.resolvedBy.toLowerCase()).toBe(account.address.toLowerCase())
 
-    // ── READ (cat: fetch + verify bytes) ─────────────────────────────────────
+    // ── READ (fetch + verify bytes) ───────────────────────────────────────────
     // allowPrivateHosts lets the engine fetch the loopback mirror; the SSRF
     // guard would otherwise block 127.0.0.1.
-    const file = await efs.fs.cat(filePath, { allowPrivateHosts: true, fetchImpl })
+    const file = await efs.fs.read(filePath, { allowPrivateHosts: true, fetchImpl })
 
     expect(file.verification).toBe('matches-author')
     expect(new Uint8Array(file.bytes)).toEqual(payload)

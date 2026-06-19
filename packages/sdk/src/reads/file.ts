@@ -1,6 +1,7 @@
 /**
  * Lens-scoped file resolution + reserved-key PROPERTY reads — the engine behind
- * `efs.fs.resolve`, `efs.fs.stat`, and the first half of `efs.fs.read`.
+ * `efs.fs.locate`, `efs.fs.info`, `efs.fs.exists`, and the first half of
+ * `efs.fs.read`.
  *
  * ## How a path resolves to a DataRef (FROZEN contracts)
  *
@@ -36,8 +37,19 @@ import type { Address, Hex } from 'viem'
 import { edgeResolverAbi } from '../chain/abi/edgeResolver.js'
 import { fileViewAbi } from '../chain/abi/fileView.js'
 import { indexerAbi } from '../chain/abi/indexer.js'
+import type { VerificationStatus } from '../content/hash.js'
 import { easAbi } from '../eas/abi.js'
-import type { DataRef, DataUID, FileStat, ReadOptions, ReadResult } from '../types.js'
+import type {
+  DataRef,
+  DataUID,
+  ExpandToken,
+  FileAttestations,
+  FileInfo,
+  ReadOpts,
+  ReadResult,
+  SourceUIDs,
+} from '../types.js'
+import { attestationFor, attestationsForUIDs } from './attestations.js'
 import {
   type FileSystemItem,
   type ReadContext,
@@ -48,6 +60,15 @@ import {
 } from './context.js'
 import { ParentNotFoundError, resolvePathToAnchor } from './resolve.js'
 
+/** The reserved PROPERTY keys the SDK reads as typed slots. Custom `fields` keys
+ * fall through to the `properties` bag. */
+const RESERVED_KEYS = ['contentType', 'size', 'name', 'contentHash'] as const
+type ReservedKey = (typeof RESERVED_KEYS)[number]
+
+function isReservedKey(k: string): k is ReservedKey {
+  return (RESERVED_KEYS as readonly string[]).includes(k)
+}
+
 /** The full active-placement resolution: the file's DATA UID + the winning lens. */
 export type ResolvedPlacement = {
   /** The active DATA UID at the path under the lens. */
@@ -56,6 +77,9 @@ export type ResolvedPlacement = {
   resolvedBy: Address
   /** The file's own anchor UID (the parent of its placements). */
   fileAnchorUID: Hex
+  /** The active placement PIN attestation UID (provenance: `sourceUIDs.placement`).
+   * Read via `getActivePinSlot` against the file anchor under the winning lens. */
+  placementPinUID?: Hex
 }
 
 /** Build the static {@link DataRef} for a resolved placement on this chain. */
@@ -72,7 +96,7 @@ function toDataRef(dataUID: DataUID, chainId: number, resolvedBy: Address): Data
 export async function resolvePlacement(
   ctx: ReadContext,
   path: string,
-  opts: ReadOptions | undefined,
+  opts: ReadOpts | undefined,
 ): Promise<ResolvedPlacement | null> {
   const attesters = await resolveAttesters(ctx, opts)
   const { contracts, schemas } = ctx.deployment
@@ -100,22 +124,38 @@ export async function resolvePlacement(
 
   const winner = page.items.find((it) => it.hasData && it.uid !== ZERO_UID)
   if (!winner) return null
+
+  // The active placement PIN's attestation UID — provenance for `sourceUIDs.placement`
+  // and the record `info`/`expand:['attestations']` hydrates for the placement. The
+  // slot is keyed by (definition=file anchor, attester=winning lens, targetSchema=DATA);
+  // `getActivePinSlot` returns `{ pinUID, targetID }` in one read. Absent → undefined
+  // (the placement still resolved via getFilesAtPath; the PIN-UID read is best-effort).
+  const slot = await read<{ pinUID: Hex; targetID: Hex }>(ctx.publicClient, {
+    address: contracts.edgeResolver,
+    abi: edgeResolverAbi,
+    functionName: 'getActivePinSlot',
+    args: [fileAnchorUID, winner.attester, schemas.data],
+  }).catch(() => ({ pinUID: ZERO_UID, targetID: ZERO_UID }))
+
   return {
     dataUID: winner.uid as DataUID,
     resolvedBy: winner.attester,
     fileAnchorUID,
+    ...(slot.pinUID !== ZERO_UID ? { placementPinUID: slot.pinUID } : {}),
   }
 }
 
 /**
- * `efs.fs.resolve(path, opts?)` — resolve a path to its active {@link DataRef}
+ * `efs.fs.locate(path, opts?)` — resolve a path to its active {@link DataRef}
  * under the lens (the winning placement's DATA UID + chainId + `resolvedBy`).
- * Returns `null` when nothing is placed there under the lens.
+ * Returns `null` when nothing is placed there under the lens — a normal absence,
+ * never an error (sdk-read-surface §error matrix). Renamed from `resolve` (which
+ * collided with `Promise.resolve` and the low-level `resolvePath`).
  */
-export async function resolve(
+export async function locate(
   ctx: ReadContext,
   path: string,
-  opts?: ReadOptions,
+  opts?: ReadOpts,
 ): Promise<ReadResult | null> {
   const placement = await resolvePlacement(ctx, path, opts)
   if (!placement) return null
@@ -123,17 +163,23 @@ export async function resolve(
   return { data, resolvedBy: placement.resolvedBy }
 }
 
+/** A reserved-key PROPERTY read: the decoded `value` (or `undefined`) PLUS the
+ * `propertyUID` it came from (provenance — `sourceUIDs.<key>`). The UID is kept
+ * even when the value decodes empty so `info`/`expand` can still hydrate the record. */
+export type ReservedProperty = { value?: string; propertyUID?: Hex }
+
 /**
- * Read a reserved-key PROPERTY value bound under `dataUID`, scoped to `attester`
- * (the winning lens). Returns `undefined` when the key anchor or the attester's
- * binding is absent, or the value is empty. Mirrors `EFSRouter._getContentType`.
+ * Read a reserved-key PROPERTY bound under `dataUID`, scoped to `attester` (the
+ * winning lens). Returns the decoded value AND the source `propertyUID` (provenance).
+ * Both are `undefined` when the key anchor or the attester's binding is absent.
+ * Mirrors `EFSRouter._getContentType`.
  */
 export async function readReservedProperty(
   ctx: ReadContext,
   dataUID: Hex,
   attester: Address,
-  key: 'contentType' | 'contentHash' | 'size',
-): Promise<string | undefined> {
+  key: 'contentType' | 'contentHash' | 'size' | 'name',
+): Promise<ReservedProperty> {
   const { contracts, schemas } = ctx.deployment
 
   const keyAnchor = await read<Hex>(ctx.publicClient, {
@@ -142,7 +188,7 @@ export async function readReservedProperty(
     functionName: 'resolveAnchor',
     args: [dataUID, key, schemas.property],
   })
-  if (keyAnchor === ZERO_UID) return undefined
+  if (keyAnchor === ZERO_UID) return {}
 
   const propertyUID = await read<Hex>(ctx.publicClient, {
     address: contracts.edgeResolver,
@@ -150,7 +196,7 @@ export async function readReservedProperty(
     functionName: 'getActivePinTarget',
     args: [keyAnchor, attester, schemas.property],
   })
-  if (propertyUID === ZERO_UID) return undefined
+  if (propertyUID === ZERO_UID) return {}
 
   const att = await read<{ data: Hex }>(ctx.publicClient, {
     address: contracts.eas,
@@ -158,36 +204,178 @@ export async function readReservedProperty(
     functionName: 'getAttestation',
     args: [propertyUID],
   })
-  return decodePropertyValue(att.data)
+  const value = decodePropertyValue(att.data)
+  return value !== undefined ? { value, propertyUID } : { propertyUID }
 }
 
 /**
- * `efs.fs.stat(path, opts?)` — metadata at a path without fetching bytes. Returns
- * the discriminated {@link FileStat}: `{exists:false}` when nothing is placed
- * under the lens, else `{exists:true, data, resolvedBy, contentType?, size?}`. The
- * `size` and `contentType` come from the reserved-key PROPERTYs, scoped to the
- * winning lens.
+ * `efs.fs.info(path, opts?)` — flat metadata DTO at a path (sdk-read-surface). Always
+ * returns a {@link FileInfo}; absence is `exists:false` (never `null`). Provenance
+ * (`resolvedBy`/`verified`/`sourceUIDs`) is ALWAYS present and never projected away;
+ * only the value payload (`contentType`/`size`/`name`/`properties`) is gated by
+ * `fields`. With no `fields`, the reserved trio (`contentType`/`size`/`name`) is read.
+ * Custom `fields` keys land in `properties`. `expand:['attestations']` hydrates the
+ * raw per-field records via one batched multicall (see `attestationsForUIDs`).
+ *
+ * Generic over the expand tuple so the return narrows: `expand:['attestations']`
+ * makes `.attestations` non-optional (sdk-read-surface §Type narrowing).
  */
-export async function stat(ctx: ReadContext, path: string, opts?: ReadOptions): Promise<FileStat> {
+export async function info(ctx: ReadContext, path: string, opts?: ReadOpts): Promise<FileInfo> {
   const placement = await resolvePlacement(ctx, path, opts)
-  if (!placement) return { exists: false }
+  if (!placement) {
+    // Absent under the lens — a normal empty, not an error. Provenance still present.
+    return {
+      exists: false,
+      resolvedBy: '0x0000000000000000000000000000000000000000' as Address,
+      verified: 'unchecked',
+      sourceUIDs: {},
+    }
+  }
 
-  const { dataUID, resolvedBy } = placement
-  const [contentType, sizeStr] = await Promise.all([
-    readReservedProperty(ctx, dataUID, resolvedBy, 'contentType'),
-    readReservedProperty(ctx, dataUID, resolvedBy, 'size'),
-  ])
+  const { dataUID, resolvedBy, placementPinUID } = placement
 
-  const data = toDataRef(dataUID, ctx.deployment.chainId, resolvedBy)
-  const size = parseSize(sizeStr)
-  return {
+  // Which reserved keys to populate: the requested reserved `fields`, else the
+  // default trio. Custom (non-reserved) `fields` keys are read too and bagged.
+  const requested = opts?.fields
+  const reservedToRead: ReservedKey[] = requested
+    ? (requested.filter(isReservedKey) as ReservedKey[])
+    : ['contentType', 'size', 'name']
+  const customKeys = requested ? requested.filter((k) => !isReservedKey(k)) : []
+
+  // Fan out every PROPERTY read in one tick (Promise.all → multicall coalescing).
+  const reservedResults = await Promise.all(
+    reservedToRead.map((k) => readReservedProperty(ctx, dataUID, resolvedBy, k)),
+  )
+  const customResults = await Promise.all(
+    customKeys.map((k) => readCustomProperty(ctx, dataUID, resolvedBy, k)),
+  )
+
+  const byKey = new Map<string, ReservedProperty>()
+  reservedToRead.forEach((k, i) => byKey.set(k, reservedResults[i] as ReservedProperty))
+
+  const sourceUIDs: SourceUIDs = {
+    ...(placementPinUID !== undefined ? { placement: placementPinUID } : {}),
+  }
+  for (const k of reservedToRead) {
+    const uid = byKey.get(k)?.propertyUID
+    if (uid !== undefined) sourceUIDs[k] = uid
+  }
+
+  const ref = toDataRef(dataUID, ctx.deployment.chainId, resolvedBy)
+  const contentType = byKey.get('contentType')?.value
+  const name = byKey.get('name')?.value
+  const size = parseSize(byKey.get('size')?.value)
+
+  // Custom fields → properties bag. Reserved meaning wins on a collision (the
+  // custom-key list already excludes reserved keys, so no overwrite is possible).
+  const properties: Record<string, string> = {}
+  customKeys.forEach((k, i) => {
+    const v = (customResults[i] as ReservedProperty).value
+    if (v !== undefined) properties[k] = v
+  })
+
+  // Verified status: a placement that resolved is matches-author at the metadata
+  // level (the byte-hash check is `read`'s job). The view already excludes revoked
+  // placements (ADR-0051), so a resolved placement is not revoked.
+  const info: FileInfo = {
     exists: true,
-    data,
+    ref,
     resolvedBy,
+    verified: 'matches-author',
+    sourceUIDs,
     ...(contentType !== undefined ? { contentType } : {}),
     ...(size !== undefined ? { size } : {}),
+    ...(name !== undefined ? { name } : {}),
+    ...(Object.keys(properties).length > 0 ? { properties } : {}),
   }
+
+  // expand:['attestations'] — hydrate the per-field raw records in one batched
+  // multicall over the collected source UIDs (allowFailure → degraded per-item).
+  if (wantsAttestations(opts?.expand)) {
+    info.attestations = await hydrateAttestations(ctx, sourceUIDs, opts?.expand)
+  }
+
+  return info
 }
+
+/**
+ * `efs.fs.exists(path, opts?)` — cheap presence probe (sdk-read-surface). `true`
+ * when something is placed at `path` under the lens, else `false`. Never throws
+ * except on a network/RPC error (a missing lens still throws `LensRequired`, since
+ * that is a caller config error, not a network condition — but the resolution
+ * itself never converts an empty placement into a throw).
+ */
+export async function exists(ctx: ReadContext, path: string, opts?: ReadOpts): Promise<boolean> {
+  const placement = await resolvePlacement(ctx, path, opts)
+  return placement !== null
+}
+
+/** Read a CUSTOM (non-reserved) PROPERTY key, scoped to the lens. Same lookup as
+ * the reserved keys — the key is just the anchor name. */
+async function readCustomProperty(
+  ctx: ReadContext,
+  dataUID: Hex,
+  attester: Address,
+  key: string,
+): Promise<ReservedProperty> {
+  const { contracts, schemas } = ctx.deployment
+  const keyAnchor = await read<Hex>(ctx.publicClient, {
+    address: contracts.indexer,
+    abi: indexerAbi,
+    functionName: 'resolveAnchor',
+    args: [dataUID, key, schemas.property],
+  })
+  if (keyAnchor === ZERO_UID) return {}
+  const propertyUID = await read<Hex>(ctx.publicClient, {
+    address: contracts.edgeResolver,
+    abi: edgeResolverAbi,
+    functionName: 'getActivePinTarget',
+    args: [keyAnchor, attester, schemas.property],
+  })
+  if (propertyUID === ZERO_UID) return {}
+  const att = await read<{ data: Hex }>(ctx.publicClient, {
+    address: contracts.eas,
+    abi: easAbi,
+    functionName: 'getAttestation',
+    args: [propertyUID],
+  })
+  const value = decodePropertyValue(att.data)
+  return value !== undefined ? { value, propertyUID } : { propertyUID }
+}
+
+/** Whether the expand tuple opts into attestation records (depth-1 or depth-2). */
+function wantsAttestations(expand: readonly ExpandToken[] | undefined): boolean {
+  if (!expand) return false
+  return expand.includes('attestations') || expand.includes('attestations.schema')
+}
+
+/** Hydrate the per-field {@link FileAttestations} from the collected source UIDs in
+ * one batched multicall. `attestations.schema` adds the depth-2 schema record. */
+async function hydrateAttestations(
+  ctx: ReadContext,
+  sourceUIDs: SourceUIDs,
+  expand: readonly ExpandToken[] | undefined,
+): Promise<FileAttestations> {
+  const withSchema = expand?.includes('attestations.schema') ?? false
+  const entries = Object.entries(sourceUIDs).filter(([, uid]) => uid !== undefined) as [
+    keyof FileAttestations,
+    Hex,
+  ][]
+  const hydrated = await attestationsForUIDs(
+    ctx,
+    entries.map(([, uid]) => uid),
+    { withSchema },
+  )
+  const out: FileAttestations = {}
+  entries.forEach(([key], i) => {
+    const att = hydrated[i]
+    if (att) out[key] = att
+  })
+  return out
+}
+
+/** Re-export the single-UID hydrator (used by the byte path for `expand`). */
+export { attestationFor }
 
 /** Parse the `size` PROPERTY (a decimal byte-count string) to a bigint, tolerant
  * of a malformed value (→ undefined, never a throw). */
@@ -199,3 +387,6 @@ function parseSize(s: string | undefined): bigint | undefined {
     return undefined
   }
 }
+
+/** Re-export for callers that referenced the verification type by name. */
+export type { VerificationStatus }

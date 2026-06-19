@@ -24,6 +24,16 @@ export type EfsErrorCode =
   | 'ParentNotFound'
   /** No file is placed at a path under the read's lens (a byte read needs one). */
   | 'FileNotFound'
+  /** The winning attestation is revoked — distinct from absent (sdk-read-surface
+   * error matrix). A byte read throws this; metadata surfaces `verified:'revoked'`. */
+  | 'Revoked'
+  /** Fetched bytes do not match the attester's claimed `contentHash`. Thrown by the
+   * fail-closed value sugar (`readText`/`readBytes`/`readJson`); the `EfsFile` path
+   * surfaces it as `verification:'mismatch'`. */
+  | 'ContentHashMismatch'
+  /** The attester's `contentHash` claim is not a well-formed hash (an authoring bug,
+   * not tampering). Thrown by the value sugar; `EfsFile` surfaces `'malformed-claim'`. */
+  | 'MalformedClaim'
   /** A write is missing a required input the deployment/opts should supply
    * (e.g. a transport-definition anchor UID for a mirror scheme). */
   | 'MissingTransport'
@@ -165,6 +175,59 @@ export class FileNotFoundError extends EfsError {
       code: 'FileNotFound',
     })
     this.path = path
+  }
+}
+
+/** The winning attestation backing a read is revoked. Distinct from absent
+ * ({@link FileNotFoundError}): the placement existed and resolved, but the trusted
+ * attester revoked the record, so the bytes are no longer vouched-for. A byte read
+ * (`read`/`readText`/…) throws this; `locate`/`info` surface `verified:'revoked'`. */
+export class Revoked extends EfsError {
+  override name = 'Revoked'
+  readonly path?: string
+  constructor(path?: string) {
+    super(
+      path !== undefined
+        ? `EFS read: the attestation backing '${path}' under the resolving lens is revoked.`
+        : 'EFS read: the attestation backing this reference is revoked.',
+      { code: 'Revoked' },
+    )
+    if (path !== undefined) this.path = path
+  }
+}
+
+/** Fetched bytes did not match the attester's claimed `contentHash`. Thrown by the
+ * fail-closed value sugar (`readText`/`readBytes`/`readJson`) — the bare-value path
+ * has nowhere to surface a status, so a mismatch MUST throw to stay trust-safe. The
+ * {@link EfsFile} path reports `verification:'mismatch'` instead. */
+export class ContentHashMismatch extends EfsError {
+  override name = 'ContentHashMismatch'
+  readonly path?: string
+  constructor(path?: string) {
+    super(
+      path !== undefined
+        ? `EFS read: bytes at '${path}' do not match the attester's claimed contentHash. Pass { verify: false } to read them unverified.`
+        : "EFS read: bytes do not match the attester's claimed contentHash. Pass { verify: false } to read them unverified.",
+      { code: 'ContentHashMismatch' },
+    )
+    if (path !== undefined) this.path = path
+  }
+}
+
+/** The attester's `contentHash` claim is not a well-formed hash — an authoring bug,
+ * not content tampering. Thrown by the fail-closed value sugar; the {@link EfsFile}
+ * path reports `verification:'malformed-claim'`. */
+export class MalformedClaim extends EfsError {
+  override name = 'MalformedClaim'
+  readonly path?: string
+  constructor(path?: string) {
+    super(
+      path !== undefined
+        ? `EFS read: the contentHash claim for '${path}' is malformed (not a bare SHA-256). The bytes cannot be verified.`
+        : 'EFS read: the contentHash claim is malformed (not a bare SHA-256). The bytes cannot be verified.',
+      { code: 'MalformedClaim' },
+    )
+    if (path !== undefined) this.path = path
   }
 }
 

@@ -205,6 +205,43 @@ export const getDataMirrorsAbi = [
 ] as const
 
 /**
+ * `EFSFileView.getDataMirrorsByAttester(bytes32 dataUID, address attester, uint256 start,
+ * uint256 length) -> MirrorItem[]` (EFSFileView.sol:984-989). The LENS-SCOPED per-DATA
+ * active-mirror lookup (ADR-0056 lens-scoping fix): unlike the unscoped `getDataMirrors`
+ * (which returns every attester's mirrors and forces the caller to filter), this returns
+ * ONLY the named attester's active mirrors. The SDK read path scopes to the winning lens
+ * (`resolvedBy`) by passing that address here, so a foreign attester's mirror can never
+ * surface on data served under someone else's lens. Same `MirrorItem` shape as
+ * `getDataMirrors`.
+ */
+export const getDataMirrorsByAttesterAbi = [
+  {
+    type: 'function',
+    name: 'getDataMirrorsByAttester',
+    stateMutability: 'view',
+    inputs: [
+      { name: 'dataUID', type: 'bytes32' },
+      { name: 'attester', type: 'address' },
+      { name: 'start', type: 'uint256' },
+      { name: 'length', type: 'uint256' },
+    ],
+    outputs: [
+      {
+        name: '',
+        type: 'tuple[]',
+        components: [
+          { name: 'uid', type: 'bytes32' },
+          { name: 'transportDefinition', type: 'bytes32' },
+          { name: 'uri', type: 'string' },
+          { name: 'attester', type: 'address' },
+          { name: 'timestamp', type: 'uint64' },
+        ],
+      },
+    ],
+  },
+] as const
+
+/**
  * `EFSFileView.getCanonicalData(bytes32 contentHash) -> bytes32` (EFSFileView.sol:966-968).
  * Deprecated content-hash → canonical DATA reverse lookup; always returns bytes32(0)
  * post-ADR-0049 (DATA is pure identity, no intrinsic hash index). Retained as a no-op
@@ -246,6 +283,7 @@ export const fileViewAbi = [
   ...getDirectoryPageFilteredAbi,
   ...getFilesAtPathAbi,
   ...getDataMirrorsAbi,
+  ...getDataMirrorsByAttesterAbi,
   ...getCanonicalDataAbi,
   ...decodeNameAbi,
 ] as const

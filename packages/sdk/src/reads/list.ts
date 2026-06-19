@@ -3,7 +3,8 @@
  *
  * Lists the children of a directory anchor, scoped to the lens's attester set, as
  * an {@link EfsList} of {@link DirEntry}: an async-iterable that walks every entry
- * AND exposes `.page(cursor)` for one bounded window.
+ * AND exposes `.byPage({limit,cursor})` for one bounded window + `.toArray({limit})`
+ * for a bounded materialization (sdk-read-surface §Pagination).
  *
  * ## On-chain read (FROZEN EFSFileView)
  *
@@ -16,9 +17,9 @@
  *
  * The on-chain cursor is a `uint256` (an index into the contract's append-only
  * child set). The SDK wraps it as an OPAQUE base-10 string cursor on {@link Page}:
- * `nextCursor` is the stringified `uint256` when more remain, or `undefined` at the
+ * `cursor` is the stringified `uint256` when more remain, or `undefined` at the
  * end (the contract returns `0` for "no more"). A caller never interprets it; they
- * pass it back verbatim to `.page({ cursor })`. A non-numeric cursor is rejected
+ * pass it back verbatim to `.byPage({ cursor })`. A non-numeric cursor is rejected
  * with {@link CursorInvalid} (a cursor from a different query / corrupted state).
  *
  * `limit` (default {@link DEFAULT_PAGE_SIZE}) sizes each underlying read window;
@@ -101,16 +102,16 @@ async function readPage(
   )
   const items = result.items.filter((it) => it.uid !== ZERO_UID).map(toDirEntry)
   // The contract returns 0 for "no more entries"; surface that as no cursor.
-  const nextCursor = result.nextCursor > 0n ? result.nextCursor.toString() : undefined
-  return nextCursor !== undefined ? { items, nextCursor } : { items }
+  const cursor = result.nextCursor > 0n ? result.nextCursor.toString() : undefined
+  return cursor !== undefined ? { items, cursor } : { items }
 }
 
 /**
  * `efs.fs.list(dir, opts?)` — the lens-scoped directory listing. Returns an
- * {@link EfsList} synchronously (it is lazy — no RPC until iterated or `.page()`d).
+ * {@link EfsList} synchronously (it is lazy — no RPC until iterated or `.byPage()`d).
  * Deployment, lens, and anchor resolution are ALL deferred into the first read so
  * the synchronous client method never throws — a bad deployment / missing lens
- * surfaces on `.page()` / iteration, consistent with the async read verbs. The
+ * surfaces on `.byPage()` / iteration, consistent with the async read verbs. The
  * context is therefore passed as a THUNK, evaluated lazily inside `prime()`.
  *
  * @throws {InvalidDirectoryQuery} when `opts.excludes` is set (filtered view is a
@@ -154,7 +155,10 @@ export function list(
     return primed
   }
 
-  const page = async (pageOpts?: { limit?: number; cursor?: string }): Promise<Page<DirEntry>> => {
+  const byPage = async (pageOpts?: {
+    limit?: number
+    cursor?: string
+  }): Promise<Page<DirEntry>> => {
     const { ctx, parentAnchor, attesters } = await prime()
     const start = parseCursor(pageOpts?.cursor)
     const pageSize = pageOpts?.limit ?? defaultLimit
@@ -164,16 +168,40 @@ export function list(
   async function* iterate(): AsyncGenerator<DirEntry> {
     let cursor: string | undefined
     do {
-      const p: Page<DirEntry> = await page(
+      const p: Page<DirEntry> = await byPage(
         cursor !== undefined ? { limit: defaultLimit, cursor } : { limit: defaultLimit },
       )
       for (const entry of p.items) yield entry
-      cursor = p.nextCursor
+      cursor = p.cursor
     } while (cursor !== undefined)
+  }
+
+  /** Materialize entries up to a MANDATORY `limit` — collect-all needs an explicit
+   * cap (sdk-read-surface §4). Walks pages (coalesced) until `limit` is reached or
+   * the listing is exhausted. */
+  const toArray = async (arrOpts: { limit: number }): Promise<DirEntry[]> => {
+    const out: DirEntry[] = []
+    let cursor: string | undefined
+    do {
+      const remaining = arrOpts.limit - out.length
+      if (remaining <= 0) break
+      const p: Page<DirEntry> = await byPage(
+        cursor !== undefined
+          ? { limit: Math.min(defaultLimit, remaining), cursor }
+          : { limit: Math.min(defaultLimit, remaining) },
+      )
+      for (const entry of p.items) {
+        if (out.length >= arrOpts.limit) break
+        out.push(entry)
+      }
+      cursor = p.cursor
+    } while (cursor !== undefined && out.length < arrOpts.limit)
+    return out
   }
 
   return {
     [Symbol.asyncIterator]: iterate,
-    page,
+    byPage,
+    toArray,
   }
 }

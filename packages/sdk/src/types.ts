@@ -29,12 +29,46 @@ export type PathRef = { readonly __brand: 'PathRef'; readonly path: string }
 
 // ── Read options (shared) ──────────────────────────────────────────────────────
 
-/** How to resolve a read: a `Lens`, a raw address (treated as a literal lens),
- * or omitted (defaults to the connected wallet). */
-export type ReadOptions = {
-  /** The lens to resolve through. */
+/**
+ * The fixed, typed expansion union for `read`/`info` (sdk-read-surface §Two
+ * orthogonal knobs). NOT free strings: each token opts the result into a nested
+ * raw record (inlined as plain serializable data), and the SDK narrows the return
+ * type on it (see {@link Expanded}). Max depth 2 — tighter than Stripe's 4 because
+ * each level is a multicall round-trip, not a DB join. `'attestations.schema'` is
+ * the only depth-2 token (the schema record behind each attestation).
+ */
+export type ExpandToken = 'attestations' | 'mirrors' | 'redirects' | 'attestations.schema'
+
+/**
+ * The two orthogonal read knobs (sdk-read-surface), shared by `read`/`info`/etc.:
+ *
+ *   - `fields` — PROJECTION. Which properties to populate. Reserved keys
+ *     (`contentType`/`size`/`name`) fill typed slots; custom keys land in the
+ *     `properties` bag. Runtime projection over a wide type (no static narrowing).
+ *   - `expand` — DEPTH. Opt into nested raw records (attestations/mirrors/…). A
+ *     fixed typed union; the return type narrows on it.
+ *   - `verify` — fail-closed on the value-sugar path (default true).
+ *
+ * Generic over the expand tuple `E` so `read`/`info` can narrow their return.
+ */
+export type ReadOpts<E extends readonly ExpandToken[] = readonly ExpandToken[]> = {
+  /** The lens to resolve through: a `Lens`, a raw `Address` (a literal lens), or
+   * omitted (defaults to the client's `defaultLens`, then the connected wallet). */
   lens?: Lens | Address
+  /** Projection — which properties to populate. Reserved keys → typed slots;
+   * custom keys → the `properties` bag. Reserved meaning wins on collision. */
+  fields?: string[]
+  /** Depth — opt into nested raw records. Narrows the return type. */
+  expand?: E
+  /** Verify fetched bytes against the attester's `contentHash` (default true).
+   * On the value-sugar path a mismatch throws (fail-closed) unless this is false. */
+  verify?: boolean
 }
+
+/** Back-compat alias: the read option type was `ReadOptions` before the read-surface
+ * refactor (sdk-read-surface). `ReadOpts` is the spec name; both point at the same
+ * shape so existing imports keep working. */
+export type ReadOptions = ReadOpts
 
 /** Listing options: read options + pagination + (future) sort/schema filters. */
 export type ListOptions = ReadOptions & {
@@ -103,17 +137,27 @@ export type FetchOptions = {
 
 // ── Pagination ─────────────────────────────────────────────────────────────────
 
-/** One page of a listing plus the cursor to resume after it. */
+/** One page of a listing plus the cursor to resume after it (sdk-read-surface
+ * §Pagination). The cursor field is `cursor` (the design's `.byPage()` shape),
+ * `undefined` at the end. */
 export type Page<T> = {
   items: readonly T[]
-  /** Cursor for the next page, or `undefined` at the end. */
-  nextCursor?: string
+  /** Opaque cursor for the next page, or `undefined` at the end. */
+  cursor?: string
 }
 
-/** An async-iterable read that can also be paged explicitly. `for await` walks
- * every entry; `.page(opts)` fetches one bounded page + a resume cursor. */
+/**
+ * An async-iterable read (sdk-read-surface §Pagination). `for await` walks every
+ * entry (paging hidden); `.byPage({limit,cursor})` fetches one bounded page + a
+ * resume cursor; `.toArray({limit})` materializes with a MANDATORY cap (collect-all
+ * requires an explicit bound). The iterator deliberately holds a live client; the
+ * items it yields are inert plain DTOs.
+ */
 export type EfsList<T> = AsyncIterable<T> & {
-  page(opts?: { limit?: number; cursor?: string }): Promise<Page<T>>
+  /** One bounded page + an opaque resume cursor (`CursorInvalid` on a stale cursor). */
+  byPage(opts?: { limit?: number; cursor?: string }): Promise<Page<T>>
+  /** Materialize entries into an array, up to `limit` (mandatory — bounds the fan-out). */
+  toArray(opts: { limit: number }): Promise<T[]>
 }
 
 // ── Listings ─────────────────────────────────────────────────────────────────
@@ -235,32 +279,134 @@ export type WriteEstimate = {
 
 // ── Reads ──────────────────────────────────────────────────────────────────────
 
-/** A resolved read: the data ref plus which attester/lens won (review UX-4).
- * `resolvedBy` is also folded into `DataRef` (review A2) so a ref carried to
- * `fetch` alone can still verify; it is kept here for the read-time view. */
+/** A resolved read pointer (`efs.fs.locate`): the data ref plus which attester/lens
+ * won (review UX-4). `resolvedBy` is also folded into `DataRef` (review A2) so a ref
+ * carried to `read(ref)` alone can still verify; kept here for the read-time view. */
 export type ReadResult = { data: DataRef; resolvedBy: Address }
 
-/** Fetched bytes + trust-relative verification (never a bare "verified"). */
+/**
+ * A raw EAS attestation record (the `IEAS.getAttestation` return), inlined as plain
+ * serializable data when `expand:['attestations']` is requested (sdk-read-surface
+ * §Trust escalation). No result method performs I/O; this is fetched at request time
+ * and frozen onto the DTO. Times are epoch seconds (`bigint`), not `Date` (query-key
+ * stability). When `expand:['attestations.schema']` is also requested, `schema`
+ * carries the resolved schema record.
+ */
+export type Attestation = {
+  uid: Hex
+  schema: Hex
+  time: bigint
+  expirationTime: bigint
+  revocationTime: bigint
+  refUID: Hex
+  recipient: Address
+  attester: Address
+  revocable: boolean
+  data: Hex
+  /** Resolved schema record — present only when `expand:['attestations.schema']`. */
+  schemaRecord?: SchemaRecord
+}
+
+/** A resolved EAS schema record (`SchemaRegistry.getSchema`), inlined for the
+ * depth-2 `attestations.schema` expansion. Plain serializable data. */
+export type SchemaRecord = {
+  uid: Hex
+  resolver: Address
+  revocable: boolean
+  schema: string
+}
+
+/** Per-field raw attestations, populated when `expand:['attestations']` is requested.
+ * Keyed by the same reserved slots as {@link FileInfo.sourceUIDs}. */
+export type FileAttestations = {
+  placement?: Attestation
+  contentType?: Attestation
+  size?: Attestation
+  contentHash?: Attestation
+  name?: Attestation
+}
+
+/**
+ * Per-field provenance UIDs — which on-chain record each value came from
+ * (sdk-read-surface §provenance). ALWAYS present on a read result, NEVER projected
+ * away. `placement` is the active placement PIN UID (`getActivePinSlot`); the rest
+ * are the reserved-key PROPERTY attestation UIDs (`readReservedProperty`).
+ */
+export type SourceUIDs = {
+  placement?: Hex
+  contentType?: Hex
+  size?: Hex
+  contentHash?: Hex
+  name?: Hex
+}
+
+/**
+ * Fetched bytes + trust-relative verification — the `efs.fs.read` result
+ * (sdk-read-surface). `.text()`/`.json()` are **pure** (no I/O — they decode the
+ * in-hand `bytes`); a live re-fetch is never hidden behind a result method. The
+ * value path is never trust-blind: `verification` is always present, and the
+ * fail-closed sugar (`readText`/…) throws on a mismatch.
+ */
 export type EfsFile = {
   bytes: Uint8Array
   contentType?: string
+  /** Trust-relative verification status against the lens attester's claim. */
   verification: VerificationStatus
-  /** Whose contentHash claim was checked against. */
+  /** Whose contentHash claim was checked against (the winning lens attester). */
   hashAuthor?: Address
+  /** Pure UTF-8 decode of `bytes` (no I/O). */
+  text(): string
+  /** Pure JSON parse of the UTF-8-decoded `bytes` (no I/O). */
+  json<T = unknown>(): T
+  /** Raw per-field attestations — present only when `expand:['attestations']` was
+   * requested on the byte path (placement + contentHash records). */
+  attestations?: FileAttestations
 }
 
-/** Metadata about the file at a path, without fetching bytes. Discriminated on
- * `exists` (review A7): absence is modeled once here, not also as a `| null`
- * return. Mirrors the Solidity `(bool exists, …)` shape. */
-export type FileStat =
-  | { exists: false }
-  | {
-      exists: true
-      data: DataRef
-      resolvedBy: Address
-      contentType?: string
-      size?: bigint
-    }
+/**
+ * Flat metadata DTO at a path — the `efs.fs.info` result (sdk-read-surface
+ * §Value-first results). A plain serializable object; provenance
+ * (`resolvedBy`/`verified`/`sourceUIDs`) is ALWAYS present and never projected away
+ * (only `contentType`/`size`/`name`/`properties` are gated by `fields`). `size` is
+ * `bigint` (matches viem; serialize at the JSON boundary). `attestations` is present
+ * only when `expand:['attestations']` was requested.
+ */
+export type FileInfo = {
+  exists: boolean
+  contentType?: string
+  size?: bigint
+  name?: string
+  /** Custom (non-reserved) `fields` keys land here; reserved keys take typed slots. */
+  properties?: Record<string, string>
+  ref?: DataRef
+  // provenance — ALWAYS present, never projected away:
+  /** The attester whose lens won placement. */
+  resolvedBy: Address
+  /** Trust status of the winning placement/claim. */
+  verified: VerificationStatus | 'revoked' | 'unchecked'
+  /** Per-field source UIDs (placement PIN + reserved-key PROPERTYs). */
+  sourceUIDs: SourceUIDs
+  /** Raw per-field attestations — present only with `expand:['attestations']`. */
+  attestations?: FileAttestations
+}
+
+/**
+ * Expand-narrowing helper (sdk-read-surface §Type narrowing — "narrow on `expand`
+ * only", James 2026-06-19). Given a base result `T` and the requested expand tuple
+ * `E`, makes `.attestations` NON-OPTIONAL when `'attestations'` (or the depth-2
+ * `'attestations.schema'`) is in `E`. `fields` is deliberately NOT narrowed (it
+ * stays runtime projection over the wide type). Verbs are generic over `E` and
+ * return `Expanded<FileInfo, E>` so `info(p, {expand:['attestations']}).attestations`
+ * type-checks without a non-null assertion.
+ */
+export type Expanded<
+  T extends { attestations?: unknown },
+  E extends readonly ExpandToken[],
+> = 'attestations' extends E[number]
+  ? T & { attestations: NonNullable<T['attestations']> }
+  : 'attestations.schema' extends E[number]
+    ? T & { attestations: NonNullable<T['attestations']> }
+    : T
 
 // ── Folder Overviews (ADR-0011) ─────────────────────────────────────────────────
 

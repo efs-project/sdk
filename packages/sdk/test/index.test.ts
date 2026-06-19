@@ -23,13 +23,16 @@ const walletClient = createWalletClient({ chain: sepolia, transport: http() }) a
 const addr = (n: number) => `0x${n.toString(16).padStart(40, '0')}` as Address
 
 describe('namespaced client (Decision F)', () => {
-  it('read verbs are wired (resolve/list reach deployment resolution, not NotImplemented)', async () => {
-    // The read verbs (resolve/stat/cat/fetch/list) are now implemented. On sepolia,
-    // where no EFS deployment is registered, a read passes the wiring and reaches
-    // deployment resolution → DeploymentNotFound. That it is no longer
+  it('read verbs are wired (read/locate/info/exists/list reach deployment resolution)', async () => {
+    // The read verbs (read/readText/locate/info/exists/list) are now implemented. On
+    // sepolia, where no EFS deployment is registered, a read passes the wiring and
+    // reaches deployment resolution → DeploymentNotFound. That it is no longer
     // NotImplemented proves the verb is wired (same pattern as the write gate test).
     const efs = createEfsClient({ publicClient })
     await expect(efs.fs.read('/x')).rejects.toThrow(DeploymentNotFound)
+    await expect(efs.fs.locate('/x')).rejects.toThrow(DeploymentNotFound)
+    await expect(efs.fs.info('/x')).rejects.toThrow(DeploymentNotFound)
+    await expect(efs.fs.exists('/x')).rejects.toThrow(DeploymentNotFound)
     await expect(
       (async () => {
         for await (const _ of efs.fs.list('/x')) break

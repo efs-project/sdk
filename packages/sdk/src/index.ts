@@ -39,9 +39,20 @@ import {
 } from './eas/index.js'
 import { EfsError, NotImplemented, WalletRequired } from './errors.js'
 import { type Lens, identity, lens, resolveLens } from './lenses/resolve.js'
+import {
+  type HasSourceUIDs,
+  type HydratedItem,
+  attestationsFor as attestationsForItems,
+} from './reads/attestations.js'
 import type { ReadContext } from './reads/context.js'
-import { cat as catRead, fetchRef } from './reads/fetch.js'
-import { resolve as resolveRead, stat as statRead } from './reads/file.js'
+import {
+  type ParseSchema,
+  readBytes as readBytesFile,
+  read as readFile,
+  readJson as readJsonFile,
+  readText as readTextFile,
+} from './reads/fetch.js'
+import { exists as existsRead, info as infoRead, locate as locateRead } from './reads/file.js'
 import { list as listRead } from './reads/list.js'
 import type {
   BatchReceipt,
@@ -49,13 +60,15 @@ import type {
   DirEntry,
   EfsFile,
   EfsList,
+  ExpandToken,
+  Expanded,
   FetchOptions,
-  FileStat,
+  FileInfo,
   ListOptions,
   OverviewOptions,
   OverviewResult,
   PreviewOptions,
-  ReadOptions,
+  ReadOpts,
   ReadResult,
   WriteEstimate,
   WriteOptions,
@@ -106,7 +119,16 @@ function resolveClients(config: EfsClientConfig): {
 } {
   if ('provider' in config) {
     const transport = custom(config.provider)
-    const publicClient = createPublicClient({ chain: config.chain, transport })
+    // Opt into Multicall3 coalescing for the SDK-constructed client (sdk-read-surface
+    // §Batching): viem's `batch.multicall` is OFF by default, so concurrent
+    // `readContract`s fired in the same tick (every internal bulk path uses
+    // `Promise.all`) coalesce into one aggregate3. NOT imposed on a user-supplied
+    // `publicClient` (the ViemConfig path below) — batching is their call there.
+    const publicClient = createPublicClient({
+      chain: config.chain,
+      transport,
+      batch: { multicall: true },
+    })
     const walletClient =
       config.account !== undefined
         ? createWalletClient({ chain: config.chain, account: config.account, transport })
@@ -116,21 +138,40 @@ function resolveClients(config: EfsClientConfig): {
   return { publicClient: config.publicClient, walletClient: config.walletClient }
 }
 
-/** Read-only file operations. */
+/** Read-only file operations (sdk-read-surface verbs). */
 export type EfsFsRead = {
-  /** Resolve a path to its active {@link DataRef} under the lens (no byte fetch).
-   * `null` when nothing is placed there under the lens. */
-  read(path: string, opts?: ReadOptions): Promise<ReadResult | null>
-  /** Resolve a path AND fetch + verify its bytes — the full read pipeline. Returns
-   * an {@link EfsFile} with a trust-relative verification status; throws
-   * `FileNotFoundError` when nothing is placed at the path under the lens. (The
-   * `read` verb keeps its resolve-only `ReadResult | null` shape; `cat` is the
-   * byte-returning sibling.) */
-  cat(path: string, opts?: ReadOptions & FetchOptions): Promise<EfsFile>
-  fetch(ref: DataRef, opts?: FetchOptions): Promise<EfsFile>
-  /** Metadata at a path. Returns a discriminated `FileStat` (`{exists:false}` vs
-   * `{exists:true; …}`), never `null` — absence is modeled once (review A7). */
-  stat(path: string, opts?: ReadOptions): Promise<FileStat>
+  /** The file's content. Accepts a PATH or a {@link DataRef} (folds in the old
+   * `fetch(ref)`). Returns an {@link EfsFile} with `bytes` + pure `.text()`/`.json()`
+   * + trust-relative `verification` + `hashAuthor`. Throws `FileNotFoundError` when a
+   * PATH resolves to nothing, `Revoked` when the winning record is revoked. Generic
+   * over `expand`: `expand:['attestations']` makes `.attestations` non-optional. */
+  read<const E extends readonly ExpandToken[] = []>(
+    pathOrRef: string | DataRef,
+    opts?: ReadOpts<E> & FetchOptions,
+  ): Promise<Expanded<EfsFile, E>>
+  /** Sugar → the bare UTF-8 string. FAIL-CLOSED: throws `ContentHashMismatch`/
+   * `MalformedClaim` on a verification problem unless `{verify:false}`. */
+  readText(path: string, opts?: ReadOpts & FetchOptions): Promise<string>
+  /** Sugar → the bare bytes. Fail-closed (see {@link EfsFsRead.readText}). */
+  readBytes(path: string, opts?: ReadOpts & FetchOptions): Promise<Uint8Array>
+  /** Sugar → the parsed JSON value. Fail-closed; optional `schema` (e.g. zod) narrows. */
+  readJson<T = unknown>(
+    path: string,
+    opts?: ReadOpts & FetchOptions & { schema?: ParseSchema<T> },
+  ): Promise<T>
+  /** The pointer: which DATA/version + winning attester, no bytes. `null` when
+   * nothing is placed under the lens (a normal absence). Renamed from `resolve`. */
+  locate(path: string, opts?: ReadOpts): Promise<ReadResult | null>
+  /** Flat metadata DTO (sdk-read-surface). Always returns a {@link FileInfo}; absence
+   * is `exists:false`. Provenance is always present and never projected away; `fields`
+   * projects the value payload; `expand` opts into nested records. Generic over
+   * `expand`: `expand:['attestations']` makes `.attestations` non-optional. */
+  info<const E extends readonly ExpandToken[] = []>(
+    path: string,
+    opts?: ReadOpts<E>,
+  ): Promise<Expanded<FileInfo, E>>
+  /** Cheap presence probe. Never throws except on network error (or `LensRequired`). */
+  exists(path: string, opts?: ReadOpts): Promise<boolean>
   list(path: string, opts?: ListOptions): EfsList<DirEntry>
   /** The folder Overview (`README.md`) for `path`, resolved by exact path — never
    * a directory scan (ADR-0011). Returns a discriminated `OverviewResult`
@@ -159,6 +200,14 @@ export type EfsEasNs = {
   computeUID: typeof computeAttestationUID
   verifyUID: typeof verifyAttestationUID
   abi: { eas: typeof easAbi; schemaRegistry: typeof schemaRegistryAbi }
+  /** Batched hydrate (sdk-read-surface §Trust escalation): one coalesced multicall
+   * of `getAttestation(uid)` over every source UID across `items`, `allowFailure`-
+   * style (a revoked/absent UID degrades per-item, never failing the batch). Also
+   * backs `expand:['attestations']`. */
+  attestationsFor(
+    items: readonly HasSourceUIDs[],
+    opts?: { withSchema?: boolean },
+  ): Promise<HydratedItem[]>
 }
 
 export type EfsRawNs = {
@@ -224,13 +273,23 @@ export function createEfsClient(config: EfsClientConfig): EfsClient {
     fs: {
       // `async` so a synchronous throw from `readContext()` (e.g. DeploymentNotFound)
       // surfaces as a rejected promise, not a sync throw at the call site.
-      read: async (path, opts) => resolveRead(readContext(), path, opts),
-      cat: async (path, opts) => catRead(readContext(), path, opts),
-      fetch: async (ref, opts) => fetchRef(readContext(), ref, opts),
-      stat: async (path, opts) => statRead(readContext(), path, opts),
+      // `read`/`info` are generic over the expand tuple at the type level; the
+      // runtime impl is monomorphic (returns the wide `EfsFile`/`FileInfo`), so the
+      // expand-narrowed return type is a compile-time-only refinement — cast through
+      // the typed surface at this boundary (the narrowing is sound: when the token is
+      // present the field IS populated; see `info`/`read` + `Expanded`).
+      read: (async (pathOrRef: string | DataRef, opts?: ReadOpts & FetchOptions) =>
+        readFile(readContext(), pathOrRef, opts)) as EfsFsRead['read'],
+      readText: async (path, opts) => readTextFile(readContext(), path, opts),
+      readBytes: async (path, opts) => readBytesFile(readContext(), path, opts),
+      readJson: async (path, opts) => readJsonFile(readContext(), path, opts),
+      locate: async (path, opts) => locateRead(readContext(), path, opts),
+      info: (async (path: string, opts?: ReadOpts) =>
+        infoRead(readContext(), path, opts)) as EfsFsRead['info'],
+      exists: async (path, opts) => existsRead(readContext(), path, opts),
       // `list` is synchronous (returns a lazy EfsList). Defer deployment + lens +
       // anchor resolution into the first read so the sync method never throws and a
-      // bad deployment surfaces on `.page()`/iteration (consistent with the async
+      // bad deployment surfaces on `.byPage()`/iteration (consistent with the async
       // verbs). The thunk is evaluated inside `listRead`'s lazy `prime()`.
       list: (path, opts) => listRead(readContext, path, opts),
       overview: async (_path, _opts) => {
@@ -278,6 +337,7 @@ export function createEfsClient(config: EfsClientConfig): EfsClient {
       computeUID: computeAttestationUID,
       verifyUID: verifyAttestationUID,
       abi: { eas: easAbi, schemaRegistry: schemaRegistryAbi },
+      attestationsFor: (items, opts) => attestationsForItems(readContext(), items, opts),
     },
     raw: {
       deployment: getDeployment,
@@ -334,7 +394,10 @@ export type {
   DataRef,
   DataUID,
   DirEntry,
+  ReadOpts,
   ReadOptions,
+  ExpandToken,
+  Expanded,
   ListOptions,
   FetchOptions,
   TransportName,
@@ -344,7 +407,11 @@ export type {
   EfsList,
   ReadResult,
   EfsFile,
-  FileStat,
+  FileInfo,
+  Attestation,
+  SchemaRecord,
+  FileAttestations,
+  SourceUIDs,
   OverviewResult,
   OverviewOptions,
   WriteReceipt,
@@ -383,6 +450,29 @@ export {
   type DirectoryPageRaw,
   resolveAttesters,
 } from './reads/context.js'
-export { resolve, stat, resolvePlacement, readReservedProperty } from './reads/file.js'
-export { cat, fetchRef } from './reads/fetch.js'
+export {
+  locate,
+  info,
+  exists,
+  resolvePlacement,
+  readReservedProperty,
+  type ReservedProperty,
+} from './reads/file.js'
+export {
+  read,
+  readText,
+  readBytes,
+  readJson,
+  fetchRef,
+  type ParseSchema,
+} from './reads/fetch.js'
+export {
+  attestationsFor,
+  attestationsForUIDs,
+  attestationFor,
+  isRevoked,
+  isAbsent,
+  type HasSourceUIDs,
+  type HydratedItem,
+} from './reads/attestations.js'
 export { list, DEFAULT_PAGE_SIZE } from './reads/list.js'

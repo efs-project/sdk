@@ -1,22 +1,26 @@
 /**
  * Unit tests for the lens-scoped read verbs (`reads/file.ts`, `reads/fetch.ts`,
- * `reads/list.ts`) — driven through a mocked viem `readContract` + an injected
- * fetch transport. No live chain.
+ * `reads/list.ts`, `reads/attestations.ts`) — driven through a mocked viem
+ * `readContract` + an injected fetch transport. No live chain.
  *
  * The mock `readContract` dispatches by `functionName` over small in-memory tables
- * keyed to the FROZEN read surface:
- *   - `rootAnchorUID` / `resolvePath`      → path walk (reads/resolve.ts)
- *   - `getFilesAtPath`                       → winning placement under the lens
+ * keyed to the deployed read surface:
+ *   - `rootAnchorUID` / `resolvePath`        → path walk (reads/resolve.ts)
+ *   - `getFilesAtPath`                        → winning placement under the lens
+ *   - `getActivePinSlot`                      → placement PIN UID (provenance)
  *   - `resolveAnchor` + `getActivePinTarget` + `getAttestation` → reserved PROPERTY
- *   - `getDataMirrors`                       → per-DATA active mirrors
- *   - `getDirectoryPageByAddressList`        → directory page
+ *   - `getDataMirrorsByAttester`              → lens-scoped per-DATA active mirrors
+ *   - `getDirectoryPageByAddressList`         → directory page
  *
- * What is asserted (per the task's lens-scoping + verification semantics):
- *   - resolve returns a DataRef whose `resolvedBy` is the winning lens attester;
- *   - stat exists/absent (discriminated) + size/contentType from the reserved keys;
- *   - cat fetches + verifies, and a hash MISMATCH surfaces as `verification`, not a throw;
- *   - fetch(ref) works from a bare ref;
- *   - list pages + iterates with the opaque cursor;
+ * What is asserted (sdk-read-surface verbs + semantics):
+ *   - locate returns a DataRef whose `resolvedBy` is the winning lens attester, null when absent;
+ *   - info is a flat DTO with always-present provenance + exists:false on absence + size/contentType;
+ *   - read fetches + verifies, and a hash MISMATCH surfaces on `.verification`, not a throw;
+ *   - read(ref) works from a bare ref; read's `.text()`/`.json()` are pure;
+ *   - readText/readBytes/readJson are fail-closed (throw on mismatch) unless verify:false;
+ *   - exists is a boolean;
+ *   - list pages (.byPage) + iterates + .toArray with the opaque cursor;
+ *   - attestationsFor batch-hydrates source UIDs;
  *   - LensRequired when neither a lens nor a wallet account is available.
  */
 
@@ -24,11 +28,16 @@ import { type Address, type Hex, encodeAbiParameters } from 'viem'
 import { describe, expect, it } from 'vitest'
 import type { EfsDeployment } from '../src/chain/deployments.js'
 import { hashContent } from '../src/content/hash.js'
-import { LensRequired } from '../src/errors.js'
-import { FileNotFoundError } from '../src/errors.js'
+import {
+  ContentHashMismatch,
+  FileNotFoundError,
+  LensRequired,
+  MalformedClaim,
+} from '../src/errors.js'
+import { attestationsFor } from '../src/reads/attestations.js'
 import type { ReadContext } from '../src/reads/context.js'
-import { cat, fetchRef } from '../src/reads/fetch.js'
-import { resolve, stat } from '../src/reads/file.js'
+import { read, readBytes, readJson, readText } from '../src/reads/fetch.js'
+import { exists, info, locate } from '../src/reads/file.js'
 import { list } from '../src/reads/list.js'
 import type { DataRef, DataUID } from '../src/types.js'
 
@@ -47,6 +56,7 @@ const ROOT = uid(0x1)
 const DOCS_ANCHOR = uid(0x10)
 const FILE_ANCHOR = uid(0x11) // /docs/readme.md anchor
 const DATA_UID = uid(0xda7a) as DataUID
+const PLACEMENT_PIN = uid(0x9111) // placement PIN UID
 const LENS = addr(0xbeef) // the winning lens attester (resolvedBy)
 const OTHER = addr(0xca11) // a different attester (should be ignored when scoped)
 
@@ -120,6 +130,22 @@ function fileItem(over: Partial<Item>): Item {
   }
 }
 
+/** A getAttestation tuple (only fields the read path touches need to be real). */
+function attestation(over: { uid?: Hex; data?: Hex; revocationTime?: bigint; schema?: Hex }) {
+  return {
+    uid: over.uid ?? ZERO,
+    schema: over.schema ?? SCHEMAS.property,
+    time: 0n,
+    expirationTime: 0n,
+    revocationTime: over.revocationTime ?? 0n,
+    refUID: ZERO,
+    recipient: addr(0),
+    attester: LENS,
+    revocable: true,
+    data: over.data ?? ('0x' as Hex),
+  }
+}
+
 /**
  * Build a mock {@link ReadContext}. `tables` configures the in-memory responses;
  * anything unset returns the empty sentinel (ZERO / empty array), matching the
@@ -129,6 +155,7 @@ function makeCtx(opts: {
   account?: Address
   edges?: Record<string, Hex> // `${parent}|${name}` -> child anchor (resolvePath)
   files?: readonly Item[] // getFilesAtPath result for FILE_ANCHOR
+  placementPins?: Record<string, Hex> // `${anchor}|${attester}` -> placement pin UID (getActivePinSlot)
   keyAnchors?: Record<string, Hex> // `${dataUID}|${key}` -> keyAnchor (resolveAnchor)
   pinTargets?: Record<string, Hex> // `${keyAnchor}|${attester}` -> propertyUID (getActivePinTarget)
   attestations?: Record<string, Hex> // propertyUID -> data blob (getAttestation)
@@ -139,6 +166,7 @@ function makeCtx(opts: {
   const {
     edges = {},
     files = [],
+    placementPins = {},
     keyAnchors = {},
     pinTargets = {},
     attestations = {},
@@ -158,6 +186,13 @@ function makeCtx(opts: {
         }
         case 'getFilesAtPath':
           return { items: files, nextCursor: '0x' as Hex }
+        case 'getActivePinSlot': {
+          const [anchor, attester] = args.args as [Hex, Address]
+          return {
+            pinUID: placementPins[`${anchor}|${attester.toLowerCase()}`] ?? ZERO,
+            targetID: ZERO,
+          }
+        }
         case 'resolveAnchor': {
           const [dataUID, key] = args.args as [Hex, string]
           return keyAnchors[`${dataUID}|${key}`] ?? ZERO
@@ -168,16 +203,22 @@ function makeCtx(opts: {
         }
         case 'getAttestation': {
           const [u] = args.args as [Hex]
-          return { data: attestations[u] ?? ('0x' as Hex) }
+          const data = attestations[u]
+          return attestation({ uid: data !== undefined ? u : ZERO, data })
         }
-        case 'getDataMirrors':
-          return mirrors.map((m, i) => ({
-            uid: uid(0x9000 + i),
-            transportDefinition: ZERO,
-            uri: m.uri,
-            attester: m.attester,
-            timestamp: 0n,
-          }))
+        case 'getDataMirrorsByAttester': {
+          const [, attester] = args.args as [Hex, Address]
+          // The lens-scoped view returns ONLY the named attester's mirrors.
+          return mirrors
+            .filter((m) => m.attester.toLowerCase() === (attester as string).toLowerCase())
+            .map((m, i) => ({
+              uid: uid(0x9000 + i),
+              transportDefinition: ZERO,
+              uri: m.uri,
+              attester: m.attester,
+              timestamp: 0n,
+            }))
+        }
         case 'getDirectoryPageByAddressList':
           return dirPage
         default:
@@ -194,13 +235,15 @@ function makeCtx(opts: {
 
 /** Standard path edges placing /docs/readme.md at FILE_ANCHOR. */
 const README_EDGES = { [`${ROOT}|docs`]: DOCS_ANCHOR, [`${DOCS_ANCHOR}|readme.md`]: FILE_ANCHOR }
+/** A placement PIN under the winning lens at the file anchor. */
+const README_PLACEMENT = { [`${FILE_ANCHOR}|${LENS.toLowerCase()}`]: PLACEMENT_PIN }
 
-// ── resolve ──────────────────────────────────────────────────────────────────────
+// ── locate ─────────────────────────────────────────────────────────────────────
 
-describe('resolve', () => {
+describe('locate', () => {
   it('returns a DataRef under the given lens (resolvedBy = winning attester)', async () => {
     const ctx = makeCtx({ edges: README_EDGES, files: [fileItem({})] })
-    const res = await resolve(ctx, '/docs/readme.md', { lens: LENS })
+    const res = await locate(ctx, '/docs/readme.md', { lens: LENS })
     expect(res).not.toBeNull()
     expect(res?.data.uid).toBe(DATA_UID)
     expect(res?.data.chainId).toBe(31337)
@@ -210,33 +253,38 @@ describe('resolve', () => {
 
   it('returns null when the file anchor does not exist', async () => {
     const ctx = makeCtx({ edges: { [`${ROOT}|docs`]: DOCS_ANCHOR }, files: [] })
-    expect(await resolve(ctx, '/docs/missing.md', { lens: LENS })).toBeNull()
+    expect(await locate(ctx, '/docs/missing.md', { lens: LENS })).toBeNull()
   })
 
   it('returns null when no attester in the lens placed data', async () => {
     const ctx = makeCtx({ edges: README_EDGES, files: [] }) // anchor exists, no placement
-    expect(await resolve(ctx, '/docs/readme.md', { lens: LENS })).toBeNull()
+    expect(await locate(ctx, '/docs/readme.md', { lens: LENS })).toBeNull()
   })
 
   it('defaults the lens to the connected wallet account', async () => {
     const ctx = makeCtx({ account: LENS, edges: README_EDGES, files: [fileItem({})] })
-    const res = await resolve(ctx, '/docs/readme.md') // no opts.lens
+    const res = await locate(ctx, '/docs/readme.md') // no opts.lens
     expect(res?.resolvedBy).toBe(LENS)
   })
 
   it('throws LensRequired when neither a lens nor a wallet is available', async () => {
     const ctx = makeCtx({ edges: README_EDGES, files: [fileItem({})] })
-    await expect(resolve(ctx, '/docs/readme.md')).rejects.toBeInstanceOf(LensRequired)
+    await expect(locate(ctx, '/docs/readme.md')).rejects.toBeInstanceOf(LensRequired)
   })
 })
 
-// ── stat ───────────────────────────────────────────────────────────────────────
+// ── info ─────────────────────────────────────────────────────────────────────
 
-describe('stat', () => {
-  it('reports exists:false when nothing is placed', async () => {
+describe('info', () => {
+  it('reports exists:false when nothing is placed, with provenance still present', async () => {
     const ctx = makeCtx({ edges: README_EDGES, files: [] })
-    const s = await stat(ctx, '/docs/readme.md', { lens: LENS })
-    expect(s.exists).toBe(false)
+    const i = await info(ctx, '/docs/readme.md', { lens: LENS })
+    expect(i.exists).toBe(false)
+    // Provenance is ALWAYS present, never projected away.
+    expect(i).toHaveProperty('resolvedBy')
+    expect(i).toHaveProperty('verified')
+    expect(i).toHaveProperty('sourceUIDs')
+    expect(i.verified).toBe('unchecked')
   })
 
   it('reports exists:true with size + contentType from the reserved PROPERTYs (lens-scoped)', async () => {
@@ -247,6 +295,7 @@ describe('stat', () => {
     const ctx = makeCtx({
       edges: README_EDGES,
       files: [fileItem({})],
+      placementPins: README_PLACEMENT,
       keyAnchors: {
         [`${DATA_UID}|size`]: sizeAnchor,
         [`${DATA_UID}|contentType`]: typeAnchor,
@@ -263,27 +312,75 @@ describe('stat', () => {
         [uid(0xbad)]: propertyData('999999'),
       },
     })
-    const s = await stat(ctx, '/docs/readme.md', { lens: LENS })
-    expect(s.exists).toBe(true)
-    if (s.exists) {
-      expect(s.size).toBe(1234n)
-      expect(s.contentType).toBe('text/markdown')
-      expect(s.resolvedBy).toBe(LENS)
-      expect(s.data.uid).toBe(DATA_UID)
-    }
+    const i = await info(ctx, '/docs/readme.md', { lens: LENS })
+    expect(i.exists).toBe(true)
+    expect(i.size).toBe(1234n)
+    expect(i.contentType).toBe('text/markdown')
+    expect(i.resolvedBy).toBe(LENS)
+    expect(i.ref?.uid).toBe(DATA_UID)
+    expect(i.verified).toBe('matches-author')
+    // Provenance: placement PIN + per-field property UIDs.
+    expect(i.sourceUIDs.placement).toBe(PLACEMENT_PIN)
+    expect(i.sourceUIDs.size).toBe(sizeProp)
+    expect(i.sourceUIDs.contentType).toBe(typeProp)
   })
 
   it('omits size when the reserved PROPERTY is absent', async () => {
     const ctx = makeCtx({ edges: README_EDGES, files: [fileItem({})] })
-    const s = await stat(ctx, '/docs/readme.md', { lens: LENS })
-    expect(s.exists).toBe(true)
-    if (s.exists) expect(s.size).toBeUndefined()
+    const i = await info(ctx, '/docs/readme.md', { lens: LENS })
+    expect(i.exists).toBe(true)
+    expect(i.size).toBeUndefined()
+  })
+
+  it('routes custom fields into the properties bag (typed slots stay reserved)', async () => {
+    const licAnchor = uid(0x11ce)
+    const licProp = uid(0x11cf)
+    const ctx = makeCtx({
+      edges: README_EDGES,
+      files: [fileItem({})],
+      keyAnchors: { [`${DATA_UID}|license`]: licAnchor },
+      pinTargets: { [`${licAnchor}|${LENS.toLowerCase()}`]: licProp },
+      attestations: { [licProp]: propertyData('CC-BY-4.0') },
+    })
+    const i = await info(ctx, '/docs/readme.md', { lens: LENS, fields: ['license'] })
+    expect(i.properties?.license).toBe('CC-BY-4.0')
+  })
+
+  it('hydrates per-field attestations under expand:["attestations"]', async () => {
+    const sizeAnchor = uid(0x5102)
+    const sizeProp = uid(0x5170)
+    const ctx = makeCtx({
+      edges: README_EDGES,
+      files: [fileItem({})],
+      placementPins: README_PLACEMENT,
+      keyAnchors: { [`${DATA_UID}|size`]: sizeAnchor },
+      pinTargets: { [`${sizeAnchor}|${LENS.toLowerCase()}`]: sizeProp },
+      attestations: {
+        [sizeProp]: propertyData('1234'),
+        [PLACEMENT_PIN]: propertyData('placement'),
+      },
+    })
+    const i = await info(ctx, '/docs/readme.md', { lens: LENS, expand: ['attestations'] })
+    expect(i.attestations).toBeDefined()
+    expect(i.attestations?.placement?.uid).toBe(PLACEMENT_PIN)
+    expect(i.attestations?.size?.uid).toBe(sizeProp)
   })
 })
 
-// ── cat / fetch (bytes + verification) ──────────────────────────────────────────
+// ── exists ──────────────────────────────────────────────────────────────────────
 
-describe('cat + fetch', () => {
+describe('exists', () => {
+  it('returns true when a placement resolves, false when absent', async () => {
+    const present = makeCtx({ edges: README_EDGES, files: [fileItem({})] })
+    const absent = makeCtx({ edges: README_EDGES, files: [] })
+    expect(await exists(present, '/docs/readme.md', { lens: LENS })).toBe(true)
+    expect(await exists(absent, '/docs/readme.md', { lens: LENS })).toBe(false)
+  })
+})
+
+// ── read / read(ref) (bytes + verification) ───────────────────────────────────────
+
+describe('read + read(ref)', () => {
   const BYTES = new TextEncoder().encode('# Hello EFS\n')
   const GOOD_HASH = hashContent(BYTES) // 64-hex bare sha256
   const dataUri = `data:text/markdown;base64,${Buffer.from(BYTES).toString('base64')}`
@@ -294,6 +391,7 @@ describe('cat + fetch', () => {
     return makeCtx({
       edges: README_EDGES,
       files: [fileItem({})],
+      placementPins: README_PLACEMENT,
       keyAnchors: { [`${DATA_UID}|contentHash`]: hashAnchor },
       pinTargets: { [`${hashAnchor}|${LENS.toLowerCase()}`]: hashProp },
       attestations: { [hashProp]: propertyData(propHash) },
@@ -301,37 +399,36 @@ describe('cat + fetch', () => {
     })
   }
 
-  it('cat fetches bytes and verifies against the author contentHash (matches-author)', async () => {
-    const file = await cat(ctxWithMirror(GOOD_HASH), '/docs/readme.md', { lens: LENS })
-    expect(new TextDecoder().decode(file.bytes)).toBe('# Hello EFS\n')
+  it('read fetches bytes and verifies against the author contentHash (matches-author)', async () => {
+    const file = await read(ctxWithMirror(GOOD_HASH), '/docs/readme.md', { lens: LENS })
+    expect(file.text()).toBe('# Hello EFS\n') // pure decode
     expect(file.verification).toBe('matches-author')
     expect(file.hashAuthor).toBe(LENS)
   })
 
   it('surfaces a hash MISMATCH as verification status, not a throw', async () => {
     const wrong = 'a'.repeat(64)
-    const file = await cat(ctxWithMirror(wrong), '/docs/readme.md', { lens: LENS })
+    const file = await read(ctxWithMirror(wrong), '/docs/readme.md', { lens: LENS })
     expect(file.verification).toBe('mismatch')
-    // Bytes are still returned — the caller decides whether to trust them.
     expect(file.bytes.byteLength).toBeGreaterThan(0)
   })
 
   it('reports no-claim when verify:false (no contentHash lookup)', async () => {
-    const file = await cat(ctxWithMirror(GOOD_HASH), '/docs/readme.md', {
+    const file = await read(ctxWithMirror(GOOD_HASH), '/docs/readme.md', {
       lens: LENS,
       verify: false,
     })
     expect(file.verification).toBe('no-claim')
   })
 
-  it('cat throws FileNotFoundError when nothing is placed at the path', async () => {
+  it('read throws FileNotFoundError when nothing is placed at the path', async () => {
     const ctx = makeCtx({ edges: README_EDGES, files: [] })
-    await expect(cat(ctx, '/docs/readme.md', { lens: LENS })).rejects.toBeInstanceOf(
+    await expect(read(ctx, '/docs/readme.md', { lens: LENS })).rejects.toBeInstanceOf(
       FileNotFoundError,
     )
   })
 
-  it('fetch(ref) verifies from a bare DataRef (lens carried by the ref)', async () => {
+  it('read(ref) verifies from a bare DataRef (lens carried by the ref)', async () => {
     const hashAnchor = uid(0x4a54)
     const hashProp = uid(0x4a51)
     const ctx = makeCtx({
@@ -340,18 +437,13 @@ describe('cat + fetch', () => {
       attestations: { [hashProp]: propertyData(GOOD_HASH) },
       mirrors: [{ uri: dataUri, attester: LENS }],
     })
-    const ref: DataRef = {
-      __brand: 'DataRef',
-      uid: DATA_UID,
-      chainId: 31337,
-      resolvedBy: LENS,
-    }
-    const file = await fetchRef(ctx, ref)
+    const ref: DataRef = { __brand: 'DataRef', uid: DATA_UID, chainId: 31337, resolvedBy: LENS }
+    const file = await read(ctx, ref)
     expect(file.verification).toBe('matches-author')
     expect(file.hashAuthor).toBe(LENS)
   })
 
-  it('ignores mirrors attached by a non-lens attester', async () => {
+  it('ignores mirrors attached by a non-lens attester (lens-scoped view)', async () => {
     const hashAnchor = uid(0x4a54)
     const hashProp = uid(0x4a51)
     const ctx = makeCtx({
@@ -361,8 +453,93 @@ describe('cat + fetch', () => {
       mirrors: [{ uri: dataUri, attester: OTHER }], // wrong attester
     })
     const ref: DataRef = { __brand: 'DataRef', uid: DATA_UID, chainId: 31337, resolvedBy: LENS }
-    // No lens-scoped mirror → AllMirrorsFailed (classified EfsError).
-    await expect(fetchRef(ctx, ref)).rejects.toThrow()
+    // The lens-scoped view returns no mirrors for LENS → AllMirrorsFailed (classified).
+    await expect(read(ctx, ref)).rejects.toThrow()
+  })
+
+  // ── fail-closed value sugar ─────────────────────────────────────────────────
+
+  it('readText returns the string on a match', async () => {
+    const text = await readText(ctxWithMirror(GOOD_HASH), '/docs/readme.md', { lens: LENS })
+    expect(text).toBe('# Hello EFS\n')
+  })
+
+  it('readBytes returns the bytes on a match', async () => {
+    const bytes = await readBytes(ctxWithMirror(GOOD_HASH), '/docs/readme.md', { lens: LENS })
+    expect(new TextDecoder().decode(bytes)).toBe('# Hello EFS\n')
+  })
+
+  it('readText THROWS ContentHashMismatch on a hash mismatch (fail-closed)', async () => {
+    const wrong = 'a'.repeat(64)
+    await expect(
+      readText(ctxWithMirror(wrong), '/docs/readme.md', { lens: LENS }),
+    ).rejects.toBeInstanceOf(ContentHashMismatch)
+  })
+
+  it('readText THROWS MalformedClaim on a malformed contentHash claim', async () => {
+    const malformed = '0xnot-a-hash'
+    await expect(
+      readText(ctxWithMirror(malformed), '/docs/readme.md', { lens: LENS }),
+    ).rejects.toBeInstanceOf(MalformedClaim)
+  })
+
+  it('readText with verify:false returns mismatched bytes WITHOUT throwing (opt-out)', async () => {
+    const wrong = 'a'.repeat(64)
+    const text = await readText(ctxWithMirror(wrong), '/docs/readme.md', {
+      lens: LENS,
+      verify: false,
+    })
+    expect(text).toBe('# Hello EFS\n')
+  })
+
+  it('readJson parses + (optionally) validates', async () => {
+    const obj = { hello: 'efs' }
+    const jsonBytes = new TextEncoder().encode(JSON.stringify(obj))
+    const jsonHash = hashContent(jsonBytes)
+    const jsonUri = `data:application/json;base64,${Buffer.from(jsonBytes).toString('base64')}`
+    const hashAnchor = uid(0x4a54)
+    const hashProp = uid(0x4a51)
+    const ctx = makeCtx({
+      edges: README_EDGES,
+      files: [fileItem({})],
+      keyAnchors: { [`${DATA_UID}|contentHash`]: hashAnchor },
+      pinTargets: { [`${hashAnchor}|${LENS.toLowerCase()}`]: hashProp },
+      attestations: { [hashProp]: propertyData(jsonHash) },
+      mirrors: [{ uri: jsonUri, attester: LENS }],
+    })
+    const parsed = await readJson<{ hello: string }>(ctx, '/docs/readme.md', { lens: LENS })
+    expect(parsed.hello).toBe('efs')
+
+    // With a zod-like schema.
+    const schema = {
+      parse(v: unknown) {
+        if (typeof (v as { hello?: unknown }).hello !== 'string') throw new Error('bad')
+        return v as { hello: string }
+      },
+    }
+    const validated = await readJson(ctx, '/docs/readme.md', { lens: LENS, schema })
+    expect(validated.hello).toBe('efs')
+  })
+})
+
+// ── attestationsFor (batched hydrate) ─────────────────────────────────────────────
+
+describe('attestationsFor', () => {
+  it('hydrates source UIDs across items, degrading absent UIDs per-item', async () => {
+    const propA = uid(0x7001)
+    const ctx = makeCtx({
+      attestations: { [propA]: propertyData('hello') },
+    })
+    const items = [
+      { sourceUIDs: { contentType: propA, size: uid(0xdead) /* absent */ } },
+      { sourceUIDs: {} },
+    ]
+    const out = await attestationsFor(ctx, items)
+    expect(out).toHaveLength(2)
+    expect(out[0]?.attestations.contentType?.uid).toBe(propA)
+    // An absent UID (no table entry) hydrates to undefined, not a throw.
+    expect(out[0]?.attestations.size).toBeUndefined()
+    expect(out[1]?.attestations).toEqual({})
   })
 })
 
@@ -374,16 +551,16 @@ describe('list', () => {
     fileItem({ uid: uid(0x202), name: 'sub', isFolder: true, hasData: false }),
   ]
 
-  it('returns a page of DirEntry with kind file|dir and the anchoring UID', async () => {
+  it('returns a page of DirEntry with kind file|dir and the anchoring UID (.byPage)', async () => {
     const ctx = makeCtx({
       edges: { [`${ROOT}|docs`]: DOCS_ANCHOR },
       dirPage: { items: dirEntries, nextCursor: 0n },
     })
-    const p = await list(() => ctx, '/docs', { lens: LENS }).page()
+    const p = await list(() => ctx, '/docs', { lens: LENS }).byPage()
     expect(p.items).toHaveLength(2)
     expect(p.items[0]).toEqual({ name: 'a.md', kind: 'file', dataUID: uid(0x201) })
     expect(p.items[1]).toEqual({ name: 'sub', kind: 'dir', anchorUID: uid(0x202) })
-    expect(p.nextCursor).toBeUndefined() // nextCursor 0 → end
+    expect(p.cursor).toBeUndefined() // nextCursor 0 → end
   })
 
   it('exposes a resumable opaque cursor when more remain', async () => {
@@ -391,17 +568,14 @@ describe('list', () => {
       edges: { [`${ROOT}|docs`]: DOCS_ANCHOR },
       dirPage: { items: dirEntries, nextCursor: 7n },
     })
-    const p = await list(() => ctx, '/docs', { lens: LENS }).page({ limit: 2 })
-    expect(p.nextCursor).toBe('7')
+    const p = await list(() => ctx, '/docs', { lens: LENS }).byPage({ limit: 2 })
+    expect(p.cursor).toBe('7')
   })
 
   it('async-iterates across pages until the cursor is exhausted', async () => {
-    // First window returns nextCursor 1, second returns 0 (end). We flip the table
-    // between calls via a counter in the mock.
     let call = 0
     const calls: { fn: string; args: readonly unknown[] }[] = []
     const ctx = makeCtx({ edges: { [`${ROOT}|docs`]: DOCS_ANCHOR }, calls })
-    // Override getDirectoryPageByAddressList with a paging stub.
     const inner = ctx.publicClient.readContract.bind(ctx.publicClient)
     ctx.publicClient.readContract = async (args) => {
       if (args.functionName === 'getDirectoryPageByAddressList') {
@@ -415,12 +589,22 @@ describe('list', () => {
     const names: string[] = []
     for await (const e of list(() => ctx, '/docs', { lens: LENS })) names.push(e.name)
     expect(names).toEqual(['a.md', 'sub'])
-    expect(call).toBe(2) // two windows walked
+    expect(call).toBe(2)
   })
 
-  it('throws LensRequired (on iterate) when no lens/wallet is available', async () => {
+  it('.toArray materializes up to the mandatory limit', async () => {
+    const ctx = makeCtx({
+      edges: { [`${ROOT}|docs`]: DOCS_ANCHOR },
+      dirPage: { items: dirEntries, nextCursor: 0n },
+    })
+    const all = await list(() => ctx, '/docs', { lens: LENS }).toArray({ limit: 1 })
+    expect(all).toHaveLength(1)
+    expect(all[0]?.name).toBe('a.md')
+  })
+
+  it('throws LensRequired (on .byPage) when no lens/wallet is available', async () => {
     const ctx = makeCtx({ edges: { [`${ROOT}|docs`]: DOCS_ANCHOR } })
-    await expect(list(() => ctx, '/docs').page()).rejects.toBeInstanceOf(LensRequired)
+    await expect(list(() => ctx, '/docs').byPage()).rejects.toBeInstanceOf(LensRequired)
   })
 
   it('refuses the filtered (excludes) path until it is wired', () => {
