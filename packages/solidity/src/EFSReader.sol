@@ -152,6 +152,38 @@ library EFSReader {
     ///      `eas-contracts/Common.sol`'s `EMPTY_UID`.
     bytes32 internal constant EMPTY_UID = bytes32(0);
 
+    // ── REDIRECT (ADR-0050) ──────────────────────────────────────────────────────────────────
+    //
+    // Frozen REDIRECT kind discriminators (taxonomy is resolver + client convention, NOT part of
+    // the schema UID — ADR-0050; mirrored from `AliasResolver`). Read-time *follow* rules:
+    // sameAs / supersededBy / symlink are auto-followed; `relatedVersion` (3) and any other
+    // reserved kind are NEVER auto-followed (the SKOS guard against "sameAs explosion").
+    uint16 internal constant REDIRECT_KIND_SAME_AS = 0;
+    uint16 internal constant REDIRECT_KIND_SUPERSEDED_BY = 1;
+    uint16 internal constant REDIRECT_KIND_SYMLINK = 2;
+    uint16 internal constant REDIRECT_KIND_RELATED_VERSION = 3;
+
+    /// @dev Default hop cap for {resolveWithRedirects} when a caller passes `0` — the soft ceiling
+    ///      `D_MAX ≈ 8` from ADR-0050 §"Write-time guards vs read-time resolution". The hard
+    ///      ceiling is `MAX_ANCHOR_DEPTH` (32, ADR-0021); callers may pass any explicit cap up to
+    ///      that, but the on-chain follower never loops unbounded (see {RedirectHopLimit}).
+    uint256 internal constant REDIRECT_DEFAULT_MAX_HOPS = 8;
+
+    /// @notice Raised when following a redirect chain detects a cycle — the same source is visited
+    ///         twice (e.g. A→B by one lens, B→A by another). The contracts cannot self-loop a
+    ///         single redirect (`AliasResolver` rejects `target == refUID`), but multi-hop cycles
+    ///         across attesters are a read-time concern resolved here, not on-chain (ADR-0050).
+    error RedirectCycle(bytes32 atSource);
+
+    /// @notice Raised when a redirect chain exceeds the hop cap before reaching a terminal target —
+    ///         the bounded-walk guard that replaces an unbounded loop.
+    error RedirectHopLimit(uint256 maxHops);
+
+    /// @notice Raised when a redirect UID supplied in a follow chain does not connect: its decoded
+    ///         source (`refUID`) is not the cursor the walk currently sits on. Surfaces a malformed
+    ///         caller-supplied chain rather than silently following an unrelated redirect.
+    error RedirectChainBroken(bytes32 expectedSource, bytes32 redirectUID);
+
     // ── Path resolution (EFSIndexer) ─────────────────────────────────────────────────────────
 
     /// @notice Resolve one path segment under a parent anchor to its child anchor UID, on the
@@ -276,6 +308,164 @@ library EFSReader {
         // would revert. Treat empty as the empty string (no value bound).
         if (att.data.length == 0) return "";
         value = abi.decode(att.data, (string));
+    }
+
+    // ── REDIRECT resolution (ADR-0050) ─────────────────────────────────────────────────────────
+    //
+    // The model (verified against the deployed contracts): a REDIRECT is a plain EAS attestation —
+    // `refUID` = the *source* (a DATA for sameAs/supersededBy, an ANCHOR for symlink), `data =
+    // abi.encode(bytes32 target, uint16 kind)`, and the EAS `attester` is the asserting *lens*.
+    // `AliasResolver` enforces write-time guards ONLY (no self-loop, per-kind typing) and stores
+    // NOTHING: there is no on-chain `(source, attester)` active-redirect slot the way `EdgeResolver`
+    // has one for PINs, reverse fan-in ("what points at me?") is intentionally un-indexed on-chain,
+    // and `EFSFileView.getCanonicalData` is a deprecated no-op. NOTHING on-chain follows redirects —
+    // multi-hop following, cycle handling, and the hop cap are read-time logic (ADR-0050
+    // §"Write-time guards vs read-time resolution"), which is what this section provides.
+    //
+    // Consequence for the API: because there is no source→redirect index on-chain, a pure on-chain
+    // reader cannot *discover* which redirect applies at a source — the off-chain indexer (or the
+    // caller's own knowledge) supplies the candidate redirect UID(s). The reader's job is to
+    // AUTHORITATIVELY decode each supplied redirect (right schema, asserted by the trusted lens,
+    // not revoked, a followable kind) and to follow the chain to its terminal target with cycle
+    // detection and a bounded hop cap. {redirectTarget} is the single-redirect read; {followKind}
+    // gates which kinds auto-follow; {resolveWithRedirects} is the safe multi-hop walk.
+
+    /// @notice Whether a REDIRECT `kind` is auto-followed at read time (ADR-0050): `sameAs` (0),
+    ///         `supersededBy` (1), and `symlink` (2) are followed; everything else — including
+    ///         `relatedVersion` (3) and all reserved kinds (≥3) — is a discovery hint that is
+    ///         NEVER auto-followed (guards against identity-rerouting "sameAs explosion").
+    /// @param  kind The REDIRECT `kind` discriminator.
+    /// @return Whether the resolver should follow this kind.
+    function followKind(uint16 kind) internal pure returns (bool) {
+        return kind == REDIRECT_KIND_SAME_AS || kind == REDIRECT_KIND_SUPERSEDED_BY
+            || kind == REDIRECT_KIND_SYMLINK;
+    }
+
+    /// @notice Authoritatively read one REDIRECT attestation, lens-scoped: returns its decoded
+    ///         `(source, target, kind)` only if the attestation is the REDIRECT schema, was asserted
+    ///         by `attester` (the trusted lens), and is not revoked. Otherwise returns all zeros —
+    ///         a redirect that does not apply to this lens (or is revoked / wrong schema) is "not a
+    ///         redirect" from the lens's point of view, never a revert.
+    /// @dev    There is no on-chain source→redirect index (reverse fan-in is off-chain, ADR-0050),
+    ///         so the caller supplies `redirectUID` (typically from the off-chain indexer). This is
+    ///         the one genuine REDIRECT decode, done once so consumers get the lens-scope and the
+    ///         revocation/schema guards right by construction:
+    ///           1. `eas.getAttestation(redirectUID)` → the attestation.
+    ///           2. Guard `schema == redirectSchema` (an attacker can register any schema pointing
+    ///              at a payload that looks like a redirect; only the frozen REDIRECT schema counts).
+    ///           3. Guard `attester == attester` (lens-scope — you only follow redirects YOUR lens
+    ///              asserts; a foreign attester cannot reroute your identity).
+    ///           4. Guard `revocationTime == 0` (REDIRECT is revocable; a retracted redirect is
+    ///              inactive — ADR-0051 read-excludes-revoked).
+    ///           5. `abi.decode(data, (bytes32, uint16))` → `(target, kind)`; `source` is `refUID`.
+    ///         A zero-length / malformed `data` decodes safely to `(0, 0)` (guarded) rather than
+    ///         reverting.
+    /// @param  eas            The EAS instance the REDIRECT attestation lives in.
+    /// @param  redirectSchema The frozen REDIRECT schema UID (from the deployments registry).
+    /// @param  redirectUID    The REDIRECT attestation UID to read (caller / off-chain-indexer supplied).
+    /// @param  attester       The lens whose redirect to honor.
+    /// @return source         The redirect's source (`refUID`), or EMPTY_UID if not an applicable redirect.
+    /// @return target         The redirect's destination, or EMPTY_UID if not applicable.
+    /// @return kind           The redirect `kind`, or 0 if not applicable.
+    function redirectTarget(IEAS eas, bytes32 redirectSchema, bytes32 redirectUID, address attester)
+        internal
+        view
+        returns (bytes32 source, bytes32 target, uint16 kind)
+    {
+        if (redirectUID == EMPTY_UID) return (EMPTY_UID, EMPTY_UID, 0);
+        Attestation memory att = eas.getAttestation(redirectUID);
+        // Lens-scope + schema + revocation guards. Any failure ⇒ "not a redirect for this lens".
+        if (att.schema != redirectSchema) return (EMPTY_UID, EMPTY_UID, 0);
+        if (att.attester != attester) return (EMPTY_UID, EMPTY_UID, 0);
+        if (att.revocationTime != 0) return (EMPTY_UID, EMPTY_UID, 0);
+        // REDIRECT payload is exactly `(bytes32 target, uint16 kind)` (64 bytes); a malformed/empty
+        // body would revert an unguarded decode — treat it as "not a redirect" instead.
+        if (att.data.length != 64) return (EMPTY_UID, EMPTY_UID, 0);
+        (target, kind) = abi.decode(att.data, (bytes32, uint16));
+        source = att.refUID;
+    }
+
+    /// @notice Follow a redirect chain from `source` to its terminal target, lens-scoped, with
+    ///         cycle detection and a bounded hop cap — the read-time resolution the contracts do
+    ///         NOT do (ADR-0050). Returns the terminal UID a consumer should treat as canonical:
+    ///         the last `target` reached after following every applicable, followable redirect, or
+    ///         `source` unchanged if the first redirect does not apply (no redirect for this lens).
+    /// @dev    `redirectUIDs` is the ordered candidate chain the caller (off-chain indexer) believes
+    ///         applies, hop by hop — there is no on-chain source→redirect index to discover them
+    ///         (reverse fan-in is off-chain, ADR-0050). The walk is authoritative and safe:
+    ///           - Each hop is decoded via {redirectTarget} (schema + lens + revocation guards).
+    ///           - A hop whose decoded `source` is not the current cursor reverts {RedirectChainBroken}
+    ///             (a malformed chain), so a caller cannot smuggle in an unrelated redirect.
+    ///           - A non-followable kind (`relatedVersion`/reserved, ADR-0050) STOPS the walk at the
+    ///             current cursor — it is not followed and not an error.
+    ///           - A hop that does not apply to the lens (revoked / wrong schema / foreign attester /
+    ///             absent) STOPS the walk at the current cursor (terminal reached).
+    ///           - **Cycle detection:** every visited source is recorded; revisiting one reverts
+    ///             {RedirectCycle}. (A single redirect can't self-loop — `AliasResolver` rejects
+    ///             `target == refUID` — but A→B / B→A across two lenses can, and is caught here.)
+    ///           - **Hop cap:** at most `maxHops` redirects are followed; exceeding it reverts
+    ///             {RedirectHopLimit}. `maxHops == 0` ⇒ {REDIRECT_DEFAULT_MAX_HOPS}. The loop is
+    ///             bounded by `min(redirectUIDs.length, maxHops)` and the visited-set, so it can
+    ///             NEVER loop unbounded.
+    ///         NOTE on the cycle rule: ADR-0050's *canonicalization* rule ("resolve to the lowest UID
+    ///         in the strongly-connected component") is a global graph computation that needs the
+    ///         full edge set — out of scope for an on-chain follower handed a linear candidate chain.
+    ///         This follower instead REVERTS on a cycle (fail-closed: never silently teleport to an
+    ///         attacker-chosen node), leaving SCC-canonicalization to the off-chain resolver that has
+    ///         the whole graph. That is the correct on-chain posture for a bounded, chain-fed walk.
+    /// @param  eas            The EAS instance the REDIRECT attestations live in.
+    /// @param  redirectSchema The frozen REDIRECT schema UID.
+    /// @param  source         The starting UID (a DATA or ANCHOR) to resolve from.
+    /// @param  redirectUIDs   The ordered candidate redirect UIDs to follow (off-chain-indexer supplied).
+    /// @param  attester       The lens whose redirects to follow.
+    /// @param  maxHops        Hop cap (0 ⇒ {REDIRECT_DEFAULT_MAX_HOPS}); follow stops/reverts at it.
+    /// @return terminal       The terminal (canonical) UID — `source` if nothing applies.
+    /// @return hops           The number of redirects actually followed.
+    function resolveWithRedirects(
+        IEAS eas,
+        bytes32 redirectSchema,
+        bytes32 source,
+        bytes32[] memory redirectUIDs,
+        address attester,
+        uint256 maxHops
+    ) internal view returns (bytes32 terminal, uint256 hops) {
+        uint256 cap = maxHops == 0 ? REDIRECT_DEFAULT_MAX_HOPS : maxHops;
+
+        // Visited-source set for cycle detection AND the running cursor: `visited[hops]` is always
+        // the current terminal, and `hops + 1` entries are populated. Bounded by `cap + 1` entries
+        // (the start plus one per followed hop), so memory and the scan are both hop-cap-bounded.
+        bytes32[] memory visited = new bytes32[](cap + 1);
+        visited[0] = source;
+
+        uint256 n = redirectUIDs.length;
+        for (uint256 i = 0; i < n; ++i) {
+            (bytes32 src, bytes32 tgt, uint16 kind) =
+                redirectTarget(eas, redirectSchema, redirectUIDs[i], attester);
+
+            // Does not apply to this lens (revoked / wrong schema / foreign attester / absent):
+            // the chain ends here — the current cursor is terminal.
+            if (tgt == EMPTY_UID) break;
+            // The supplied redirect must actually start where the walk currently sits.
+            if (src != visited[hops]) revert RedirectChainBroken(visited[hops], redirectUIDs[i]);
+            // A non-followable kind (relatedVersion / reserved) is a discovery hint, not a hop:
+            // stop at the current cursor without following or erroring (ADR-0050).
+            if (!followKind(kind)) break;
+            // About to follow one more hop — enforce the bounded cap BEFORE advancing.
+            if (hops == cap) revert RedirectHopLimit(cap);
+            // Cycle check: revisiting any prior source (incl. the original `source`) is a cycle.
+            _assertUnvisited(visited, hops + 1, tgt);
+
+            visited[++hops] = tgt;
+        }
+        terminal = visited[hops];
+    }
+
+    /// @dev Revert {RedirectCycle} if `target` already appears in `visited[0..len)`. Extracted from
+    ///      {resolveWithRedirects} to keep that function's stack within the optimizer's depth.
+    function _assertUnvisited(bytes32[] memory visited, uint256 len, bytes32 target) private pure {
+        for (uint256 j = 0; j < len; ++j) {
+            if (visited[j] == target) revert RedirectCycle(target);
+        }
     }
 
     // ── Directory listing (EFSFileView) ──────────────────────────────────────────────────────

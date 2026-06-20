@@ -53,6 +53,15 @@ library EFSLib {
     /// @dev `value` is always 0 — no EFS write schema has a payable resolver.
     uint256 internal constant NO_VALUE = 0;
 
+    /// @dev Frozen REDIRECT `kind` discriminators (ADR-0050). The taxonomy is resolver + client
+    ///      convention, NOT part of the schema UID — only the field string `"bytes32 target, uint16
+    ///      kind"` is frozen. `AliasResolver` type-checks the enforced kinds at write time:
+    ///      sameAs/supersededBy require source + target both DATA; symlink requires source ANCHOR,
+    ///      target ANCHOR-or-DATA; kinds ≥ 3 are recorded but not type-checked.
+    uint16 internal constant REDIRECT_KIND_SAME_AS = 0;
+    uint16 internal constant REDIRECT_KIND_SUPERSEDED_BY = 1;
+    uint16 internal constant REDIRECT_KIND_SYMLINK = 2;
+
     /// @notice The frozen EFS schema UIDs needed to compose any EFS write. Pass the set for the
     ///         target deployment (the SDK's per-chain deployments registry resolves these).
     /// @dev    Field strings (frozen freeze set, spec 02-Data-Models-and-Schemas §; the resolvers
@@ -66,9 +75,10 @@ library EFSLib {
     ///           - `list`      → `bool allowsDuplicates, bool appendOnly, uint8 targetType,
     ///                            bytes32 targetSchema, uint256 maxEntries`
     ///           - `listEntry` → `bytes32 listUID, bytes32 target`
+    ///           - `redirect`  → `bytes32 target, uint16 kind`         (ADR-0050; refUID = source)
     ///         {writeFile} uses only `data`/`anchor`/`property`/`mirror`/`pin`; `tag`/`list`/
-    ///         `listEntry` are consumed by {tag}/{createList}/{addEntry} respectively. A caller that
-    ///         only does file writes may leave the list/tag fields zero.
+    ///         `listEntry`/`redirect` are consumed by {tag}/{createList}/{addEntry}/{setRedirect}
+    ///         respectively. A caller that only does file writes may leave the other fields zero.
     struct SchemaUIDs {
         bytes32 data;
         bytes32 anchor;
@@ -78,6 +88,7 @@ library EFSLib {
         bytes32 tag;
         bytes32 list;
         bytes32 listEntry;
+        bytes32 redirect;
     }
 
     /// @notice One retrieval method to publish as a MIRROR on the file's DATA.
@@ -492,6 +503,54 @@ library EFSLib {
                     revocable: true,
                     refUID: EMPTY_UID, // refUID MUST be 0
                     data: abi.encode(listUID, bytes32(0)), // ADDR mode — payload target MUST be 0
+                    value: NO_VALUE
+                })
+            })
+        );
+    }
+
+    /// @notice A **REDIRECT** edge (ADR-0050): assert that `source` points at `target` with class
+    ///         `kind` — the trust-scoped "this points at that" primitive for canonical/dedup
+    ///         (`sameAs`), version supersession (`supersededBy`), and path symlinks (`symlink`).
+    /// @dev    `AliasResolver.onAttest`: schema = `bytes32 target, uint16 kind`; `data =
+    ///         abi.encode(target, kind)` (exactly 64 bytes — `uint16` pads to a word; a wrong length
+    ///         reverts `BadPayload`). The *source* is the native EAS `refUID` (the duplicate DATA for
+    ///         sameAs/supersededBy; the path ANCHOR for symlink), NOT a payload field. The edge MUST
+    ///         be `revocable=true` with `expirationTime 0` (resolver `NotRevocable`/`HasExpiration`;
+    ///         a redirect is "active until explicitly revoked"). Write-time guards: `target != 0`
+    ///         (`ZeroTarget`), `target != source` (`SelfLoop` — no trivial direct self-loop), and
+    ///         per-kind typing (sameAs/supersededBy require source + target both DATA; symlink
+    ///         requires source ANCHOR, target ANCHOR-or-DATA; kinds ≥ 3 are recorded, not typed).
+    ///         Multi-hop cycle handling, depth caps, and chain-following are READ-time concerns
+    ///         (see {EFSReader.resolveWithRedirects}) — the resolver does not walk the graph.
+    ///
+    ///         Cardinality note: REDIRECT is NOT a cardinality-1 slot like PIN. The resolver stores
+    ///         no `(source, attester)` slot and does not supersede a prior redirect — re-attesting
+    ///         adds another redirect edge. To replace or remove a redirect, `eas.revoke()` the prior
+    ///         REDIRECT UID (which is why this returns it). This is unlike {place}/{anchorAt}, whose
+    ///         cardinality-1 PIN supersedes in O(1).
+    /// @param  eas     The EAS instance to attest against.
+    /// @param  schemas The frozen schema UID set (only `redirect` is used).
+    /// @param  source  The source UID this redirect points FROM (the edge's `refUID`).
+    /// @param  target  The destination UID this redirect points TO (nonzero, != source).
+    /// @param  kind    The redirect class (0 = sameAs, 1 = supersededBy, 2 = symlink; ≥ 3 reserved).
+    /// @return redirectUID The created REDIRECT edge UID (revoke it to retract the redirect).
+    function setRedirect(
+        IEAS eas,
+        SchemaUIDs memory schemas,
+        bytes32 source,
+        bytes32 target,
+        uint16 kind
+    ) internal returns (bytes32 redirectUID) {
+        redirectUID = eas.attest(
+            AttestationRequest({
+                schema: schemas.redirect,
+                data: AttestationRequestData({
+                    recipient: ZERO_RECIPIENT,
+                    expirationTime: NO_EXPIRATION, // AliasResolver — HasExpiration if nonzero
+                    revocable: true, // AliasResolver — NotRevocable if false
+                    refUID: source, // source via native refUID (the redirect's `refUID`)
+                    data: abi.encode(target, kind), // (target, kind) — 64 bytes exact
                     value: NO_VALUE
                 })
             })

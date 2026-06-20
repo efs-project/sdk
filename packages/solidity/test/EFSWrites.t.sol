@@ -64,6 +64,13 @@ contract WritesConsumerMock is EFSWriter {
     {
         return EFSLib.addAddressEntry(EAS, s, listUID, member);
     }
+
+    function setRedirect(EFSLib.SchemaUIDs memory s, bytes32 source, bytes32 target, uint16 kind)
+        external
+        returns (bytes32)
+    {
+        return _efsSetRedirect(s, source, target, kind);
+    }
 }
 
 contract EFSWritesTest is Test {
@@ -78,7 +85,8 @@ contract EFSWritesTest is Test {
         pin: keccak256("PIN_SCHEMA"),
         tag: keccak256("TAG_SCHEMA"),
         list: keccak256("LIST_SCHEMA"),
-        listEntry: keccak256("LIST_ENTRY_SCHEMA")
+        listEntry: keccak256("LIST_ENTRY_SCHEMA"),
+        redirect: keccak256("REDIRECT_SCHEMA")
     });
 
     bytes32 constant PARENT = keccak256("PARENT_FOLDER_ANCHOR");
@@ -273,5 +281,38 @@ contract EFSWritesTest is Test {
         emit EFSWriter.EFSFileWritten(anchor, DATA_UID, _uid(0));
         vm.prank(ALICE);
         consumer.place(schemas, anchor, DATA_UID);
+    }
+
+    // ── setRedirect (REDIRECT edge, ADR-0050) ────────────────────────────────────────────────
+
+    function test_SetRedirect_EncodesSourceTargetKind() public {
+        bytes32 source = keccak256("DUP_DATA");
+        bytes32 target = keccak256("CANONICAL_DATA");
+        vm.prank(ALICE);
+        bytes32 redirectUID =
+            consumer.setRedirect(schemas, source, target, EFSLib.REDIRECT_KIND_SAME_AS);
+
+        assertEq(eas.callCount(), 1, "setRedirect = 1 attestation");
+        MockEAS.Call memory c = eas.callAt(0);
+        assertEq(c.schema, schemas.redirect, "schema = REDIRECT");
+        assertEq(c.refUID, source, "source via refUID");
+        assertEq(c.revocable, true, "REDIRECT revocable (AliasResolver NotRevocable)");
+        assertEq(c.expirationTime, 0, "no expiration (AliasResolver HasExpiration)");
+        assertEq(c.recipient, address(0), "recipient 0");
+        // (target, kind) - 64 bytes exact (uint16 pads to a word).
+        assertEq(c.data, abi.encode(target, EFSLib.REDIRECT_KIND_SAME_AS), "data = (target, kind)");
+        assertEq(c.data.length, 64, "REDIRECT payload is canonical 64 bytes");
+        assertEq(redirectUID, _uid(0), "returns the minted redirect UID");
+        assertEq(c.attester, address(consumer), "attester = consumer (inlined lens)");
+    }
+
+    function test_SetRedirect_DecodesBackToInputs() public {
+        bytes32 source = keccak256("SRC");
+        bytes32 target = keccak256("TGT");
+        vm.prank(ALICE);
+        consumer.setRedirect(schemas, source, target, EFSLib.REDIRECT_KIND_SYMLINK);
+        (bytes32 gotTarget, uint16 gotKind) = abi.decode(eas.callAt(0).data, (bytes32, uint16));
+        assertEq(gotTarget, target, "target round-trips");
+        assertEq(gotKind, EFSLib.REDIRECT_KIND_SYMLINK, "kind round-trips");
     }
 }

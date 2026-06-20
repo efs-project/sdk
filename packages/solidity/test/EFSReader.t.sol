@@ -196,6 +196,26 @@ contract MockEAS is IEAS {
         a.data = data;
     }
 
+    /// @dev Richer setter for REDIRECT reads, which lens-scope on `attester`, exclude on
+    ///      `revocationTime`, and read the source from `refUID` (none of which the 3-arg setter
+    ///      covers). `revocationTime != 0` marks the attestation revoked.
+    function setRedirectAttestation(
+        bytes32 uid,
+        bytes32 schema,
+        bytes32 refUID,
+        address attester,
+        uint64 revocationTime,
+        bytes memory data
+    ) external {
+        Attestation storage a = attestations[uid];
+        a.uid = uid;
+        a.schema = schema;
+        a.refUID = refUID;
+        a.attester = attester;
+        a.revocationTime = revocationTime;
+        a.data = data;
+    }
+
     function getAttestation(bytes32 uid) external view returns (Attestation memory) {
         return attestations[uid];
     }
@@ -598,5 +618,256 @@ contract EFSReaderTest is Test {
             keccak256(abi.encode(listUID, ALICE, uint256(3), uint256(50), "ECHO")),
             "forwarded listUID/attester/start/len"
         );
+    }
+
+    // ── REDIRECT resolution (ADR-0050) ─────────────────────────────────────────────────────────
+
+    bytes32 constant REDIRECT_SCHEMA = keccak256("REDIRECT_SCHEMA");
+
+    /// @dev Mint a REDIRECT attestation `uid`: source `src` → target `tgt`, class `kind`, asserted
+    ///      by `attester`, active (not revoked). Payload is the frozen `(bytes32 target, uint16 kind)`.
+    function _redirect(bytes32 uid, bytes32 src, bytes32 tgt, uint16 kind, address attester)
+        internal
+    {
+        eas.setRedirectAttestation(uid, REDIRECT_SCHEMA, src, attester, 0, abi.encode(tgt, kind));
+    }
+
+    function _eas() internal view returns (IEAS) {
+        return IEAS(address(eas));
+    }
+
+    /// @dev External trampoline so `vm.expectRevert` latches onto THIS call's revert, not the
+    ///      inner `eas.getAttestation` staticcall the inlined library makes first (a depth-0
+    ///      internal-library revert otherwise lets expectRevert catch the first external call
+    ///      instead). Revert-path tests call through here; happy-path tests call the lib directly.
+    function resolveWithRedirectsExt(
+        bytes32 source,
+        bytes32[] memory redirectUIDs,
+        address attester,
+        uint256 maxHops
+    ) external view returns (bytes32, uint256) {
+        return EFSReader.resolveWithRedirects(
+            _eas(), REDIRECT_SCHEMA, source, redirectUIDs, attester, maxHops
+        );
+    }
+
+    // followKind — only sameAs/supersededBy/symlink auto-follow.
+    function test_FollowKind_OnlyEnforcedKindsFollow() public pure {
+        assertTrue(EFSReader.followKind(EFSReader.REDIRECT_KIND_SAME_AS), "sameAs follows");
+        assertTrue(
+            EFSReader.followKind(EFSReader.REDIRECT_KIND_SUPERSEDED_BY), "supersededBy follows"
+        );
+        assertTrue(EFSReader.followKind(EFSReader.REDIRECT_KIND_SYMLINK), "symlink follows");
+        assertFalse(
+            EFSReader.followKind(EFSReader.REDIRECT_KIND_RELATED_VERSION), "relatedVersion never"
+        );
+        assertFalse(EFSReader.followKind(99), "reserved kind never");
+    }
+
+    // redirectTarget — decode + lens/schema/revocation guards.
+    function test_RedirectTarget_DecodesActiveLensRedirect() public {
+        bytes32 rUID = keccak256("r1");
+        bytes32 src = keccak256("dataA");
+        bytes32 tgt = keccak256("dataCanonical");
+        _redirect(rUID, src, tgt, EFSReader.REDIRECT_KIND_SAME_AS, ALICE);
+
+        (bytes32 gotSrc, bytes32 gotTgt, uint16 gotKind) =
+            EFSReader.redirectTarget(_eas(), REDIRECT_SCHEMA, rUID, ALICE);
+        assertEq(gotSrc, src, "source = refUID");
+        assertEq(gotTgt, tgt, "target decoded");
+        assertEq(gotKind, EFSReader.REDIRECT_KIND_SAME_AS, "kind decoded");
+    }
+
+    function test_RedirectTarget_ForeignAttester_NotApplicable() public {
+        bytes32 rUID = keccak256("r1");
+        _redirect(rUID, keccak256("s"), keccak256("t"), EFSReader.REDIRECT_KIND_SAME_AS, ALICE);
+        // Reading under BOB's lens: Alice's redirect does not apply.
+        (bytes32 s, bytes32 t, uint16 k) =
+            EFSReader.redirectTarget(_eas(), REDIRECT_SCHEMA, rUID, BOB);
+        assertEq(s, bytes32(0), "foreign lens => empty source");
+        assertEq(t, bytes32(0), "foreign lens => empty target");
+        assertEq(k, 0, "foreign lens => kind 0");
+    }
+
+    function test_RedirectTarget_WrongSchema_NotApplicable() public {
+        bytes32 rUID = keccak256("r1");
+        // Right field shape, but a DIFFERENT schema pointed at the payload — must be rejected.
+        eas.setRedirectAttestation(
+            rUID,
+            keccak256("NOT_REDIRECT_SCHEMA"),
+            keccak256("s"),
+            ALICE,
+            0,
+            abi.encode(keccak256("t"), uint16(0))
+        );
+        (, bytes32 t,) = EFSReader.redirectTarget(_eas(), REDIRECT_SCHEMA, rUID, ALICE);
+        assertEq(t, bytes32(0), "wrong schema => not a redirect");
+    }
+
+    function test_RedirectTarget_Revoked_NotApplicable() public {
+        bytes32 rUID = keccak256("r1");
+        // revocationTime != 0 => revoked => inactive (ADR-0051).
+        eas.setRedirectAttestation(
+            rUID,
+            REDIRECT_SCHEMA,
+            keccak256("s"),
+            ALICE,
+            12345,
+            abi.encode(keccak256("t"), uint16(0))
+        );
+        (, bytes32 t,) = EFSReader.redirectTarget(_eas(), REDIRECT_SCHEMA, rUID, ALICE);
+        assertEq(t, bytes32(0), "revoked => not a redirect");
+    }
+
+    function test_RedirectTarget_Absent_NotApplicable() public view {
+        (, bytes32 t,) = EFSReader.redirectTarget(_eas(), REDIRECT_SCHEMA, keccak256("nope"), ALICE);
+        assertEq(t, bytes32(0), "absent UID => empty");
+    }
+
+    // resolveWithRedirects — single hop.
+    function test_ResolveWithRedirects_SingleHop() public {
+        bytes32 src = keccak256("dataDup");
+        bytes32 canon = keccak256("dataCanon");
+        bytes32 rUID = keccak256("r1");
+        _redirect(rUID, src, canon, EFSReader.REDIRECT_KIND_SAME_AS, ALICE);
+
+        bytes32[] memory chain = new bytes32[](1);
+        chain[0] = rUID;
+        (bytes32 terminal, uint256 hops) =
+            EFSReader.resolveWithRedirects(_eas(), REDIRECT_SCHEMA, src, chain, ALICE, 0);
+        assertEq(terminal, canon, "follows one hop to canonical");
+        assertEq(hops, 1, "one hop followed");
+    }
+
+    // resolveWithRedirects — multi hop A→B→C.
+    function test_ResolveWithRedirects_MultiHop() public {
+        bytes32 a = keccak256("A");
+        bytes32 b = keccak256("B");
+        bytes32 c = keccak256("C");
+        _redirect(keccak256("rAB"), a, b, EFSReader.REDIRECT_KIND_SUPERSEDED_BY, ALICE);
+        _redirect(keccak256("rBC"), b, c, EFSReader.REDIRECT_KIND_SUPERSEDED_BY, ALICE);
+
+        bytes32[] memory chain = new bytes32[](2);
+        chain[0] = keccak256("rAB");
+        chain[1] = keccak256("rBC");
+        (bytes32 terminal, uint256 hops) =
+            EFSReader.resolveWithRedirects(_eas(), REDIRECT_SCHEMA, a, chain, ALICE, 0);
+        assertEq(terminal, c, "follows A->B->C to terminal");
+        assertEq(hops, 2, "two hops followed");
+    }
+
+    // resolveWithRedirects — no redirect (passthrough): empty chain returns source.
+    function test_ResolveWithRedirects_NoRedirect_Passthrough() public view {
+        bytes32 src = keccak256("loneData");
+        bytes32[] memory chain = new bytes32[](0);
+        (bytes32 terminal, uint256 hops) =
+            EFSReader.resolveWithRedirects(_eas(), REDIRECT_SCHEMA, src, chain, ALICE, 0);
+        assertEq(terminal, src, "no redirects => source unchanged");
+        assertEq(hops, 0, "zero hops");
+    }
+
+    // resolveWithRedirects — a supplied redirect that doesn't apply (revoked) stops at the cursor.
+    function test_ResolveWithRedirects_InapplicableHop_StopsAtCursor() public {
+        bytes32 a = keccak256("A");
+        bytes32 b = keccak256("B");
+        bytes32 c = keccak256("C");
+        _redirect(keccak256("rAB"), a, b, EFSReader.REDIRECT_KIND_SAME_AS, ALICE);
+        // Second hop is REVOKED — walk should stop at B, not error, not reach C.
+        eas.setRedirectAttestation(
+            keccak256("rBC"), REDIRECT_SCHEMA, b, ALICE, 999, abi.encode(c, uint16(0))
+        );
+
+        bytes32[] memory chain = new bytes32[](2);
+        chain[0] = keccak256("rAB");
+        chain[1] = keccak256("rBC");
+        (bytes32 terminal, uint256 hops) =
+            EFSReader.resolveWithRedirects(_eas(), REDIRECT_SCHEMA, a, chain, ALICE, 0);
+        assertEq(terminal, b, "stops at B (second hop inactive)");
+        assertEq(hops, 1, "only first hop followed");
+    }
+
+    // resolveWithRedirects — a non-followable kind (relatedVersion) stops without following.
+    function test_ResolveWithRedirects_NonFollowableKind_Stops() public {
+        bytes32 a = keccak256("A");
+        bytes32 b = keccak256("B");
+        _redirect(keccak256("rAB"), a, b, EFSReader.REDIRECT_KIND_RELATED_VERSION, ALICE);
+
+        bytes32[] memory chain = new bytes32[](1);
+        chain[0] = keccak256("rAB");
+        (bytes32 terminal, uint256 hops) =
+            EFSReader.resolveWithRedirects(_eas(), REDIRECT_SCHEMA, a, chain, ALICE, 0);
+        assertEq(terminal, a, "relatedVersion is a hint, not followed");
+        assertEq(hops, 0, "zero hops followed");
+    }
+
+    // resolveWithRedirects — cycle A→B→A reverts.
+    function test_ResolveWithRedirects_Cycle_Reverts() public {
+        bytes32 a = keccak256("A");
+        bytes32 b = keccak256("B");
+        _redirect(keccak256("rAB"), a, b, EFSReader.REDIRECT_KIND_SAME_AS, ALICE);
+        _redirect(keccak256("rBA"), b, a, EFSReader.REDIRECT_KIND_SAME_AS, ALICE);
+
+        bytes32[] memory chain = new bytes32[](2);
+        chain[0] = keccak256("rAB");
+        chain[1] = keccak256("rBA");
+        vm.expectRevert(abi.encodeWithSelector(EFSReader.RedirectCycle.selector, a));
+        this.resolveWithRedirectsExt(a, chain, ALICE, 0);
+    }
+
+    // resolveWithRedirects — hop cap reverts before following one too many.
+    function test_ResolveWithRedirects_HopCap_Reverts() public {
+        bytes32 a = keccak256("A");
+        bytes32 b = keccak256("B");
+        bytes32 c = keccak256("C");
+        _redirect(keccak256("rAB"), a, b, EFSReader.REDIRECT_KIND_SAME_AS, ALICE);
+        _redirect(keccak256("rBC"), b, c, EFSReader.REDIRECT_KIND_SAME_AS, ALICE);
+
+        bytes32[] memory chain = new bytes32[](2);
+        chain[0] = keccak256("rAB");
+        chain[1] = keccak256("rBC");
+        // Cap of 1 allows the first hop, reverts on attempting the second.
+        vm.expectRevert(abi.encodeWithSelector(EFSReader.RedirectHopLimit.selector, uint256(1)));
+        this.resolveWithRedirectsExt(a, chain, ALICE, 1);
+    }
+
+    // resolveWithRedirects — a chain hop whose source != cursor reverts (broken chain).
+    function test_ResolveWithRedirects_BrokenChain_Reverts() public {
+        bytes32 a = keccak256("A");
+        bytes32 b = keccak256("B");
+        bytes32 x = keccak256("X"); // unrelated source
+        bytes32 c = keccak256("C");
+        _redirect(keccak256("rAB"), a, b, EFSReader.REDIRECT_KIND_SAME_AS, ALICE);
+        // Second redirect's source is X, not B — does not connect to the cursor at B.
+        _redirect(keccak256("rXC"), x, c, EFSReader.REDIRECT_KIND_SAME_AS, ALICE);
+
+        bytes32[] memory chain = new bytes32[](2);
+        chain[0] = keccak256("rAB");
+        chain[1] = keccak256("rXC");
+        vm.expectRevert(
+            abi.encodeWithSelector(EFSReader.RedirectChainBroken.selector, b, keccak256("rXC"))
+        );
+        this.resolveWithRedirectsExt(a, chain, ALICE, 0);
+    }
+
+    // resolveWithRedirects — lens scoping: Alice's chain is invisible to Bob's lens.
+    function test_ResolveWithRedirects_LensScoped() public {
+        bytes32 src = keccak256("dataDup");
+        bytes32 canon = keccak256("dataCanon");
+        bytes32 rUID = keccak256("r1");
+        _redirect(rUID, src, canon, EFSReader.REDIRECT_KIND_SAME_AS, ALICE);
+
+        bytes32[] memory chain = new bytes32[](1);
+        chain[0] = rUID;
+
+        // Alice (the asserter) follows to canonical.
+        (bytes32 aliceTerminal,) =
+            EFSReader.resolveWithRedirects(_eas(), REDIRECT_SCHEMA, src, chain, ALICE, 0);
+        assertEq(aliceTerminal, canon, "Alice's lens follows her redirect");
+
+        // Bob does not see Alice's redirect — passthrough to source.
+        (bytes32 bobTerminal, uint256 bobHops) =
+            EFSReader.resolveWithRedirects(_eas(), REDIRECT_SCHEMA, src, chain, BOB, 0);
+        assertEq(bobTerminal, src, "Bob's lens does not follow Alice's redirect");
+        assertEq(bobHops, 0, "Bob follows nothing");
     }
 }

@@ -161,4 +161,25 @@ abstract contract EFSWriter {
     {
         entryUID = EFSLib.addEntry(EAS, schemas, listUID, target);
     }
+
+    /// @notice A **REDIRECT** edge (ADR-0050): assert `source` points at `target` with class `kind`
+    ///         (0 = sameAs, 1 = supersededBy, 2 = symlink). The trust-scoped canonical / dedup /
+    ///         symlink primitive.
+    /// @dev    Delegates to {EFSLib.setRedirect}; the asserter is `address(this)` (the lens). Not a
+    ///         cardinality-1 slot — `eas.revoke()` the returned UID to retract the redirect (the
+    ///         read side {EFSReader.resolveWithRedirects} follows it lens-scoped, cycle-safe). No
+    ///         {EFSFileWritten} event: a redirect reroutes identity, it does not place a file at a path.
+    /// @param  schemas The frozen schema UID set (only `redirect` is used).
+    /// @param  source  The source UID this redirect points FROM (the edge's `refUID`).
+    /// @param  target  The destination UID this redirect points TO (nonzero, != source).
+    /// @param  kind    The redirect class (0/1/2; ≥ 3 reserved).
+    /// @return redirectUID The created REDIRECT edge UID.
+    function _efsSetRedirect(
+        EFSLib.SchemaUIDs memory schemas,
+        bytes32 source,
+        bytes32 target,
+        uint16 kind
+    ) internal returns (bytes32 redirectUID) {
+        redirectUID = EFSLib.setRedirect(EAS, schemas, source, target, kind);
+    }
 }

@@ -189,7 +189,8 @@ contract EFSWriterTest is Test {
         pin: keccak256("PIN_SCHEMA"),
         tag: keccak256("TAG_SCHEMA"),
         list: keccak256("LIST_SCHEMA"),
-        listEntry: keccak256("LIST_ENTRY_SCHEMA")
+        listEntry: keccak256("LIST_ENTRY_SCHEMA"),
+        redirect: keccak256("REDIRECT_SCHEMA")
     });
 
     bytes32 constant PARENT = keccak256("PARENT_FOLDER_ANCHOR");
