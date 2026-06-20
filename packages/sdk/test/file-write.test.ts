@@ -352,6 +352,108 @@ describe('writeFileTier1 — on-chain storage overrides + caps', () => {
   })
 })
 
+describe('writeFileTier1 — createParents (mkdir -p)', () => {
+  const anchorEntries = async (sent: SentLayer[]) => {
+    const { SchemaEncoder } = await import('../src/eas/schema-encoder.js')
+    const { EFS_SCHEMA_FIELDS } = await import('../src/eas/schemas.js')
+    const anchorEnc = new SchemaEncoder(EFS_SCHEMA_FIELDS.anchor)
+    // Flatten every submitted anchor entry, tagged with its layer index, decoding
+    // its (name, forSchema). Folder + file anchors all use the anchor schema.
+    const out: { layer: number; name: string; refUID: Hex }[] = []
+    sent.forEach((layer, li) => {
+      for (const e of layer.entries) {
+        if (e.schema === SCHEMAS.anchor) {
+          const [name] = anchorEnc.decodeData(e.data) as [string, Hex]
+          out.push({ layer: li, name, refUID: e.refUID })
+        }
+      }
+    })
+    return out
+  }
+
+  it('fully-missing nested path: creates the chained folders BEFORE the file, refUID-threaded', async () => {
+    // Nothing under root → both /photos and /photos/2026 are missing.
+    const { ctx, sent } = makeCtx({ edges: {} })
+    const receipt = await writeFileTier1('/photos/2026/trip.jpg', CONTENT, ctx, {
+      createParents: true,
+      contentType: 'image/jpeg',
+    })
+
+    // Layers: photos(1) → 2026(2) → DATA(3) → L2(4) → PINs(5) = 5 signatures.
+    expect(sent).toHaveLength(5)
+    expect(receipt.signatureCount).toBe(5)
+
+    const anchors = await anchorEntries(sent)
+    const photos = anchors.find((a) => a.name === 'photos')!
+    const y2026 = anchors.find((a) => a.name === '2026')!
+    const file = anchors.find((a) => a.name === 'trip.jpg')!
+    expect(photos).toBeDefined()
+    expect(y2026).toBeDefined()
+    expect(file).toBeDefined()
+
+    // Folders submitted before the file (earlier layers).
+    expect(photos.layer).toBeLessThan(y2026.layer)
+    expect(y2026.layer).toBeLessThan(file.layer)
+
+    // refUID chain: photos → ROOT (deepest existing), 2026 → photos' mined UID,
+    // file → 2026's mined UID. Mined UIDs come from the Attested logs (uid(0xd000+)).
+    expect(photos.refUID).toBe(ROOT)
+    // photos is the first attestation minted in layer 0 → uid(0xd000).
+    const photosUID = uid(0xd000)
+    expect(y2026.refUID).toBe(photosUID)
+    // 2026 is minted in layer 1, the next global index → uid(0xd001).
+    const y2026UID = uid(0xd001)
+    expect(file.refUID).toBe(y2026UID)
+
+    // The created folder UIDs are recorded as done steps in the receipt.
+    expect(receipt.steps.find((s) => s.uid === photosUID)?.done).toBe(true)
+    expect(receipt.steps.find((s) => s.uid === y2026UID)?.done).toBe(true)
+  })
+
+  it('createParents:false (default) throws ParentNotFoundError on a missing parent', async () => {
+    const { ctx } = makeCtx({ edges: {} })
+    const err = await writeFileTier1('/photos/2026/trip.jpg', CONTENT, ctx).catch((e) => e)
+    expect(err).toBeInstanceOf(ParentNotFoundError)
+    expect((err as ParentNotFoundError).missingSegment).toBe('photos')
+  })
+
+  it('only the leaf folder missing: creates ONLY that segment, reusing the deepest existing ancestor', async () => {
+    // /photos exists; /photos/2026 does not.
+    const PHOTOS_ANCHOR = uid(0x710)
+    const { ctx, sent } = makeCtx({ edges: { [`${ROOT}|photos`]: PHOTOS_ANCHOR } })
+    await writeFileTier1('/photos/2026/trip.jpg', CONTENT, ctx, { createParents: true })
+
+    const anchors = await anchorEntries(sent)
+    const folderAnchors = anchors.filter((a) => a.name === '2026' || a.name === 'photos')
+    // Only '2026' is created; '/photos' is reused (never re-attested).
+    expect(folderAnchors.map((a) => a.name)).toEqual(['2026'])
+    const y2026 = anchors.find((a) => a.name === '2026')!
+    // It hangs off the EXISTING /photos anchor (concrete), not a fresh one.
+    expect(y2026.refUID).toBe(PHOTOS_ANCHOR)
+
+    // One created folder → 4 layers (folder, DATA, L2, PINs).
+    expect(sent).toHaveLength(4)
+
+    const file = anchors.find((a) => a.name === 'trip.jpg')!
+    // file refs the mined 2026 UID (first minted, uid(0xd000)).
+    expect(file.refUID).toBe(uid(0xd000))
+    expect(y2026.layer).toBeLessThan(file.layer)
+  })
+
+  it('parent already exists + createParents:true: no extra folder anchors, base 3 layers', async () => {
+    // /docs exists (default edge) → no folders to create.
+    const { ctx, sent } = makeCtx()
+    await writeFileTier1('/docs/readme.md', CONTENT, ctx, { createParents: true })
+
+    expect(sent).toHaveLength(3) // base DATA / L2 / PINs — no folder layer prepended
+    const anchors = await anchorEntries(sent)
+    // No 'docs' anchor is re-created; the file-ANCHOR refs the existing /docs anchor.
+    expect(anchors.some((a) => a.name === 'docs')).toBe(false)
+    const file = anchors.find((a) => a.name === 'readme.md')!
+    expect(file.refUID).toBe(DOCS_ANCHOR)
+  })
+})
+
 describe('writeFileTier1 — error paths', () => {
   it('throws ParentNotFoundError when the parent folder is missing', async () => {
     const { ctx } = makeCtx({ edges: {} }) // nothing under root

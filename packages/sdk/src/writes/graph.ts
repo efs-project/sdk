@@ -80,8 +80,15 @@ export const ZERO_UID = '0x00000000000000000000000000000000000000000000000000000
  * The DAG layer an attestation belongs to. The submitter serializes layer-by-layer
  * (Tier 1: one `multiAttest` per layer; layer N+1's symbolic refs resolve from
  * layer N's mined UIDs). Within a layer every attestation is independent.
+ *
+ * The base file graph uses layers 1–3 (DATA → L2 → PINs). When missing ancestor
+ * folders are created in the same write (`createParents`), the chained folder
+ * ANCHORs occupy the EARLIEST layers (one per segment, each referencing the prior)
+ * and the DATA/L2/PIN layers are shifted up by the missing-folder count — so a
+ * layer is any positive integer, not just `1 | 2 | 3`. The submitter only needs
+ * the relative ascending order, never specific values.
  */
-export type WriteLayer = 1 | 2 | 3
+export type WriteLayer = number
 
 /**
  * A placeholder for a *fresh* sibling whose real EAS UID isn't known until mined.
@@ -166,8 +173,23 @@ export interface FileWriteGraphInput {
   readonly schemas: EfsSchemaUIDs
   /** Pre-existing `/transports/<scheme>` anchor UID for the MIRROR `transportDefinition`. */
   readonly transportDefinition: Hex
-  /** Pre-existing parent folder anchor UID (the file-ANCHOR's `refUID`). */
+  /**
+   * The anchor UID the file-ANCHOR hangs off of. When no parents are missing this
+   * is the file's immediate parent folder. When `missingParents` is non-empty it is
+   * the **deepest EXISTING ancestor** (the chain of created folders extends from
+   * here); the file-ANCHOR's actual `refUID` is then the last created folder, threaded
+   * symbolically — not this UID directly.
+   */
   readonly parentAnchorUID: Hex
+  /**
+   * Ancestor folder segments to create in this same write (`mkdir -p`), ordered
+   * SHALLOWEST-first (e.g. `['photos', '2026']` for `/photos/2026/trip.jpg` when
+   * neither exists). Empty/omitted ⇒ the parent already exists and the file-ANCHOR
+   * refs {@link parentAnchorUID} directly. Each segment becomes one non-revocable
+   * ANCHOR whose `refUID` is the previous created folder (the first = the deepest
+   * existing anchor = {@link parentAnchorUID}); the file-ANCHOR then refs the last.
+   */
+  readonly missingParents?: readonly string[]
   /** The file's anchor name (canonical encoding; the file-ANCHOR's `name`). */
   readonly fileName: string
 }
@@ -190,6 +212,8 @@ export const REF = {
   keyAnchor: (k: ReservedKey) => `anchor:${k}`,
   property: (k: ReservedKey) => `prop:${k}`,
   bindingPin: (k: ReservedKey) => `pin:${k}`,
+  /** The i-th created ancestor folder ANCHOR (`mkdir -p`), shallowest-first. */
+  parentFolder: (i: number) => `parentFolder:${i}`,
 } as const
 
 // Encoders for the frozen field strings (constructed once; SchemaEncoder caches
@@ -224,30 +248,47 @@ const GENERIC_FOR_SCHEMA = ZERO_UID
 export function buildFileWriteGraph(input: FileWriteGraphInput): FileWriteGraph {
   const { schemas } = input
 
+  // ── `mkdir -p` ancestor folders ─────────────────────────────────────────────
+  // When ancestor folders are missing they are created FIRST, as a chain of
+  // non-revocable ANCHORs (one per segment), each referencing the previous (the
+  // first = the deepest existing anchor). They occupy the earliest layers, one per
+  // segment (each refs a fresh sibling in the prior layer, so they can't batch into
+  // one layer). The base file graph's layers (1 = DATA, 2 = L2, 3 = PINs) shift up
+  // by this count so the chain mines before the file-ANCHOR that depends on it. The
+  // file-ANCHOR then refs the *last* created folder (symbolic) instead of the
+  // (concrete) parent — see `parentRefFor`.
+  const missingParents = input.missingParents ?? []
+  const m = missingParents.length
+  const folderAttestations = buildParentFolderChain(input)
+
   // ── Hardlink / dedup short-circuit ──────────────────────────────────────────
   // "Add an existing file at a new path" reuses the on-chain DATA and reduces the
   // write to a single placement PIN (spec: "Hardlink / dedup short-circuits").
   // The file-ANCHOR must still exist for the PIN's `definition`; for the hardlink
   // case we still author it (it names the path), but the PIN points its `refUID`
   // at the *pre-existing* DATA UID rather than a fresh one. We keep the file-ANCHOR
-  // (L2) + placement-PIN (L3): the "single PIN" framing in the spec is relative to
-  // the *content* graph (DATA/MIRROR/PROPERTY/key-anchors) collapsing away — the
-  // anchor that names the new path is inherent to placing it anywhere.
+  // + placement-PIN: the "single PIN" framing in the spec is relative to the
+  // *content* graph (DATA/MIRROR/PROPERTY/key-anchors) collapsing away — the
+  // anchor that names the new path is inherent to placing it anywhere. Any created
+  // ancestor folders still precede the anchor, in their own earliest layers.
   if (input.content.kind === 'hardlink') {
-    const fileAnchor = buildFileAnchor(input)
-    const placementPin = buildPlacementPin(schemas, input.content.dataUID)
-    return { hardlink: true, attestations: [fileAnchor, placementPin] }
+    const fileAnchor = buildFileAnchor(input, m + 1)
+    const placementPin = buildPlacementPin(schemas, input.content.dataUID, m + 2)
+    return {
+      hardlink: true,
+      attestations: stableSortByLayer([...folderAttestations, fileAnchor, placementPin]),
+    }
   }
 
-  const attestations: PlannedAttestation[] = []
+  const attestations: PlannedAttestation[] = [...folderAttestations]
 
-  // ── L1: DATA — the content-identity hub ─────────────────────────────────────
+  // ── DATA — the content-identity hub (base layer 1, shifted by `m`) ───────────
   // EFSIndexer.onAttest DATA branch (EFSIndexer.sol:463-479): refUID must be
   // EMPTY_UID (:472), non-revocable (:473), expirationTime 0 (:474), and empty
   // data (:475). The empty schema encodes to '0x'.
   attestations.push({
     ref: REF.DATA,
-    layer: 1,
+    layer: m + 1,
     kind: 'DATA',
     schema: schemas.data,
     data: dataEncoder.encodeData([]), // '' -> '0x'
@@ -256,17 +297,17 @@ export function buildFileWriteGraph(input: FileWriteGraphInput): FileWriteGraph 
     dataRefs: [],
   })
 
-  // ── L2: file-ANCHOR — names the path under the parent folder ─────────────────
-  attestations.push(buildFileAnchor(input))
+  // ── file-ANCHOR — names the path under the parent folder (base layer 2) ───────
+  attestations.push(buildFileAnchor(input, m + 2))
 
-  // ── L2: MIRROR ×N — retrieval methods bound to DATA ──────────────────────────
+  // ── MIRROR ×N — retrieval methods bound to DATA (base layer 2) ───────────────
   // MirrorResolver.onAttest (MirrorResolver.sol:142-192): refUID must resolve to a
   // DATA attestation (:154-157), revocable=true (:164 `if (!attestation.revocable)
   // revert NotRevocable`), expirationTime 0 (:165). data = (transportDefinition, uri).
   input.mirrors.forEach((uri, i) => {
     attestations.push({
       ref: REF.mirror(i),
-      layer: 2,
+      layer: m + 2,
       kind: 'MIRROR',
       schema: schemas.mirror,
       data: mirrorEncoder.encodeData([input.transportDefinition, uri]),
@@ -276,7 +317,7 @@ export function buildFileWriteGraph(input: FileWriteGraphInput): FileWriteGraph 
     })
   })
 
-  // ── L2 + L3: reserved-key triplets (key-ANCHOR + PROPERTY + binding-PIN) ──────
+  // ── reserved-key triplets (key-ANCHOR + PROPERTY @ base L2, binding-PIN @ L3) ──
   for (const { key, value } of reservedEntries(input)) {
     // L2 key-ANCHOR: name = the reserved key, refUID = DATA (binds the metadata
     // anchor to the file identity). ANCHOR onAttest rejects revocable
@@ -293,7 +334,7 @@ export function buildFileWriteGraph(input: FileWriteGraphInput): FileWriteGraph 
     // never exercised the real `resolveAnchor` keying.)
     attestations.push({
       ref: REF.keyAnchor(key),
-      layer: 2,
+      layer: m + 2,
       kind: 'ANCHOR',
       schema: schemas.anchor,
       data: anchorEncoder.encodeData([key, schemas.property]),
@@ -302,11 +343,11 @@ export function buildFileWriteGraph(input: FileWriteGraphInput): FileWriteGraph 
       dataRefs: [],
     })
 
-    // L2 PROPERTY: the interned value. PROPERTY onAttest rejects refUID≠0
+    // PROPERTY (base L2): the interned value. PROPERTY onAttest rejects refUID≠0
     // (EFSIndexer.sol:488) and revocable (EFSIndexer.sol:489). data = (value).
     attestations.push({
       ref: REF.property(key),
-      layer: 2,
+      layer: m + 2,
       kind: 'PROPERTY',
       schema: schemas.property,
       data: propertyEncoder.encodeData([value]),
@@ -315,20 +356,20 @@ export function buildFileWriteGraph(input: FileWriteGraphInput): FileWriteGraph 
       dataRefs: [],
     })
 
-    // L3 binding-PIN: definition = key-ANCHOR (fresh), refUID = PROPERTY (fresh) —
-    // the deepest edge, referencing two fresh L2 siblings. PIN onAttest requires
-    // revocable=true (EdgeResolver.sol:336) and expirationTime 0 (:337).
-    attestations.push(buildBindingPin(schemas, key))
+    // binding-PIN (base L3): definition = key-ANCHOR (fresh), refUID = PROPERTY
+    // (fresh) — the deepest edge, referencing two fresh L2 siblings. PIN onAttest
+    // requires revocable=true (EdgeResolver.sol:336) and expirationTime 0 (:337).
+    attestations.push(buildBindingPin(schemas, key, m + 3))
   }
 
-  // ── L3: placement-PIN — definition = file-ANCHOR (fresh), refUID = DATA (fresh) ─
-  attestations.push(buildPlacementPin(schemas, { ref: REF.DATA }))
+  // ── placement-PIN (base L3) — definition = file-ANCHOR, refUID = DATA (fresh) ──
+  attestations.push(buildPlacementPin(schemas, { ref: REF.DATA }, m + 3))
 
-  // Emit grouped by dependency layer (L1 → L2 → L3). The triplets are built
-  // key-contiguously above (anchor[2], property[2], pin[3] interleave a layer-3
-  // node between layer-2 nodes), so a stable sort by layer is the cheapest way to
-  // present a clean per-layer grouping — the unit the submitter batches into one
-  // `multiAttest` per layer. Stable, so within a layer the build order is kept.
+  // Emit grouped by dependency layer (created folders → DATA → L2 → PINs). The
+  // triplets are built key-contiguously above (anchor/property/pin interleave a
+  // deeper node between shallower ones), so a stable sort by layer is the cheapest
+  // way to present a clean per-layer grouping — the unit the submitter batches into
+  // one `multiAttest` per layer. Stable, so within a layer the build order is kept.
   const ordered = stableSortByLayer(attestations)
   return { hardlink: false, attestations: ordered }
 }
@@ -338,33 +379,75 @@ function stableSortByLayer(atts: readonly PlannedAttestation[]): PlannedAttestat
   return [...atts].sort((a, b) => a.layer - b.layer)
 }
 
-/** Build the file-ANCHOR (L2): name = fileName, forSchema = generic, refUID = parent. */
-function buildFileAnchor(input: FileWriteGraphInput): PlannedAttestation {
+/**
+ * Build the chained ancestor-folder ANCHORs for `mkdir -p` (shallowest-first), one
+ * per missing segment, each in its own layer (1 ⇒ shallowest). Each folder is a
+ * non-revocable ANCHOR named after its segment with `forSchema = generic` (a plain
+ * folder — same primitive a regular directory uses). Its `refUID` is the previous
+ * created folder, except the FIRST, which refs the deepest existing anchor
+ * (`parentAnchorUID`, concrete). Returns `[]` when no parents are missing.
+ */
+function buildParentFolderChain(input: FileWriteGraphInput): PlannedAttestation[] {
+  const missing = input.missingParents ?? []
+  return missing.map((segment, i) => ({
+    ref: REF.parentFolder(i),
+    // Shallowest folder mines first (layer 1); each deeper folder one layer later.
+    layer: i + 1,
+    kind: 'ANCHOR' as const,
+    schema: input.schemas.anchor,
+    data: anchorEncoder.encodeData([segment, GENERIC_FOR_SCHEMA]),
+    revocable: false, // EFSIndexer.sol:376 — anchors are non-revocable (folders are permanent)
+    // First created folder hangs off the deepest existing anchor (concrete); each
+    // subsequent folder off the previous created folder (a fresh sibling, symbolic).
+    refUID: i === 0 ? input.parentAnchorUID : { ref: REF.parentFolder(i - 1) },
+    dataRefs: [],
+  }))
+}
+
+/**
+ * The reference the file-ANCHOR (and a hardlink placement chain) hangs off: the
+ * LAST created folder (symbolic) when parents were created in this write, else the
+ * pre-existing parent anchor (concrete `parentAnchorUID`).
+ */
+function parentRefFor(input: FileWriteGraphInput): RefOrUID {
+  const missing = input.missingParents ?? []
+  return missing.length > 0 ? { ref: REF.parentFolder(missing.length - 1) } : input.parentAnchorUID
+}
+
+/** Build the file-ANCHOR: name = fileName, forSchema = generic, refUID = parent.
+ * `layer` is the parent's layer + 1 (base layer 2, shifted by created folders). */
+function buildFileAnchor(input: FileWriteGraphInput, layer: number): PlannedAttestation {
   return {
     ref: REF.FILE_ANCHOR,
-    layer: 2,
+    layer,
     kind: 'ANCHOR',
     schema: input.schemas.anchor,
     data: anchorEncoder.encodeData([input.fileName, GENERIC_FOR_SCHEMA]),
     revocable: false, // EFSIndexer.sol:376 — anchors are non-revocable
-    // Parent folder is pre-existing (resolved before building) — concrete Hex,
-    // not symbolic. EFSIndexer resolves the parent from refUID (EFSIndexer.sol:396).
-    refUID: input.parentAnchorUID,
+    // The parent is the pre-existing folder (concrete Hex) OR — when ancestors are
+    // created in this write — the last created folder (symbolic). EFSIndexer
+    // resolves the parent from refUID (EFSIndexer.sol:396).
+    refUID: parentRefFor(input),
     dataRefs: [],
   }
 }
 
 /**
- * Build the placement-PIN (L3): definition = file-ANCHOR, refUID = the DATA UID
+ * Build the placement-PIN: definition = file-ANCHOR, refUID = the DATA UID
  * (symbolic for a fresh write, concrete for a hardlink). PIN onAttest requires
  * revocable=true (EdgeResolver.sol:336) and expirationTime 0 (:337); the
- * `definition` is the file-ANCHOR (always a fresh sibling here).
+ * `definition` is the file-ANCHOR (always a fresh sibling here). `layer` is the
+ * base L3, shifted by any created folders.
  */
-function buildPlacementPin(schemas: EfsSchemaUIDs, dataRef: RefOrUID): PlannedAttestation {
+function buildPlacementPin(
+  schemas: EfsSchemaUIDs,
+  dataRef: RefOrUID,
+  layer: number,
+): PlannedAttestation {
   const definitionRef: SymbolicRef = { ref: REF.FILE_ANCHOR }
   return {
     ref: REF.PLACEMENT_PIN,
-    layer: 3,
+    layer,
     kind: 'PIN',
     schema: schemas.pin,
     // `definition` is a fresh anchor UID — encode a placeholder; the submitter
@@ -377,14 +460,18 @@ function buildPlacementPin(schemas: EfsSchemaUIDs, dataRef: RefOrUID): PlannedAt
 }
 
 /**
- * Build a reserved-key binding-PIN (L3): definition = the key-ANCHOR (fresh),
- * refUID = the PROPERTY (fresh). Both are fresh L2 siblings.
+ * Build a reserved-key binding-PIN: definition = the key-ANCHOR (fresh), refUID =
+ * the PROPERTY (fresh). Both are fresh L2 siblings. `layer` is the base L3, shifted.
  */
-function buildBindingPin(schemas: EfsSchemaUIDs, key: ReservedKey): PlannedAttestation {
+function buildBindingPin(
+  schemas: EfsSchemaUIDs,
+  key: ReservedKey,
+  layer: number,
+): PlannedAttestation {
   const definitionRef: SymbolicRef = { ref: REF.keyAnchor(key) }
   return {
     ref: REF.bindingPin(key),
-    layer: 3,
+    layer,
     kind: 'PIN',
     schema: schemas.pin,
     data: pinEncoder.encodeData([ZERO_UID]), // placeholder; definition resolved by submitter

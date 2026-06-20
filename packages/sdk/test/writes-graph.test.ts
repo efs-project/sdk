@@ -279,6 +279,157 @@ describe('symbolic refUID threading — every symbol resolves to a sibling ref',
   })
 })
 
+describe('mkdir -p — missing ancestor folders folded into the write', () => {
+  const DEEPEST_EXISTING = uid(0x500)
+
+  describe('fully-missing nested parents (createParents)', () => {
+    // /photos/2026/trip.jpg where neither /photos nor /photos/2026 exist: the
+    // deepest existing anchor is the root, and BOTH segments are created.
+    const graph = buildFileWriteGraph({
+      ...bytesInput,
+      path: '/photos/2026/trip.jpg',
+      fileName: 'trip.jpg',
+      parentAnchorUID: DEEPEST_EXISTING, // = the deepest existing anchor (e.g. root)
+      missingParents: ['photos', '2026'],
+    })
+    const atts = graph.attestations
+
+    it('emits one ANCHOR per missing folder, shallowest-first, in the earliest layers', () => {
+      const photos = find(atts, REF.parentFolder(0))
+      const y2026 = find(atts, REF.parentFolder(1))
+      expect(photos.kind).toBe('ANCHOR')
+      expect(y2026.kind).toBe('ANCHOR')
+      // Shallowest folder mines first (layer 1), next folder layer 2.
+      expect(photos.layer).toBe(1)
+      expect(y2026.layer).toBe(2)
+      // Folder anchors are permanent (non-revocable).
+      expect(photos.revocable).toBe(false)
+      expect(y2026.revocable).toBe(false)
+      // Each names its own segment (forSchema = generic folder sentinel).
+      expect(anchorEnc.decodeData(photos.data)).toEqual(['photos', ZERO_UID])
+      expect(anchorEnc.decodeData(y2026.data)).toEqual(['2026', ZERO_UID])
+    })
+
+    it('chains the refUID: first folder → deepest existing (concrete), next → prior folder (symbolic)', () => {
+      const photos = find(atts, REF.parentFolder(0))
+      const y2026 = find(atts, REF.parentFolder(1))
+      // First created folder hangs off the deepest EXISTING anchor (concrete Hex).
+      expect(photos.refUID).toBe(DEEPEST_EXISTING)
+      expect(isSymbolicRef(photos.refUID)).toBe(false)
+      // Second folder hangs off the first created folder (symbolic).
+      expect(isSymbolicRef(y2026.refUID)).toBe(true)
+      expect(y2026.refUID).toEqual({ ref: REF.parentFolder(0) })
+    })
+
+    it('threads the LAST created folder into the file-ANCHOR refUID (symbolic)', () => {
+      const fileAnchor = find(atts, REF.FILE_ANCHOR)
+      expect(isSymbolicRef(fileAnchor.refUID)).toBe(true)
+      expect(fileAnchor.refUID).toEqual({ ref: REF.parentFolder(1) })
+    })
+
+    it('shifts DATA/L2/PIN layers up by the missing-folder count (folders mine first)', () => {
+      const m = 2 // two created folders
+      // DATA base layer 1 → m+1 = 3.
+      expect(find(atts, REF.DATA).layer).toBe(m + 1)
+      // file-ANCHOR / MIRROR base layer 2 → m+2 = 4.
+      expect(find(atts, REF.FILE_ANCHOR).layer).toBe(m + 2)
+      expect(find(atts, REF.mirror(0)).layer).toBe(m + 2)
+      // placement-PIN base layer 3 → m+3 = 5.
+      expect(find(atts, REF.PLACEMENT_PIN).layer).toBe(m + 3)
+    })
+
+    it('emits the base 13-node graph PLUS the 2 created folders', () => {
+      expect(atts).toHaveLength(15)
+    })
+
+    it('orders attestations by non-decreasing layer and only refs strictly-earlier layers', () => {
+      const layers = atts.map((a) => a.layer)
+      expect(layers).toEqual([...layers].sort((a, b) => a - b))
+      const layerOf = new Map(atts.map((a) => [a.ref, a.layer]))
+      for (const a of atts) {
+        const referenced = [
+          ...(isSymbolicRef(a.refUID) ? [a.refUID.ref] : []),
+          ...a.dataRefs.map((d) => d.ref.ref),
+        ]
+        for (const r of referenced) {
+          expect(layerOf.get(r)!).toBeLessThan(a.layer)
+        }
+      }
+    })
+  })
+
+  describe('only the leaf folder missing — reuse the deepest existing ancestor', () => {
+    // /photos/2026/trip.jpg where /photos exists but /photos/2026 does not: ONLY
+    // '2026' is created, hanging off the existing /photos anchor.
+    const PHOTOS_ANCHOR = uid(0x510)
+    const graph = buildFileWriteGraph({
+      ...bytesInput,
+      path: '/photos/2026/trip.jpg',
+      fileName: 'trip.jpg',
+      parentAnchorUID: PHOTOS_ANCHOR, // deepest existing = /photos
+      missingParents: ['2026'],
+    })
+    const atts = graph.attestations
+
+    it('creates ONLY the leaf folder, off the deepest existing anchor', () => {
+      const folder = find(atts, REF.parentFolder(0))
+      expect(anchorEnc.decodeData(folder.data)).toEqual(['2026', ZERO_UID])
+      expect(folder.refUID).toBe(PHOTOS_ANCHOR) // reuses the existing /photos anchor
+      expect(atts.filter((a) => a.ref.startsWith('parentFolder:'))).toHaveLength(1)
+    })
+
+    it('file-ANCHOR refs the single created folder; layers shift by 1', () => {
+      const fileAnchor = find(atts, REF.FILE_ANCHOR)
+      expect(fileAnchor.refUID).toEqual({ ref: REF.parentFolder(0) })
+      expect(fileAnchor.layer).toBe(3) // m=1 → base L2 = m+2 = 3
+      expect(find(atts, REF.DATA).layer).toBe(2) // m+1
+    })
+
+    it('emits the base 13-node graph PLUS the 1 created folder', () => {
+      expect(atts).toHaveLength(14)
+    })
+  })
+
+  describe('parents already exist (no missingParents) — no extra folder anchors', () => {
+    const graph = buildFileWriteGraph(bytesInput) // baseInput has no missingParents
+    const atts = graph.attestations
+
+    it('emits no parentFolder anchors and keeps the base layers', () => {
+      expect(atts.filter((a) => a.ref.startsWith('parentFolder:'))).toHaveLength(0)
+      expect(atts).toHaveLength(13)
+      // file-ANCHOR refs the concrete parent directly (unchanged behavior).
+      expect(find(atts, REF.FILE_ANCHOR).refUID).toBe(PARENT)
+      expect(find(atts, REF.DATA).layer).toBe(1)
+      expect(find(atts, REF.PLACEMENT_PIN).layer).toBe(3)
+    })
+  })
+
+  describe('hardlink + missing parents', () => {
+    const graph = buildFileWriteGraph({
+      ...baseInput,
+      path: '/photos/2026/trip.jpg',
+      fileName: 'trip.jpg',
+      parentAnchorUID: DEEPEST_EXISTING,
+      missingParents: ['photos', '2026'],
+      content: { kind: 'hardlink', dataUID: EXISTING_DATA },
+    })
+    const atts = graph.attestations
+
+    it('still creates the folder chain before the file-ANCHOR + placement PIN', () => {
+      expect(graph.hardlink).toBe(true)
+      expect(atts.map((a) => a.ref)).toEqual([
+        REF.parentFolder(0),
+        REF.parentFolder(1),
+        REF.FILE_ANCHOR,
+        REF.PLACEMENT_PIN,
+      ])
+      // file-ANCHOR refs the last created folder; PIN refs the existing DATA.
+      expect(find(atts, REF.FILE_ANCHOR).refUID).toEqual({ ref: REF.parentFolder(1) })
+      expect(find(atts, REF.PLACEMENT_PIN).refUID).toBe(EXISTING_DATA)
+    })
+  })
+})
+
 describe('hardlink short-circuit', () => {
   const graph = buildFileWriteGraph({
     ...baseInput,

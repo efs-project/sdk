@@ -450,8 +450,10 @@ export {
 export {
   resolvePathToAnchor,
   resolveParentAnchor,
+  resolveOrPlanParents,
   splitPath,
   ParentNotFoundError,
+  type ParentPlan,
   type ResolvePublicClient,
 } from './reads/resolve.js'
 // Lens-scoped read engine (resolve/stat/cat/fetch/list internals + context).

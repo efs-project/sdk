@@ -227,6 +227,18 @@ export type WriteOptions = {
    * the connected account is not yet honored (a later slice).
    */
   lens?: Address
+  /**
+   * `mkdir -p` for the write: when the target's ancestor folders don't yet exist,
+   * create them in the SAME write instead of throwing. Each missing folder becomes
+   * one non-revocable ANCHOR (a permanent folder), chained under the deepest
+   * existing ancestor, mined before the file is placed under it.
+   *
+   * Default **`false`** — the safe, today's behavior: a missing parent throws
+   * `ParentNotFoundError`. Opt in (`true`) for "just works" nested writes. Left off
+   * by default deliberately: folder anchors are PERMANENT, so a typo in a path
+   * (`/photos/2026/...` vs `/photo/2026/...`) would mint a permanent stray folder.
+   */
+  createParents?: boolean
 }
 
 /**

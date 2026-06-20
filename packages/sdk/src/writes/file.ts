@@ -24,7 +24,12 @@ import type { EfsDeployment } from '../chain/deployments.js'
 import { type ContentHash, hashContent } from '../content/hash.js'
 import { EfsError } from '../errors.js'
 import { TRANSPORT } from '../mirror/transport.js'
-import { type ResolvePublicClient, resolveParentAnchor } from '../reads/resolve.js'
+import {
+  ParentNotFoundError,
+  type ResolvePublicClient,
+  resolveOrPlanParents,
+  splitPath,
+} from '../reads/resolve.js'
 import type { DataRef, DataUID, WriteOptions, WriteReceipt } from '../types.js'
 import { buildFileWriteGraph } from './graph.js'
 import {
@@ -182,8 +187,9 @@ function toReceipt(
 /**
  * Execute a Tier-1 file write end to end. See the module doc for the pipeline.
  *
- * @throws {ParentNotFoundError} the parent folder does not exist (require it for
- *   now; mkdir-p is a later slice).
+ * @throws {ParentNotFoundError} the parent folder does not exist and
+ *   `opts.createParents` is not set (the default). With `createParents: true` the
+ *   missing ancestor folders are created in the same write instead (mkdir -p).
  * @throws {EfsError} `MissingTransport` / `InvalidArgument` from mirror resolution.
  * @throws {WriteRevertedError} a layer's multiAttest reverted (partial-write
  *   boundary) — surfaced verbatim to the caller.
@@ -200,14 +206,37 @@ export async function writeFileTier1(
   const contentHash = hashContent(content)
   const size = BigInt(content.byteLength)
 
-  // 2. Resolve the parent folder anchor (require it to exist) + the file name.
+  // 2. Plan the parent folder chain (resolve as deep as it exists) + the file name.
   // Done BEFORE storage so a missing-parent write fails fast — never deploying
-  // on-chain chunks for a path that can't be placed.
-  const { parentAnchorUID, fileName } = await resolveParentAnchor(
+  // on-chain chunks for a path that can't be placed. When parents are missing the
+  // behavior splits on `createParents`: opt in to fold the missing folders into the
+  // same write (mkdir -p), else throw `ParentNotFoundError` (the safe default).
+  const parentPlan = await resolveOrPlanParents(
     ctx.publicClient,
     deployment.contracts.indexer,
     path,
   )
+  const { fileName } = parentPlan
+  // The anchor the file-ANCHOR hangs off of: the resolved parent (no gap) or, when
+  // creating ancestors, the deepest existing anchor the created chain extends from.
+  let parentAnchorUID: Hex
+  let missingParents: readonly string[] = []
+  if ('parentAnchorUID' in parentPlan) {
+    parentAnchorUID = parentPlan.parentAnchorUID
+  } else if (opts?.createParents === true) {
+    parentAnchorUID = parentPlan.deepestExistingAnchorUID
+    missingParents = parentPlan.missingSegments
+  } else {
+    // Reconstruct the resolved/missing split for a precise error: the missing
+    // suffix is `parentPlan.missingSegments` (shallowest-first); everything before
+    // it resolved. The first missing segment is the one that broke the walk.
+    const parentSegments = splitPath(path).slice(0, -1)
+    const resolvedSegments = parentSegments.slice(
+      0,
+      parentSegments.length - parentPlan.missingSegments.length,
+    )
+    throw new ParentNotFoundError(path, resolvedSegments, parentPlan.missingSegments[0] as string)
+  }
 
   // 3. Mirror + transport-definition. With no caller `mirrors` this STORES the
   // bytes on-chain (SSTORE2) and yields a web3:// mirror — the zero-infra default.
@@ -229,6 +258,7 @@ export async function writeFileTier1(
     schemas: deployment.schemas,
     transportDefinition,
     parentAnchorUID,
+    ...(missingParents.length > 0 ? { missingParents } : {}),
     fileName,
   })
 

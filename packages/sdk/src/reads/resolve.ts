@@ -58,10 +58,12 @@ export interface ResolvePublicClient {
 
 /**
  * Raised when a path prefix (a folder on the way to the target) does not exist
- * on-chain. The write path requires the parent folder to already exist; creating
- * it (`mkdir -p`) is a later slice. Carries the full path requested and the exact
- * segment prefix that resolved to `ZERO_UID`, so a caller can later mkdir-p the
- * gap or surface a precise "folder X is missing" message.
+ * on-chain and the write did NOT opt into creating it. By default the write path
+ * requires the parent folder to already exist; pass `createParents: true`
+ * ({@link WriteOptions}) to fold the missing ancestor folders into the same write
+ * (`mkdir -p`). Carries the full path requested and the exact segment prefix that
+ * resolved to `ZERO_UID`, so a caller can mkdir-p the gap or surface a precise
+ * "folder X is missing" message.
  */
 export class ParentNotFoundError extends EfsError {
   override name = 'ParentNotFoundError'
@@ -74,7 +76,7 @@ export class ParentNotFoundError extends EfsError {
   constructor(path: string, resolvedSegments: readonly string[], missingSegment: string) {
     const at = resolvedSegments.length > 0 ? `/${resolvedSegments.join('/')}` : '(root)'
     super(
-      `EFS path resolution failed: the folder segment '${missingSegment}' does not exist under ${at} (resolving '${path}'). Its parent folder must exist before writing into it — creating missing folders (mkdir -p) is not implemented yet.`,
+      `EFS path resolution failed: the folder segment '${missingSegment}' does not exist under ${at} (resolving '${path}'). Its parent folder must exist before writing into it — pass \`createParents: true\` to create the missing folders in the same write (mkdir -p).`,
       { code: 'ParentNotFound' },
     )
     this.path = path
@@ -135,6 +137,103 @@ export async function resolvePathToAnchor(
 }
 
 /**
+ * Split a target file path into its parent folder segments + the file name.
+ * `/docs/api/readme.md` → `{ parentSegments: ['docs', 'api'], fileName: 'readme.md' }`.
+ *
+ * @throws {EfsError} (`InvalidArgument`) if `path` has no file-name segment.
+ */
+function splitTargetPath(path: string): { parentSegments: string[]; fileName: string } {
+  const segments = splitPath(path)
+  const fileName = segments.pop()
+  if (fileName === undefined) {
+    throw new EfsError(
+      `EFS write: the path '${path}' has no file-name segment — nothing to place. Provide a path like '/docs/readme.md'.`,
+      { code: 'InvalidArgument' },
+    )
+  }
+  return { parentSegments: segments, fileName }
+}
+
+/**
+ * The outcome of planning a target file's parent folder, supporting `mkdir -p`.
+ * Either the full parent chain already exists (`parentAnchorUID` resolved), or some
+ * suffix of ancestor folders is missing — in which case the deepest EXISTING anchor
+ * is returned along with the ordered (shallowest-first) chain of missing segments
+ * the write must create before placing the file.
+ */
+export type ParentPlan =
+  | {
+      /** Every ancestor folder exists; this is the file's immediate parent anchor. */
+      readonly parentAnchorUID: Hex
+      readonly fileName: string
+      /** No folders to create. */
+      readonly missingSegments: readonly []
+    }
+  | {
+      /** The deepest ancestor that DOES exist — the chain of created folders extends
+       * from here (the first created folder's `refUID`). */
+      readonly deepestExistingAnchorUID: Hex
+      readonly fileName: string
+      /** The ordered (shallowest-first) folder segments that must be created. */
+      readonly missingSegments: readonly string[]
+    }
+
+/**
+ * Plan the parent folder for a target file path, walking as deep as the chain
+ * exists and reporting any missing suffix (instead of throwing) — the `mkdir -p`
+ * planning step.
+ *
+ * Walks each parent segment from `rootAnchorUID()` via `resolvePath`. Once a segment
+ * resolves to `ZERO_UID`, the walk stops: that segment and all following parent
+ * segments are the `missingSegments` (shallowest-first), and the last resolved anchor
+ * (or the root, if the first parent segment is already missing) is the deepest
+ * existing anchor the created-folder chain extends from.
+ *
+ * Unlike {@link resolveParentAnchor} this NEVER throws {@link ParentNotFoundError};
+ * the caller decides whether to create the gap (`createParents:true`) or reject it.
+ *
+ * @returns A {@link ParentPlan} — either the resolved parent anchor (no gap) or the
+ *   deepest existing anchor + the ordered missing segments.
+ * @throws {EfsError} (`InvalidArgument`) if `path` has no file-name segment.
+ */
+export async function resolveOrPlanParents(
+  publicClient: ResolvePublicClient,
+  indexerAddr: Address,
+  path: string,
+): Promise<ParentPlan> {
+  const { parentSegments, fileName } = splitTargetPath(path)
+
+  const root = (await publicClient.readContract({
+    address: indexerAddr,
+    abi: indexerAbi,
+    functionName: 'rootAnchorUID',
+  })) as Hex
+
+  let parent = root
+  for (let i = 0; i < parentSegments.length; i++) {
+    const segment = parentSegments[i] as string
+    const child = (await publicClient.readContract({
+      address: indexerAddr,
+      abi: indexerAbi,
+      functionName: 'resolvePath',
+      args: [parent, segment],
+    })) as Hex
+    if (child === ZERO_UID) {
+      // From here down the parent chain does not exist — everything from `i` on is
+      // a folder to create, hanging off the last resolved anchor (`parent`).
+      return {
+        deepestExistingAnchorUID: parent,
+        fileName,
+        missingSegments: parentSegments.slice(i),
+      }
+    }
+    parent = child
+  }
+
+  return { parentAnchorUID: parent, fileName, missingSegments: [] }
+}
+
+/**
  * Resolve the **parent folder anchor** for a target file path — i.e. resolve the
  * path with its final segment (the file name) split off. `/docs/api/readme.md`
  * resolves the folder `/docs/api`; the returned `fileName` is `readme.md`.
@@ -154,17 +253,10 @@ export async function resolveParentAnchor(
   indexerAddr: Address,
   path: string,
 ): Promise<{ parentAnchorUID: Hex; fileName: string }> {
-  const segments = splitPath(path)
-  const fileName = segments.pop()
-  if (fileName === undefined) {
-    throw new EfsError(
-      `EFS write: the path '${path}' has no file-name segment — nothing to place. Provide a path like '/docs/readme.md'.`,
-      { code: 'InvalidArgument' },
-    )
-  }
+  const { parentSegments, fileName } = splitTargetPath(path)
   // The parent is the path minus the final segment. Re-join and resolve it as a
   // folder walk; an empty parent path means the file lives directly under root.
-  const parentPath = segments.join('/')
+  const parentPath = parentSegments.join('/')
   const parentAnchorUID = await resolvePathToAnchor(publicClient, indexerAddr, parentPath)
   return { parentAnchorUID, fileName }
 }

@@ -16,6 +16,7 @@ import { describe, expect, it } from 'vitest'
 import {
   ParentNotFoundError,
   type ResolvePublicClient,
+  resolveOrPlanParents,
   resolveParentAnchor,
   resolvePathToAnchor,
   splitPath,
@@ -129,5 +130,49 @@ describe('resolveParentAnchor', () => {
     const err = await resolveParentAnchor(client, INDEXER, '/missing/readme.md').catch((e) => e)
     expect(err).toBeInstanceOf(ParentNotFoundError)
     expect((err as ParentNotFoundError).missingSegment).toBe('missing')
+  })
+})
+
+describe('resolveOrPlanParents (mkdir -p planning)', () => {
+  it('returns the resolved parent anchor when every ancestor exists (no gap)', async () => {
+    const photos = uid(0x20)
+    const y2026 = uid(0x21)
+    const { client } = makeResolver({
+      [`${ROOT}|photos`]: photos,
+      [`${photos}|2026`]: y2026,
+    })
+    const plan = await resolveOrPlanParents(client, INDEXER, '/photos/2026/trip.jpg')
+    expect(plan.fileName).toBe('trip.jpg')
+    expect(plan.missingSegments).toEqual([])
+    expect('parentAnchorUID' in plan && plan.parentAnchorUID).toBe(y2026)
+  })
+
+  it('reports the deepest existing anchor + the full missing suffix (none exist)', async () => {
+    const { client } = makeResolver({}) // nothing under root
+    const plan = await resolveOrPlanParents(client, INDEXER, '/photos/2026/trip.jpg')
+    expect(plan.fileName).toBe('trip.jpg')
+    expect(plan.missingSegments).toEqual(['photos', '2026'])
+    // Deepest existing = root (the first parent segment is already missing).
+    expect('deepestExistingAnchorUID' in plan && plan.deepestExistingAnchorUID).toBe(ROOT)
+  })
+
+  it('reports only the leaf folder when the shallower ancestor already exists', async () => {
+    const photos = uid(0x20)
+    const { client } = makeResolver({ [`${ROOT}|photos`]: photos }) // 2026 missing
+    const plan = await resolveOrPlanParents(client, INDEXER, '/photos/2026/trip.jpg')
+    expect(plan.missingSegments).toEqual(['2026'])
+    expect('deepestExistingAnchorUID' in plan && plan.deepestExistingAnchorUID).toBe(photos)
+  })
+
+  it('a file directly under root has no parents to plan', async () => {
+    const { client } = makeResolver({})
+    const plan = await resolveOrPlanParents(client, INDEXER, '/readme.md')
+    expect(plan.missingSegments).toEqual([])
+    expect('parentAnchorUID' in plan && plan.parentAnchorUID).toBe(ROOT)
+  })
+
+  it('throws InvalidArgument when there is no file-name segment', async () => {
+    const { client } = makeResolver({})
+    await expect(resolveOrPlanParents(client, INDEXER, '/')).rejects.toThrow(/no file-name segment/)
   })
 })
