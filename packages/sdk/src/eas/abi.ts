@@ -81,6 +81,38 @@ export const multiAttestAbi = [
   },
 ] as const
 
+/**
+ * `IEAS.revoke(RevocationRequest)` — revoke a single attestation (IEAS.sol). The
+ * `RevocationRequest` is a schema UID plus a `RevocationRequestData` (`{ uid, value }`)
+ * — `value` is ETH forwarded to a payable resolver's `onRevoke` (0 for EFS schemas).
+ * Only the original attester may revoke; reverts otherwise. Returns nothing.
+ */
+export const revokeAbi = [
+  {
+    type: 'function',
+    name: 'revoke',
+    stateMutability: 'payable',
+    inputs: [
+      {
+        name: 'request',
+        type: 'tuple',
+        components: [
+          { name: 'schema', type: 'bytes32' },
+          {
+            name: 'data',
+            type: 'tuple',
+            components: [
+              { name: 'uid', type: 'bytes32' },
+              { name: 'value', type: 'uint256' },
+            ],
+          },
+        ],
+      },
+    ],
+    outputs: [],
+  },
+] as const
+
 /** `IEAS.getAttestation(bytes32) -> Attestation` (Common.sol struct). */
 export const getAttestationAbi = [
   {
@@ -196,6 +228,7 @@ const easErrorsAbi = [
 export const easAbi = [
   ...attestAbi,
   ...multiAttestAbi,
+  ...revokeAbi,
   ...getAttestationAbi,
   ...attestedEventAbi,
   ...easErrorsAbi,

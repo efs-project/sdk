@@ -1,0 +1,129 @@
+/**
+ * `efs.raw.*` — pre-wired viem contract instances bound to the resolved deployment
+ * addresses + the vendored ABIs + the client (P1-4 escape hatch). This is the
+ * "drop to the raw layer" surface: a dev who needs an on-chain method the typed
+ * SDK doesn't (yet) expose can call it directly, fully typed, against the right
+ * address — no manual address/ABI plumbing.
+ *
+ * Each instance is a viem `getContract(...)`: its read methods (`.read.fn(args)`)
+ * are available whenever a public client is present (always); its write methods
+ * (`.write.fn(args)`) are present only when a wallet client was supplied — viem's
+ * own read/write split mirrors the SDK's type-level write gate, so a read-only
+ * client's raw instances simply have no `.write` surface.
+ *
+ * The instances are exposed as lazy getters: the deployment is resolved on each
+ * property access, so a `deployments` override / chain change is always reflected
+ * and a missing deployment surfaces as the same `DeploymentNotFound` the rest of
+ * the SDK throws — at the point of use, never at client construction.
+ */
+
+import { type GetContractReturnType, type PublicClient, type WalletClient, getContract } from 'viem'
+import {
+  aliasResolverAbi,
+  edgeResolverAbi,
+  fileViewAbi,
+  indexerAbi,
+  listReaderAbi,
+  mirrorResolverAbi,
+  routerAbi,
+} from '../chain/abi/index.js'
+import type { EfsDeployment } from '../chain/deployments.js'
+import { easAbi } from '../eas/abi.js'
+
+/**
+ * The viem clients a raw contract instance binds to. When `wallet` is present the
+ * instances expose `.write.*`; otherwise read-only (`.read.*`). Kept as the broad
+ * viem client types so `getContract` infers the full typed method surface.
+ */
+export type RawClients = {
+  public: PublicClient
+  wallet: WalletClient | undefined
+}
+
+/** The client shape viem's `getContract` accepts (public always, wallet optional). */
+type RawClient = { public: PublicClient; wallet?: WalletClient }
+
+/**
+ * One pre-wired instance per EFS/EAS contract the SDK vendors an ABI for. The
+ * concrete `GetContractReturnType` is what viem infers from each `as const` ABI +
+ * the supplied client(s), so `.read.*` / (`.write.*` when a wallet is set) are
+ * fully typed — the same surface a dev would get from `getContract` by hand.
+ */
+export type EfsRawContracts = {
+  /** EFS Indexer (kernel reads + the frozen schema-UID getters). */
+  indexer: GetContractReturnType<typeof indexerAbi, RawClient>
+  /** EFS Router (request classification / resolve mode). */
+  router: GetContractReturnType<typeof routerAbi, RawClient>
+  /** EFSFileView (directory pages, path resolution, data-mirror reads). */
+  fileView: GetContractReturnType<typeof fileViewAbi, RawClient>
+  /** EdgeResolver (active PIN/TAG edge reads). */
+  edgeResolver: GetContractReturnType<typeof edgeResolverAbi, RawClient>
+  /** MirrorResolver (transport anchors, max-URI length). */
+  mirrorResolver: GetContractReturnType<typeof mirrorResolverAbi, RawClient>
+  /** ListReader (list mode / entries / membership reads). */
+  listReader: GetContractReturnType<typeof listReaderAbi, RawClient>
+  /** AliasResolver (REDIRECT schema UID + redirect resolution). */
+  aliasResolver: GetContractReturnType<typeof aliasResolverAbi, RawClient>
+  /** The external EAS contract (attest/multiAttest/revoke/getAttestation). */
+  eas: GetContractReturnType<typeof easAbi, RawClient>
+}
+
+/** Build the `{ public, wallet? }` arg viem's `getContract` expects, wallet omitted
+ * for a read-only client (so no `.write` surface is generated). */
+function clientArg(clients: RawClients): RawClient {
+  return clients.wallet
+    ? { public: clients.public, wallet: clients.wallet }
+    : { public: clients.public }
+}
+
+/**
+ * Build the `efs.raw.*` contract instances for a deployment. `getDeployment` is the
+ * client's lazy resolver (so an override/chain change is reflected and a missing
+ * deployment throws `DeploymentNotFound` at access time, consistent with the rest
+ * of the SDK). Each instance is bound to its authoritative address from
+ * {@link EfsDeployment.contracts}; properties are lazy getters that re-resolve.
+ */
+export function buildRawContracts(
+  getDeployment: () => EfsDeployment,
+  clients: RawClients,
+): EfsRawContracts {
+  const client = clientArg(clients)
+  const at = <const TAbi extends readonly unknown[]>(
+    pick: (d: EfsDeployment) => `0x${string}`,
+    abi: TAbi,
+  ): GetContractReturnType<TAbi, RawClient> =>
+    getContract({
+      address: pick(getDeployment()),
+      abi,
+      client,
+    }) as unknown as GetContractReturnType<TAbi, RawClient>
+
+  // Lazy getters: each access re-resolves the deployment (override/chain change is
+  // reflected; a missing deployment throws DeploymentNotFound here, not at construct).
+  return {
+    get indexer() {
+      return at((d) => d.contracts.indexer, indexerAbi)
+    },
+    get router() {
+      return at((d) => d.contracts.router, routerAbi)
+    },
+    get fileView() {
+      return at((d) => d.contracts.fileView, fileViewAbi)
+    },
+    get edgeResolver() {
+      return at((d) => d.contracts.edgeResolver, edgeResolverAbi)
+    },
+    get mirrorResolver() {
+      return at((d) => d.contracts.mirrorResolver, mirrorResolverAbi)
+    },
+    get listReader() {
+      return at((d) => d.contracts.listReader, listReaderAbi)
+    },
+    get aliasResolver() {
+      return at((d) => d.contracts.aliasResolver, aliasResolverAbi)
+    },
+    get eas() {
+      return at((d) => d.contracts.eas, easAbi)
+    },
+  }
+}

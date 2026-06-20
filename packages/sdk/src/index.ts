@@ -18,6 +18,7 @@ import {
   type Address,
   type Chain,
   type EIP1193Provider,
+  type Hex,
   type PublicClient,
   type WalletClient,
   createPublicClient,
@@ -30,15 +31,20 @@ import {
   resolveDeployment,
   verifyDeployment,
 } from './chain/deployments.js'
+import { type DecodedAttestation, decodeAttestation } from './decode.js'
 import {
+  type AttestationRequest,
+  type MultiAttestationRequest,
   SchemaEncoder,
   computeAttestationUID,
   easAbi,
   schemaRegistryAbi,
   verifyAttestationUID,
 } from './eas/index.js'
+import { type EasVerbs, type RevocationRequest, makeEasVerbs } from './eas/verbs.js'
 import { EfsError, NotImplemented, WalletRequired } from './errors.js'
 import { type Lens, identity, lens, resolveLens } from './lenses/resolve.js'
+import { type EfsRawContracts, buildRawContracts } from './raw/contracts.js'
 import {
   type HasSourceUIDs,
   type HydratedItem,
@@ -55,6 +61,7 @@ import {
 import { exists as existsRead, info as infoRead, locate as locateRead } from './reads/file.js'
 import { list as listRead } from './reads/list.js'
 import type {
+  Attestation,
   BatchReceipt,
   DataRef,
   DirEntry,
@@ -202,7 +209,8 @@ export type EfsLensesNs = {
   identity: typeof identity
 }
 
-export type EfsEasNs = {
+/** Read-capable EAS namespace: the pure tools + raw `getAttestation` (no wallet). */
+export type EfsEasReadNs = {
   encoder(schema: string): SchemaEncoder
   computeUID: typeof computeAttestationUID
   verifyUID: typeof verifyAttestationUID
@@ -215,9 +223,35 @@ export type EfsEasNs = {
     items: readonly HasSourceUIDs[],
     opts?: { withSchema?: boolean },
   ): Promise<HydratedItem[]>
+  /** Raw EAS read: `getAttestation(uid)` → the typed {@link Attestation}, or
+   * `undefined` when the UID is absent (the zero record). Available always. */
+  getAttestation: EasVerbs['getAttestation']
 }
 
-export type EfsRawNs = {
+/** Full EAS namespace (a `walletClient` was supplied): read tools + the raw write
+ * verbs (`attest`/`multiAttest`/`revoke`), each routed through `classifyError`. */
+export type EfsEasNs = EfsEasReadNs & {
+  /** Submit one `attest` over the connected wallet; resolves to the tx hash. */
+  attest: EasVerbs['attest']
+  /** Submit one `multiAttest` (grouped by schema); resolves to the tx hash. */
+  multiAttest: EasVerbs['multiAttest']
+  /** Revoke an attestation (only the original attester may); resolves to the tx hash. */
+  revoke: EasVerbs['revoke']
+}
+
+/** The `efs.decode` bridge: raw {@link Attestation} (or a UID) → the SDK's typed,
+ * discriminated view. Synchronous when given an attestation (pure); async when
+ * given a UID (reads `getAttestation` first, then decodes). */
+export type EfsDecodeNs = {
+  /** Decode an already-read raw attestation into the typed view (pure, sync). */
+  (attestation: Attestation): DecodedAttestation
+  /** Read `getAttestation(uid)` then decode; `null` when the UID is absent. */
+  (uid: Hex): Promise<DecodedAttestation | null>
+}
+
+/** Read-capable `raw` namespace: the deployment + the pre-wired read-only contract
+ * instances (write methods absent until a wallet is supplied — see {@link EfsRawNs}). */
+export type EfsRawReadNs = EfsRawContracts & {
   deployment(): EfsDeployment
   /**
    * Run the full deployment trust gate: bytecode presence **then** schema-UID
@@ -230,17 +264,27 @@ export type EfsRawNs = {
   verifyDeployment(): Promise<void>
 }
 
-/** Read-capable client (no `walletClient`). */
+/** The `raw` namespace. Same shape read or write — the contract instances carry
+ * `.write.*` only when a wallet was supplied (viem's own getContract split). */
+export type EfsRawNs = EfsRawReadNs
+
+/** Read-capable client (no `walletClient`). The `eas`/`raw` escape hatches are
+ * read-only here (no write verbs / no `.write.*` on the raw instances). */
 export type EfsReadClient = {
   fs: EfsFsRead
   lenses: EfsLensesNs
-  eas: EfsEasNs
-  raw: EfsRawNs
+  eas: EfsEasReadNs
+  raw: EfsRawReadNs
+  /** Round-trip bridge: raw {@link Attestation} (or a UID) → the typed view. */
+  decode: EfsDecodeNs
 }
 
-/** Full client (a `walletClient` was supplied): reads + writes + batching. */
+/** Full client (a `walletClient` was supplied): reads + writes + batching. The
+ * `eas` namespace gains the raw write verbs; `raw` instances gain `.write.*`. */
 export type EfsClient = EfsReadClient & {
   fs: EfsFsWrite
+  eas: EfsEasNs
+  raw: EfsRawNs
   /** Compose a multi-operation write delivered with one signature where possible. */
   batch(): { execute(): Promise<BatchReceipt> }
 }
@@ -283,6 +327,41 @@ export function createEfsClient(config: EfsClientConfig): EfsClient {
     ...(config.defaultLens !== undefined ? { defaultLens: config.defaultLens } : {}),
     ...(account !== undefined ? { account } : {}),
   })
+
+  // The `efs.raw.*` pre-wired contract instances (P1-4): viem `getContract`s bound
+  // to the resolved deployment addresses + vendored ABIs + the client(s). Built once
+  // (the instances re-resolve the deployment lazily on each property access).
+  const rawContracts = buildRawContracts(getDeployment, {
+    public: publicClient,
+    wallet: walletClient,
+  })
+
+  // The `efs.eas.*` raw verb implementations (attest/multiAttest/revoke/getAttestation)
+  // over the EAS address from the resolved deployment, routed through classifyError.
+  const easVerbs: EasVerbs = makeEasVerbs({
+    get easAddress() {
+      return getDeployment().contracts.eas
+    },
+    publicClient: publicClient as unknown as Parameters<typeof makeEasVerbs>[0]['publicClient'],
+    walletClient: walletClient as unknown as Parameters<typeof makeEasVerbs>[0]['walletClient'],
+    requireWallet,
+    ...(walletClient?.account !== undefined ? { account: walletClient.account } : {}),
+    ...(walletClient?.chain !== undefined ? { chain: walletClient.chain } : {}),
+  })
+
+  // `efs.decode` (P1-4): raw Attestation → typed view (sync, pure), or a UID →
+  // read-then-decode (async; `null` when the UID is absent). One overloaded fn.
+  const decode = ((
+    input: Attestation | Hex,
+  ): DecodedAttestation | Promise<DecodedAttestation | null> => {
+    if (typeof input === 'string') {
+      return easVerbs.getAttestation(input).then((att) => {
+        if (att === undefined) return null
+        return decodeAttestation(att, getDeployment())
+      })
+    }
+    return decodeAttestation(input, getDeployment())
+  }) as EfsDecodeNs
 
   return {
     fs: {
@@ -368,11 +447,44 @@ export function createEfsClient(config: EfsClientConfig): EfsClient {
       verifyUID: verifyAttestationUID,
       abi: { eas: easAbi, schemaRegistry: schemaRegistryAbi },
       attestationsFor: (items, opts) => attestationsForItems(readContext(), items, opts),
+      // Raw EAS verbs (P1-4): reads available always, writes gated on the wallet.
+      getAttestation: easVerbs.getAttestation,
+      attest: easVerbs.attest,
+      multiAttest: easVerbs.multiAttest,
+      revoke: easVerbs.revoke,
     },
     raw: {
       deployment: getDeployment,
       verifyDeployment: () => verifyDeployment(publicClient, getDeployment()),
+      // Spread the pre-wired contract instances (P1-4). They are lazy getters, so
+      // spreading here would eagerly resolve them — instead expose the object so
+      // each `efs.raw.<contract>` access re-resolves the deployment.
+      get indexer() {
+        return rawContracts.indexer
+      },
+      get router() {
+        return rawContracts.router
+      },
+      get fileView() {
+        return rawContracts.fileView
+      },
+      get edgeResolver() {
+        return rawContracts.edgeResolver
+      },
+      get mirrorResolver() {
+        return rawContracts.mirrorResolver
+      },
+      get listReader() {
+        return rawContracts.listReader
+      },
+      get aliasResolver() {
+        return rawContracts.aliasResolver
+      },
+      get eas() {
+        return rawContracts.eas
+      },
     },
+    decode,
     batch: () => {
       requireWallet()
       throw new NotImplemented('efs.batch()', {
@@ -393,6 +505,7 @@ export {
   parseSchema,
   parseSchemaParameters,
   easAbi,
+  revokeAbi,
   schemaRegistryAbi,
   EFS_SCHEMA_FIELDS,
   type AttestationRequest,
@@ -400,6 +513,33 @@ export {
   type MultiAttestationRequest,
   type EfsSchemaName,
 } from './eas/index.js'
+// Raw EAS verbs (`efs.eas.attest/multiAttest/revoke/getAttestation`) — escape hatch (P1-4).
+export {
+  makeEasVerbs,
+  type EasVerbs,
+  type EasVerbContext,
+  type EasWalletClient,
+  type EasPublicClient,
+  type RevocationRequest,
+} from './eas/verbs.js'
+// `efs.raw.*` pre-wired contract instances — escape hatch (P1-4).
+export { buildRawContracts, type EfsRawContracts, type RawClients } from './raw/contracts.js'
+// `efs.decode` round-trip bridge — raw Attestation → typed view (P1-4).
+export {
+  decodeAttestation,
+  type DecodedAttestation,
+  type DecodedKnown,
+  type DecodedUnknown,
+  type DecodedAnchor,
+  type DecodedProperty,
+  type DecodedData,
+  type DecodedPin,
+  type DecodedTag,
+  type DecodedMirror,
+  type DecodedList,
+  type DecodedListEntry,
+  type DecodedRedirect,
+} from './decode.js'
 export {
   hashContent,
   verifyContent,

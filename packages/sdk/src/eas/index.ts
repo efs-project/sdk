@@ -12,6 +12,7 @@
 export {
   attestAbi,
   multiAttestAbi,
+  revokeAbi,
   getAttestationAbi,
   attestedEventAbi,
   getSchemaAbi,
