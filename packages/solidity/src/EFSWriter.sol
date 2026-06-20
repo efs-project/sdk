@@ -69,4 +69,96 @@ abstract contract EFSWriter {
         );
         emit EFSFileWritten(fileAnchorUID, dataUID, placementPinUID);
     }
+
+    /// @notice The **mkdir** primitive: create a child ANCHOR (folder/name node) under a parent.
+    /// @dev    Delegates to {EFSLib.anchorAt}. The created anchor's attester is `address(this)`.
+    /// @param  schemas      The frozen schema UID set (only `anchor` is used).
+    /// @param  parentAnchor The parent folder anchor UID.
+    /// @param  name         The child anchor's name (verbatim).
+    /// @return anchorUID    The created ANCHOR UID.
+    function _efsAnchorAt(
+        EFSLib.SchemaUIDs memory schemas,
+        bytes32 parentAnchor,
+        string memory name
+    ) internal returns (bytes32 anchorUID) {
+        anchorUID = EFSLib.anchorAt(EAS, schemas, parentAnchor, name);
+    }
+
+    /// @notice A **TAG** edge (cardinality-N) over `target` with `definition` and `weight`.
+    /// @dev    Delegates to {EFSLib.tag}. Folder-visibility / label primitive.
+    /// @param  schemas    The frozen schema UID set (only `tag` is used).
+    /// @param  target     The attestation UID being tagged (the edge's `refUID`).
+    /// @param  definition The tag predicate/category (must be nonzero; resolver-validated).
+    /// @param  weight     The signed tag weight.
+    /// @return tagUID     The created TAG edge UID.
+    function _efsTag(
+        EFSLib.SchemaUIDs memory schemas,
+        bytes32 target,
+        bytes32 definition,
+        int256 weight
+    ) internal returns (bytes32 tagUID) {
+        tagUID = EFSLib.tag(EAS, schemas, target, definition, weight);
+    }
+
+    /// @notice Set an arbitrary key/value **PROPERTY** triple on a DATA (key-ANCHOR + PROPERTY +
+    ///         binding PIN).
+    /// @dev    Delegates to {EFSLib.setProperty}. Cardinality-1: re-setting supersedes for the lens.
+    /// @param  schemas The frozen schema UID set (`anchor`, `property`, `pin` are used).
+    /// @param  dataUID The DATA the property binds under.
+    /// @param  keyName The property key (the key-ANCHOR's `name`).
+    /// @param  value   The stringified property value.
+    /// @return keyAnchorUID  The created key-ANCHOR UID.
+    /// @return propertyUID   The created PROPERTY UID.
+    /// @return bindingPinUID The created binding-PIN UID.
+    function _efsSetProperty(
+        EFSLib.SchemaUIDs memory schemas,
+        bytes32 dataUID,
+        string memory keyName,
+        string memory value
+    ) internal returns (bytes32 keyAnchorUID, bytes32 propertyUID, bytes32 bindingPinUID) {
+        (keyAnchorUID, propertyUID, bindingPinUID) =
+            EFSLib.setProperty(EAS, schemas, dataUID, keyName, value);
+    }
+
+    /// @notice A placement **PIN** (cardinality-1) binding `dataUID` at `anchor` — the hardlink /
+    ///         move primitive. Emits {EFSFileWritten} so consumers index placements uniformly.
+    /// @dev    Delegates to {EFSLib.place}. `anchor` is both the event's `fileAnchor` key and the
+    ///         PIN's `definition`.
+    /// @param  schemas The frozen schema UID set (only `pin` is used).
+    /// @param  anchor  The path anchor UID the placement names.
+    /// @param  dataUID The DATA UID being placed.
+    /// @return pinUID  The created placement-PIN UID.
+    function _efsPlace(EFSLib.SchemaUIDs memory schemas, bytes32 anchor, bytes32 dataUID)
+        internal
+        returns (bytes32 pinUID)
+    {
+        pinUID = EFSLib.place(EAS, schemas, anchor, dataUID);
+        emit EFSFileWritten(anchor, dataUID, pinUID);
+    }
+
+    /// @notice Create a curated **LIST**.
+    /// @dev    Delegates to {EFSLib.createList}; the curator is `address(this)`.
+    /// @return listUID The created LIST UID.
+    function _efsCreateList(
+        EFSLib.SchemaUIDs memory schemas,
+        bool allowsDuplicates,
+        bool appendOnly,
+        uint8 targetType,
+        bytes32 targetSchema,
+        uint256 maxEntries
+    ) internal returns (bytes32 listUID) {
+        listUID = EFSLib.createList(
+            EAS, schemas, allowsDuplicates, appendOnly, targetType, targetSchema, maxEntries
+        );
+    }
+
+    /// @notice Add an ANY/SCHEMA-mode entry to a LIST.
+    /// @dev    Delegates to {EFSLib.addEntry}. For ADDR-mode, use {EFSLib.addAddressEntry} directly.
+    /// @return entryUID The created LIST_ENTRY UID.
+    function _efsAddEntry(EFSLib.SchemaUIDs memory schemas, bytes32 listUID, bytes32 target)
+        internal
+        returns (bytes32 entryUID)
+    {
+        entryUID = EFSLib.addEntry(EAS, schemas, listUID, target);
+    }
 }

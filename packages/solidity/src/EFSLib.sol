@@ -53,19 +53,31 @@ library EFSLib {
     /// @dev `value` is always 0 — no EFS write schema has a payable resolver.
     uint256 internal constant NO_VALUE = 0;
 
-    /// @notice The frozen EFS schema UIDs needed to compose a file write. Pass the set for the
+    /// @notice The frozen EFS schema UIDs needed to compose any EFS write. Pass the set for the
     ///         target deployment (the SDK's per-chain deployments registry resolves these).
-    /// @dev    DATA is the empty schema; ANCHOR is `string name, bytes32 forSchema`; PROPERTY is
-    ///         `string value`; MIRROR is `bytes32 transportDefinition, string uri`; PIN is
-    ///         `bytes32 definition`. The TAG schema is NOT needed here — ancestor-visibility TAGs
-    ///         are a resolve-step concern layered by the off-chain submitter, not part of the pure
-    ///         single-file graph (graph.ts module doc; spec L3 `×M`).
+    /// @dev    Field strings (frozen freeze set, spec 02-Data-Models-and-Schemas §; the resolvers
+    ///         self-derive their UID from these so a wrong string orphans the attestation):
+    ///           - `data`      → `` (empty schema, zero fields; ADR-0049)
+    ///           - `anchor`    → `string name, bytes32 forSchema`
+    ///           - `property`  → `string value`
+    ///           - `mirror`    → `bytes32 transportDefinition, string uri`
+    ///           - `pin`       → `bytes32 definition`                    (cardinality-1 edge)
+    ///           - `tag`       → `bytes32 definition, int256 weight`     (cardinality-N edge)
+    ///           - `list`      → `bool allowsDuplicates, bool appendOnly, uint8 targetType,
+    ///                            bytes32 targetSchema, uint256 maxEntries`
+    ///           - `listEntry` → `bytes32 listUID, bytes32 target`
+    ///         {writeFile} uses only `data`/`anchor`/`property`/`mirror`/`pin`; `tag`/`list`/
+    ///         `listEntry` are consumed by {tag}/{createList}/{addEntry} respectively. A caller that
+    ///         only does file writes may leave the list/tag fields zero.
     struct SchemaUIDs {
         bytes32 data;
         bytes32 anchor;
         bytes32 property;
         bytes32 mirror;
         bytes32 pin;
+        bytes32 tag;
+        bytes32 list;
+        bytes32 listEntry;
     }
 
     /// @notice One retrieval method to publish as a MIRROR on the file's DATA.
@@ -178,26 +190,10 @@ library EFSLib {
             // definition/refUID, not via this field) — matches graph.ts GENERIC_FOR_SCHEMA.
             bytes32 keyAnchorUID = _attestAnchor(eas, w.schemas.anchor, rk.key, EMPTY_UID, dataUID);
 
-            // L2 PROPERTY: the interned value. PROPERTY onAttest rejects refUID≠0
-            // (EFSIndexer.sol:488) and revocable (EFSIndexer.sol:489). data = abi.encode(value).
-            bytes32 propertyUID = eas.attest(
-                AttestationRequest({
-                    schema: w.schemas.property,
-                    data: AttestationRequestData({
-                        recipient: ZERO_RECIPIENT,
-                        expirationTime: NO_EXPIRATION,
-                        revocable: false, // EFSIndexer.sol:489 — rejects revocable
-                        refUID: EMPTY_UID, // EFSIndexer.sol:488 — refUID must be EMPTY_UID
-                        data: abi.encode(rk.value),
-                        value: NO_VALUE
-                    })
-                })
-            );
-
-            // L3 binding-PIN: definition = key-ANCHOR (fresh), refUID = PROPERTY (fresh) — the
-            // deepest edge, referencing two fresh L2 siblings. EdgeResolver PIN requires
-            // revocable=true and expirationTime 0. data = abi.encode(definition).
-            _attestPin(eas, w.schemas.pin, keyAnchorUID, propertyUID);
+            // L2 PROPERTY + L3 binding-PIN: the interned value (refUID 0, non-revocable) plus the
+            // cardinality-1 PIN(definition = key-ANCHOR, refUID = PROPERTY) — same triple
+            // {setProperty} composes, shared via {_bindProperty}.
+            _bindProperty(eas, w.schemas, keyAnchorUID, rk.value);
         }
 
         // ── L3: placement-PIN — definition = file-ANCHOR (fresh), refUID = DATA (fresh) ───────
@@ -232,6 +228,265 @@ library EFSLib {
     ) internal returns (bytes32 fileAnchorUID, bytes32 placementPinUID) {
         fileAnchorUID = _attestAnchor(eas, schemas.anchor, fileName, forSchema, parentAnchorUID);
         placementPinUID = _attestPin(eas, schemas.pin, fileAnchorUID, dataUID);
+    }
+
+    // ── primitive write wrappers (mkdir / tag / property / place / list) ─────────────────────
+
+    /// @notice The **mkdir** primitive: mint a child ANCHOR (a folder/name node) under a parent.
+    /// @dev    An ANCHOR *is* the folder/name node — there is no separate "directory" object in EFS;
+    ///         a folder is just an anchor that other anchors and placements hang off. This is the
+    ///         same node {writeFile} mints for the file-ANCHOR, exposed standalone so a contract can
+    ///         create intermediate path segments (the `mkdir -p` building block) before placing
+    ///         files under them.
+    ///
+    ///         EFSIndexer ANCHOR branch: non-revocable, expirationTime 0, parent resolved from
+    ///         `refUID`, `data = abi.encode(name, forSchema)`. The new anchor's identity is
+    ///         deterministic in `(parentAnchor, name, forSchema, attester)` at the kernel, so
+    ///         re-attesting the same child is idempotent at resolution time (the kernel returns the
+    ///         canonical anchor); this wrapper always mints, returning the fresh UID. Resolve first
+    ///         with {EFSReader.resolveAnchor} if you want create-or-return semantics without a write.
+    /// @param  eas          The EAS instance to attest against.
+    /// @param  schemas      The frozen schema UID set (only `anchor` is used).
+    /// @param  parentAnchor The parent folder anchor UID (the new anchor's `refUID`).
+    /// @param  name         The child anchor's name (verbatim — the lib never hashes paths).
+    /// @return anchorUID    The created (child) ANCHOR UID.
+    function anchorAt(IEAS eas, SchemaUIDs memory schemas, bytes32 parentAnchor, string memory name)
+        internal
+        returns (bytes32 anchorUID)
+    {
+        // Generic forSchema (bytes32(0)) — a plain folder/name node, matching graph.ts
+        // GENERIC_FOR_SCHEMA. A typed-anchor caller can use the 5-arg overload below.
+        anchorUID = _attestAnchor(eas, schemas.anchor, name, EMPTY_UID, parentAnchor);
+    }
+
+    /// @notice {anchorAt} with an explicit `forSchema` content-type bucket (typed-anchor variant).
+    /// @dev    Use when the anchor must live in a non-Generic content-type bucket (the kernel keys
+    ///         anchors by `(parent, name, forSchema)`, so a typed anchor is distinct from the Generic
+    ///         one of the same name). Plain folders should use the 4-arg form.
+    function anchorAt(
+        IEAS eas,
+        SchemaUIDs memory schemas,
+        bytes32 parentAnchor,
+        string memory name,
+        bytes32 forSchema
+    ) internal returns (bytes32 anchorUID) {
+        anchorUID = _attestAnchor(eas, schemas.anchor, name, forSchema, parentAnchor);
+    }
+
+    /// @notice A **TAG** edge (cardinality-N): assert `definition`-categorized membership of `target`
+    ///         with a `weight`. The folder-visibility / label primitive.
+    /// @dev    EdgeResolver TAG branch (`EdgeResolver.sol`): schema = `bytes32 definition, int256
+    ///         weight`; `data = abi.encode(definition, weight)` (definition first, weight second —
+    ///         exactly 64 bytes, no padding or the resolver reverts `NonCanonicalPayload`). The edge
+    ///         must be `revocable=true` with `expirationTime 0` (resolver `NotRevocable`/
+    ///         `HasExpiration`). The *target* of the edge is the native EAS `refUID` (an existing
+    ///         attestation UID), NOT a payload field — matching `_resolveTargetID(refUID, recipient)`
+    ///         which uses `refUID` when nonzero. `definition` is the predicate/category (e.g. a DATA
+    ///         schema UID for folder visibility, or a `/tags/<name>` anchor UID for a label) and must
+    ///         pass `_validateDefinition` (nonzero, and an address / registered-schema / existing
+    ///         attestation). Cardinality-N: each `(attester, target, definition)` is its own edge —
+    ///         re-tagging the same triple does not supersede, it adds.
+    /// @param  eas        The EAS instance to attest against.
+    /// @param  schemas    The frozen schema UID set (only `tag` is used).
+    /// @param  target     The attestation UID being tagged (the edge's `refUID`).
+    /// @param  definition The tag predicate/category (validated by the resolver; must be nonzero).
+    /// @param  weight     The signed tag weight (e.g. ordering / score; may be 0 or negative).
+    /// @return tagUID     The created TAG edge UID.
+    function tag(
+        IEAS eas,
+        SchemaUIDs memory schemas,
+        bytes32 target,
+        bytes32 definition,
+        int256 weight
+    ) internal returns (bytes32 tagUID) {
+        tagUID = eas.attest(
+            AttestationRequest({
+                schema: schemas.tag,
+                data: AttestationRequestData({
+                    recipient: ZERO_RECIPIENT,
+                    expirationTime: NO_EXPIRATION,
+                    revocable: true, // EdgeResolver — TAG must be revocable
+                    refUID: target, // edge target via native refUID (_resolveTargetID)
+                    data: abi.encode(definition, weight), // (definition, weight) — 64 bytes exact
+                    value: NO_VALUE
+                })
+            })
+        );
+    }
+
+    /// @notice Set an arbitrary key/value **PROPERTY** triple on a DATA — generalizing the reserved-
+    ///         key triplet {writeFile} writes internally (contentType/contentHash/size) to any key.
+    /// @dev    The triple is: a key-ANCHOR(name = `keyName`, refUID = `dataUID`) that names the slot
+    ///         under the DATA + a free-floating PROPERTY(value) (refUID 0, non-revocable) + a binding
+    ///         PIN(definition = key-ANCHOR, refUID = PROPERTY) that links them, exactly as EFSLib
+    ///         L176-L200 does for reserved keys. The binding PIN is cardinality-1, so re-setting the
+    ///         same `(dataUID, keyName)` for the same attester supersedes the prior value in O(1)
+    ///         (the read side, {EFSReader.propertyValue}, returns the lens's active binding).
+    ///
+    ///         Pass the existing key-ANCHOR UID via {setProperty}'s 6-arg overload to avoid re-minting
+    ///         it; this 5-arg form always mints the key-ANCHOR (create-or-set without a prior read).
+    /// @param  eas      The EAS instance to attest against.
+    /// @param  schemas  The frozen schema UID set (`anchor`, `property`, `pin` are used).
+    /// @param  dataUID  The DATA the property is bound under (the key-ANCHOR's `refUID`).
+    /// @param  keyName  The property key (the key-ANCHOR's `name`; verbatim).
+    /// @param  value    The stringified property value (interned in the PROPERTY).
+    /// @return keyAnchorUID The created key-ANCHOR UID (the binding PIN's `definition`).
+    /// @return propertyUID  The created PROPERTY UID (the interned value).
+    /// @return bindingPinUID The created binding-PIN UID (what makes the value the active one).
+    function setProperty(
+        IEAS eas,
+        SchemaUIDs memory schemas,
+        bytes32 dataUID,
+        string memory keyName,
+        string memory value
+    ) internal returns (bytes32 keyAnchorUID, bytes32 propertyUID, bytes32 bindingPinUID) {
+        // L2 key-ANCHOR: name = key, refUID = DATA, generic forSchema — binds the slot to the DATA.
+        keyAnchorUID = _attestAnchor(eas, schemas.anchor, keyName, EMPTY_UID, dataUID);
+        (propertyUID, bindingPinUID) = _bindProperty(eas, schemas, keyAnchorUID, value);
+    }
+
+    /// @notice {setProperty} against an already-minted key-ANCHOR — set/replace the value at a known
+    ///         slot without re-minting the key-ANCHOR.
+    /// @dev    Mints only the PROPERTY + binding PIN (the cardinality-1 supersede). Use after a
+    ///         {EFSReader.resolveAnchor}/{anchorAt} that produced the key-ANCHOR, e.g. to update a
+    ///         value you previously set.
+    /// @param  keyAnchorUID The pre-existing key-ANCHOR UID (slot under the DATA).
+    /// @return propertyUID  The created PROPERTY UID.
+    /// @return bindingPinUID The created binding-PIN UID.
+    function setPropertyAt(
+        IEAS eas,
+        SchemaUIDs memory schemas,
+        bytes32 keyAnchorUID,
+        string memory value
+    ) internal returns (bytes32 propertyUID, bytes32 bindingPinUID) {
+        (propertyUID, bindingPinUID) = _bindProperty(eas, schemas, keyAnchorUID, value);
+    }
+
+    /// @notice A placement **PIN** (cardinality-1): bind `dataUID` at `anchor` under the caller — the
+    ///         hardlink / move primitive. Makes the DATA appear at the path the anchor names.
+    /// @dev    EdgeResolver PIN: schema = `bytes32 definition`; `data = abi.encode(definition)` where
+    ///         `definition` is the *anchor* (the path node); `refUID` is the *target* DATA. revocable
+    ///         =true, expirationTime 0. Cardinality-1: re-placing at the same `(attester, anchor, DATA
+    ///         schema)` slot supersedes the caller's prior placement in O(1) — that is "move". This is
+    ///         the standalone placement {writeFile}/{placeExisting} compose internally, exposed for a
+    ///         caller that already has both the anchor and the DATA UID (e.g. relinking an existing
+    ///         file, or re-pointing a path at different content).
+    /// @param  eas     The EAS instance to attest against.
+    /// @param  schemas The frozen schema UID set (only `pin` is used).
+    /// @param  anchor  The path anchor UID the placement names (the PIN's `definition`).
+    /// @param  dataUID The DATA UID being placed (the PIN's `refUID` / edge target).
+    /// @return pinUID  The created placement-PIN UID.
+    function place(IEAS eas, SchemaUIDs memory schemas, bytes32 anchor, bytes32 dataUID)
+        internal
+        returns (bytes32 pinUID)
+    {
+        pinUID = _attestPin(eas, schemas.pin, anchor, dataUID);
+    }
+
+    /// @notice Create a curated **LIST** (ADR-0044/0046/0047): a free-floating list object whose
+    ///         entries are added with {addEntry}.
+    /// @dev    ListResolver: schema = `bool allowsDuplicates, bool appendOnly, uint8 targetType,
+    ///         bytes32 targetSchema, uint256 maxEntries`; `data = abi.encode(allowsDuplicates,
+    ///         appendOnly, targetType, targetSchema, maxEntries)` (exactly 160 bytes). The LIST is
+    ///         **non-revocable**, **free-floating** (`refUID` 0), **undirected** (`recipient` 0), with
+    ///         `expirationTime 0` (all enforced by the resolver). `targetType`: 0 = ANY (opaque keys),
+    ///         1 = ADDR (address members), 2 = SCHEMA (attestations of `targetSchema`). For SCHEMA,
+    ///         `targetSchema` must be nonzero; for ANY/ADDR it must be zero. If both `appendOnly` and
+    ///         `allowsDuplicates`, `maxEntries` must be nonzero (resolver requires the cap). The
+    ///         curator is the attester (the caller) — there is no curator payload field.
+    /// @param  eas             The EAS instance to attest against.
+    /// @param  schemas         The frozen schema UID set (only `list` is used).
+    /// @param  allowsDuplicates Whether the same member may appear more than once.
+    /// @param  appendOnly      Whether entries may never be revoked.
+    /// @param  targetType      0 = ANY, 1 = ADDR, 2 = SCHEMA.
+    /// @param  targetSchema    For SCHEMA (2): the required entry schema (nonzero). Else `bytes32(0)`.
+    /// @param  maxEntries      Entry cap (0 = uncapped; required nonzero when appendOnly+duplicates).
+    /// @return listUID         The created LIST UID (pass to {addEntry}).
+    function createList(
+        IEAS eas,
+        SchemaUIDs memory schemas,
+        bool allowsDuplicates,
+        bool appendOnly,
+        uint8 targetType,
+        bytes32 targetSchema,
+        uint256 maxEntries
+    ) internal returns (bytes32 listUID) {
+        listUID = eas.attest(
+            AttestationRequest({
+                schema: schemas.list,
+                data: AttestationRequestData({
+                    recipient: ZERO_RECIPIENT, // ListResolver — must be undirected
+                    expirationTime: NO_EXPIRATION, // ListResolver — must not expire
+                    revocable: false, // ListResolver — LIST must be non-revocable
+                    refUID: EMPTY_UID, // ListResolver — LIST must be free-floating
+                    data: abi.encode(
+                        allowsDuplicates, appendOnly, targetType, targetSchema, maxEntries
+                    ),
+                    value: NO_VALUE
+                })
+            })
+        );
+    }
+
+    /// @notice Add an entry to a LIST — a **LIST_ENTRY** referencing the LIST by its payload `listUID`
+    ///         field (NOT by `refUID`), for the ANY (0) / SCHEMA (2) target modes.
+    /// @dev    ListEntryResolver: schema = `bytes32 listUID, bytes32 target`; `data =
+    ///         abi.encode(listUID, target)` (exactly 64 bytes). **`refUID` MUST be 0** — the LIST is
+    ///         referenced via the `listUID` payload field, and a nonzero `refUID` reverts
+    ///         (`UsesRefUID`). The entry is `revocable=true` with `expirationTime 0`. `target` is the
+    ///         member key: for ANY it is any nonzero opaque key; for SCHEMA it is the target
+    ///         attestation UID (which must exist and match the LIST's `targetSchema`). This wrapper
+    ///         keeps `recipient = 0`, so it does NOT cover the ADDR (1) mode, whose member address
+    ///         lives in `recipient` and whose `target` must be zero — use {addAddressEntry} for that.
+    /// @param  eas      The EAS instance to attest against.
+    /// @param  schemas  The frozen schema UID set (only `listEntry` is used).
+    /// @param  listUID  The LIST this entry joins (payload field; the resolver re-fetches it).
+    /// @param  target   The nonzero member key (ANY: opaque key; SCHEMA: target attestation UID).
+    /// @return entryUID The created LIST_ENTRY UID.
+    function addEntry(IEAS eas, SchemaUIDs memory schemas, bytes32 listUID, bytes32 target)
+        internal
+        returns (bytes32 entryUID)
+    {
+        entryUID = eas.attest(
+            AttestationRequest({
+                schema: schemas.listEntry,
+                data: AttestationRequestData({
+                    recipient: ZERO_RECIPIENT, // ANY/SCHEMA modes require recipient 0
+                    expirationTime: NO_EXPIRATION, // ListEntryResolver — must be 0
+                    revocable: true, // ListEntryResolver — must be revocable
+                    refUID: EMPTY_UID, // ListEntryResolver — refUID MUST be 0 (UsesRefUID)
+                    data: abi.encode(listUID, target), // (listUID, target) — 64 bytes exact
+                    value: NO_VALUE
+                })
+            })
+        );
+    }
+
+    /// @notice Add an **ADDR-mode** (targetType 1) LIST entry: the member is an address carried in
+    ///         the native EAS `recipient`, with the payload `target` field forced to zero.
+    /// @dev    The one EFS write whose `recipient` is intentionally nonzero — ADDR-mode LIST_ENTRY is
+    ///         the protocol's address-target form (ListEntryResolver `BadAddrMode` requires payload
+    ///         `target == 0`, and derives the identity key from `recipient`). Kept distinct from
+    ///         {addEntry} so the zero-recipient invariant of the rest of the lib stays explicit.
+    /// @param  member The address member (the entry's `recipient`; address(0) is a valid ADDR entry).
+    /// @return entryUID The created LIST_ENTRY UID.
+    function addAddressEntry(IEAS eas, SchemaUIDs memory schemas, bytes32 listUID, address member)
+        internal
+        returns (bytes32 entryUID)
+    {
+        entryUID = eas.attest(
+            AttestationRequest({
+                schema: schemas.listEntry,
+                data: AttestationRequestData({
+                    recipient: member, // ADDR mode — member address lives in recipient
+                    expirationTime: NO_EXPIRATION,
+                    revocable: true,
+                    refUID: EMPTY_UID, // refUID MUST be 0
+                    data: abi.encode(listUID, bytes32(0)), // ADDR mode — payload target MUST be 0
+                    value: NO_VALUE
+                })
+            })
+        );
     }
 
     // ── internal attest helpers (one per node shape) ─────────────────────────────────────────
@@ -279,5 +534,33 @@ library EFSLib {
                 })
             })
         );
+    }
+
+    /// @dev Mint the value half of a PROPERTY triple against an existing key-ANCHOR: a free-floating
+    ///      PROPERTY(value) (refUID 0, non-revocable — EFSIndexer PROPERTY branch) plus the binding
+    ///      PIN(definition = key-ANCHOR, refUID = PROPERTY) that makes it the active value. Shared by
+    ///      {writeFile}'s reserved-key loop and {setProperty}/{setPropertyAt}.
+    function _bindProperty(
+        IEAS eas,
+        SchemaUIDs memory schemas,
+        bytes32 keyAnchorUID,
+        string memory value
+    ) private returns (bytes32 propertyUID, bytes32 bindingPinUID) {
+        // L2 PROPERTY: the interned value. refUID≠0 and revocable are both rejected by the kernel.
+        propertyUID = eas.attest(
+            AttestationRequest({
+                schema: schemas.property,
+                data: AttestationRequestData({
+                    recipient: ZERO_RECIPIENT,
+                    expirationTime: NO_EXPIRATION,
+                    revocable: false, // EFSIndexer PROPERTY branch — rejects revocable
+                    refUID: EMPTY_UID, // EFSIndexer PROPERTY branch — refUID must be EMPTY_UID
+                    data: abi.encode(value),
+                    value: NO_VALUE
+                })
+            })
+        );
+        // L3 binding-PIN: definition = key-ANCHOR, refUID = PROPERTY (cardinality-1 supersede).
+        bindingPinUID = _attestPin(eas, schemas.pin, keyAnchorUID, propertyUID);
     }
 }

@@ -186,7 +186,10 @@ contract EFSWriterTest is Test {
         anchor: keccak256("ANCHOR_SCHEMA"),
         property: keccak256("PROPERTY_SCHEMA"),
         mirror: keccak256("MIRROR_SCHEMA"),
-        pin: keccak256("PIN_SCHEMA")
+        pin: keccak256("PIN_SCHEMA"),
+        tag: keccak256("TAG_SCHEMA"),
+        list: keccak256("LIST_SCHEMA"),
+        listEntry: keccak256("LIST_ENTRY_SCHEMA")
     });
 
     bytes32 constant PARENT = keccak256("PARENT_FOLDER_ANCHOR");
