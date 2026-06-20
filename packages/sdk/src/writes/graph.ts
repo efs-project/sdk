@@ -44,11 +44,19 @@
  * each references two fresh L2 siblings at once (an anchor as `definition`, a
  * DATA/PROPERTY as `refUID`).
  *
- * The visibility-TAG layer (L3, one per uncovered ancestor folder) is **not**
- * emitted here: it needs an on-chain "which ancestors are already covered" read,
- * which is a resolve-step concern, not part of the pure graph (the spec lists it
- * as `×M` ancestor-dependent). The placement PIN is what makes the file appear;
- * ancestor visibility TAGs are layered by the submitter after the resolve pass.
+ * The visibility-TAG layer (one per uncovered ancestor folder) is emitted in the
+ * LAST layer (after every folder ANCHOR and PIN), but **which** ancestors it covers
+ * is a resolve-step decision, not a pure-graph one: the "is this ancestor already
+ * tagged by the uploader" check is an on-chain read (`getActiveTagWeight`). So the
+ * caller (`writes/file.ts`) does the ancestor walk + short-circuit via
+ * `planExistingAncestorVisibilityTags` and passes the result in as
+ * {@link FileWriteGraphInput.existingAncestorTagUIDs}; the `createParents` chain
+ * ALWAYS needs a TAG (brand-new folders), so those are derived here from
+ * `missingParents`. Each TAG is `TAG(definition = DATA_SCHEMA_UID, refUID = folder,
+ * weight = 1)` — what makes the folder appear in the uploader's lens listing
+ * (overview.md "Upload flow" step 7; specs/02 §4a + §Schema-Hierarchy step 6;
+ * ADR-0038, ADR-0041). Root is never tagged (the walk is "up to root exclusive");
+ * the file's own leaf is a file, not a folder, so it carries no visibility TAG.
  *
  * ## `onAttest` constraints honored structurally
  *
@@ -120,7 +128,7 @@ export interface PlannedAttestation {
   /** The DAG layer (1 | 2 | 3) — the submit ordering unit. */
   readonly layer: WriteLayer
   /** Human label for the kind of node, for diagnostics/progress. */
-  readonly kind: 'DATA' | 'MIRROR' | 'PROPERTY' | 'ANCHOR' | 'PIN'
+  readonly kind: 'DATA' | 'MIRROR' | 'PROPERTY' | 'ANCHOR' | 'PIN' | 'TAG'
   /** The frozen schema UID to attest against. */
   readonly schema: Hex
   /** ABI-encoded attestation `data` (via {@link SchemaEncoder} + {@link EFS_SCHEMA_FIELDS}). */
@@ -190,6 +198,18 @@ export interface FileWriteGraphInput {
    * existing anchor = {@link parentAnchorUID}); the file-ANCHOR then refs the last.
    */
   readonly missingParents?: readonly string[]
+  /**
+   * Pre-EXISTING ancestor folder anchor UIDs (concrete) that the uploader has no
+   * active visibility TAG on yet, so each needs one emitted in this write. This is
+   * the output of the caller's ancestor walk + short-circuit
+   * (`planExistingAncestorVisibilityTags` in `reads/resolve.ts`) — the pure graph
+   * cannot do the on-chain "already tagged?" read, so the caller resolves it and
+   * passes the result. Each becomes a `TAG(definition = DATA_SCHEMA_UID, refUID =
+   * UID, weight = 1)`. The freshly-created `missingParents` folders ALWAYS need a
+   * TAG and are derived here directly — do NOT include them in this list. Empty/
+   * omitted ⇒ every existing ancestor is already covered (steady-state zero cost).
+   */
+  readonly existingAncestorTagUIDs?: readonly Hex[]
   /** The file's anchor name (canonical encoding; the file-ANCHOR's `name`). */
   readonly fileName: string
 }
@@ -214,6 +234,10 @@ export const REF = {
   bindingPin: (k: ReservedKey) => `pin:${k}`,
   /** The i-th created ancestor folder ANCHOR (`mkdir -p`), shallowest-first. */
   parentFolder: (i: number) => `parentFolder:${i}`,
+  /** Visibility TAG for a freshly-CREATED ancestor folder (refs `parentFolder:i`). */
+  createdFolderTag: (i: number) => `visTag:created:${i}`,
+  /** Visibility TAG for a pre-EXISTING ancestor folder (refs its concrete UID). */
+  existingFolderTag: (i: number) => `visTag:existing:${i}`,
 } as const
 
 // Encoders for the frozen field strings (constructed once; SchemaEncoder caches
@@ -223,6 +247,11 @@ const mirrorEncoder = new SchemaEncoder(EFS_SCHEMA_FIELDS.mirror)
 const propertyEncoder = new SchemaEncoder(EFS_SCHEMA_FIELDS.property)
 const anchorEncoder = new SchemaEncoder(EFS_SCHEMA_FIELDS.anchor)
 const pinEncoder = new SchemaEncoder(EFS_SCHEMA_FIELDS.pin)
+const tagEncoder = new SchemaEncoder(EFS_SCHEMA_FIELDS.tag)
+
+/** The folder-visibility TAG weight (ADR-0041 §4: weight is irrelevant to activity;
+ * weight defaults to 1 by convention). */
+const VISIBILITY_TAG_WEIGHT = 1n
 
 /**
  * The generic (root-typed) anchor schema sentinel used as `forSchema` for the
@@ -274,9 +303,18 @@ export function buildFileWriteGraph(input: FileWriteGraphInput): FileWriteGraph 
   if (input.content.kind === 'hardlink') {
     const fileAnchor = buildFileAnchor(input, m + 1)
     const placementPin = buildPlacementPin(schemas, input.content.dataUID, m + 2)
+    // Visibility TAGs still apply: placing an existing file at a new path must make
+    // the uploader's ancestor folders show in their lens. The hardlink graph's PINs
+    // live at m + 2 (no reserved-key triplets), so TAGs follow at m + 3.
+    const visibilityTags = buildVisibilityTags(input, m + 3)
     return {
       hardlink: true,
-      attestations: stableSortByLayer([...folderAttestations, fileAnchor, placementPin]),
+      attestations: stableSortByLayer([
+        ...folderAttestations,
+        fileAnchor,
+        placementPin,
+        ...visibilityTags,
+      ]),
     }
   }
 
@@ -364,6 +402,12 @@ export function buildFileWriteGraph(input: FileWriteGraphInput): FileWriteGraph 
 
   // ── placement-PIN (base L3) — definition = file-ANCHOR, refUID = DATA (fresh) ──
   attestations.push(buildPlacementPin(schemas, { ref: REF.DATA }, m + 3))
+
+  // ── visibility TAGs (base L4) — one per uncovered ancestor folder ────────────
+  // Emitted AFTER every folder ANCHOR + PIN so a `createParents`-minted folder is
+  // already on-chain when its TAG references it (the TAG's refUID is that fresh
+  // folder, symbolic). See `buildVisibilityTags` for the semantics.
+  attestations.push(...buildVisibilityTags(input, m + 4))
 
   // Emit grouped by dependency layer (created folders → DATA → L2 → PINs). The
   // triplets are built key-contiguously above (anchor/property/pin interleave a
@@ -479,6 +523,56 @@ function buildBindingPin(
     refUID: { ref: REF.property(key) }, // refUID = PROPERTY (the binding claim, spec L3 row 7)
     dataRefs: [{ field: 'definition', ref: definitionRef }],
   }
+}
+
+/**
+ * Build the folder-visibility TAGs (overview.md "Upload flow" step 7; specs/02 §4a
+ * "Folder visibility" + §Schema-Hierarchy step 6; ADR-0038, ADR-0041). One TAG per
+ * uncovered ancestor folder so the folder shows in the uploader's lens listing:
+ *
+ *   `TAG(definition = DATA_SCHEMA_UID, refUID = folderAnchor, weight = 1)`
+ *
+ * Two sources of uncovered folders, both placed in `layer` (after every folder
+ * ANCHOR + PIN, so a freshly-minted folder exists before its TAG references it):
+ *
+ *  - **Freshly-created** folders (`missingParents`): brand-new, so they ALWAYS need
+ *    a TAG. Each TAG's `refUID` is that folder's symbolic ref (`parentFolder:i`),
+ *    minted in an earlier layer and resolved by the submitter.
+ *  - **Pre-existing** ancestors the caller's walk found untagged
+ *    (`existingAncestorTagUIDs`): each TAG's `refUID` is the concrete folder UID.
+ *
+ * Root is excluded by construction (the caller's walk drops it and never lists it
+ * in `missingParents`); the file's own leaf is a file ANCHOR, never tagged here.
+ *
+ * Encoding: `data = (definition = DATA_SCHEMA_UID, weight = 1)`. TAG `onAttest`
+ * requires revocable=true + expirationTime 0 (EdgeResolver.sol); `refUID` is the
+ * tagged target (the folder anchor), `definition` rides in `data`. `targetSchema`
+ * (the ANCHOR schema) is implied on-chain by the target attestation's own schema —
+ * not a field the SDK encodes.
+ */
+function buildVisibilityTags(input: FileWriteGraphInput, layer: number): PlannedAttestation[] {
+  const { schemas } = input
+  const definition = schemas.data // folder-visibility TAG definition = DATA schema UID
+  const tagData = tagEncoder.encodeData([definition, VISIBILITY_TAG_WEIGHT])
+
+  const tag = (ref: string, refUID: RefOrUID): PlannedAttestation => ({
+    ref,
+    layer,
+    kind: 'TAG',
+    schema: schemas.tag,
+    data: tagData,
+    revocable: true, // EdgeResolver.sol — TAG must be revocable
+    refUID, // the tagged folder anchor (fresh → symbolic, existing → concrete)
+    dataRefs: [],
+  })
+
+  const created = (input.missingParents ?? []).map((_segment, i) =>
+    tag(REF.createdFolderTag(i), { ref: REF.parentFolder(i) }),
+  )
+  const existing = (input.existingAncestorTagUIDs ?? []).map((uid, i) =>
+    tag(REF.existingFolderTag(i), uid),
+  )
+  return [...created, ...existing]
 }
 
 /**

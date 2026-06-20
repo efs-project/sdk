@@ -338,8 +338,19 @@ describe('mkdir -p — missing ancestor folders folded into the write', () => {
       expect(find(atts, REF.PLACEMENT_PIN).layer).toBe(m + 3)
     })
 
-    it('emits the base 13-node graph PLUS the 2 created folders', () => {
-      expect(atts).toHaveLength(15)
+    it('emits the base 13-node graph PLUS the 2 created folders + their 2 visibility TAGs', () => {
+      // 13 base + 2 created-folder ANCHORs + 2 created-folder visibility TAGs = 17.
+      expect(atts).toHaveLength(17)
+      // Both created folders get a TAG (brand-new folders always need one); each
+      // targets its symbolic folder ref and is placed in the last layer.
+      const tags = atts.filter((a) => a.kind === 'TAG')
+      expect(tags).toHaveLength(2)
+      expect(tags.map((t) => t.refUID)).toEqual([
+        { ref: REF.parentFolder(0) },
+        { ref: REF.parentFolder(1) },
+      ])
+      const maxLayer = Math.max(...atts.map((a) => a.layer))
+      expect(tags.every((t) => t.layer === maxLayer)).toBe(true)
     })
 
     it('orders attestations by non-decreasing layer and only refs strictly-earlier layers', () => {
@@ -385,8 +396,14 @@ describe('mkdir -p — missing ancestor folders folded into the write', () => {
       expect(find(atts, REF.DATA).layer).toBe(2) // m+1
     })
 
-    it('emits the base 13-node graph PLUS the 1 created folder', () => {
-      expect(atts).toHaveLength(14)
+    it('emits the base 13-node graph PLUS the 1 created folder + its visibility TAG', () => {
+      // 13 base + 1 created-folder ANCHOR + 1 created-folder visibility TAG = 15.
+      // (The existing /photos ancestor is NOT auto-tagged by the pure builder — the
+      // caller passes those in via `existingAncestorTagUIDs`; none here.)
+      expect(atts).toHaveLength(15)
+      const tags = atts.filter((a) => a.kind === 'TAG')
+      expect(tags).toHaveLength(1)
+      expect(tags[0]!.refUID).toEqual({ ref: REF.parentFolder(0) })
     })
   })
 
@@ -415,17 +432,30 @@ describe('mkdir -p — missing ancestor folders folded into the write', () => {
     })
     const atts = graph.attestations
 
-    it('still creates the folder chain before the file-ANCHOR + placement PIN', () => {
+    it('still creates the folder chain before the file-ANCHOR + placement PIN, then tags the folders', () => {
       expect(graph.hardlink).toBe(true)
+      // Hardlinking into a new subtree still tags the created folders (so the file
+      // shows in the uploader's lens) — the two created-folder visibility TAGs follow
+      // the placement PIN, in the last layer.
       expect(atts.map((a) => a.ref)).toEqual([
         REF.parentFolder(0),
         REF.parentFolder(1),
         REF.FILE_ANCHOR,
         REF.PLACEMENT_PIN,
+        REF.createdFolderTag(0),
+        REF.createdFolderTag(1),
       ])
       // file-ANCHOR refs the last created folder; PIN refs the existing DATA.
       expect(find(atts, REF.FILE_ANCHOR).refUID).toEqual({ ref: REF.parentFolder(1) })
       expect(find(atts, REF.PLACEMENT_PIN).refUID).toBe(EXISTING_DATA)
+      const tags = atts.filter((a) => a.kind === 'TAG')
+      expect(tags.map((t) => t.refUID)).toEqual([
+        { ref: REF.parentFolder(0) },
+        { ref: REF.parentFolder(1) },
+      ])
+      // TAGs are in the last layer (after the placement PIN).
+      const maxLayer = Math.max(...atts.map((a) => a.layer))
+      expect(tags.every((t) => t.layer === maxLayer)).toBe(true)
     })
   })
 })
@@ -453,5 +483,69 @@ describe('hardlink short-circuit', () => {
     // definition still points at the fresh file-ANCHOR.
     expect(pin.dataRefs).toEqual([{ field: 'definition', ref: { ref: REF.FILE_ANCHOR } }])
     expect(pin.revocable).toBe(true)
+  })
+})
+
+describe('folder-visibility TAGs (overview.md step 7; specs/02 §4a; ADR-0038/0041)', () => {
+  const tagEnc = new SchemaEncoder(EFS_SCHEMA_FIELDS.tag)
+  const EX1 = uid(0xe10)
+  const EX2 = uid(0xe20)
+
+  it('emits a correctly-encoded TAG per existing-ancestor UID (definition=DATA, weight=1, revocable)', () => {
+    const graph = buildFileWriteGraph({ ...bytesInput, existingAncestorTagUIDs: [EX1, EX2] })
+    const tags = graph.attestations.filter((a) => a.kind === 'TAG')
+    expect(tags).toHaveLength(2)
+    for (const t of tags) {
+      expect(t.schema).toBe(SCHEMAS.tag)
+      expect(t.revocable).toBe(true) // EdgeResolver: TAG must be revocable
+      const [definition, weight] = tagEnc.decodeData(t.data) as [Hex, bigint]
+      expect(definition).toBe(SCHEMAS.data) // folder-visibility definition = DATA schema UID
+      expect(weight).toBe(1n) // weight defaults to 1 by convention (ADR-0041 §4)
+    }
+    // The TAG refUIDs are the concrete existing-ancestor UIDs (not symbolic).
+    expect(tags.map((t) => t.refUID).sort()).toEqual([EX1, EX2].sort())
+    expect(tags.every((t) => !isSymbolicRef(t.refUID))).toBe(true)
+  })
+
+  it('places TAGs in the LAST layer (after the placement PIN), and only refs earlier layers', () => {
+    const graph = buildFileWriteGraph({ ...bytesInput, existingAncestorTagUIDs: [EX1] })
+    const atts = graph.attestations
+    const tag = atts.find((a) => a.kind === 'TAG')!
+    const pinLayer = find(atts, REF.PLACEMENT_PIN).layer
+    expect(tag.layer).toBeGreaterThan(pinLayer)
+    expect(tag.layer).toBe(Math.max(...atts.map((a) => a.layer)))
+  })
+
+  it('combines created-folder TAGs (symbolic) with existing-ancestor TAGs (concrete)', () => {
+    const graph = buildFileWriteGraph({
+      ...bytesInput,
+      path: '/a/new/file.txt',
+      fileName: 'file.txt',
+      parentAnchorUID: uid(0xaaa), // deepest existing = /a
+      missingParents: ['new'], // /a/new is created in this write
+      existingAncestorTagUIDs: [uid(0xaaa)], // /a exists + untagged
+    })
+    const tags = graph.attestations.filter((a) => a.kind === 'TAG')
+    expect(tags).toHaveLength(2)
+    // Created folder → symbolic ref; existing ancestor → concrete UID.
+    expect(tags.some((t) => isSymbolicRef(t.refUID) && t.refUID.ref === REF.parentFolder(0))).toBe(
+      true,
+    )
+    expect(tags.some((t) => t.refUID === uid(0xaaa))).toBe(true)
+  })
+
+  it('no missingParents + no existingAncestorTagUIDs → zero TAGs (steady-state)', () => {
+    const graph = buildFileWriteGraph(bytesInput)
+    expect(graph.attestations.some((a) => a.kind === 'TAG')).toBe(false)
+  })
+
+  it('never tags the file anchor or any non-folder node', () => {
+    const graph = buildFileWriteGraph({ ...bytesInput, existingAncestorTagUIDs: [EX1] })
+    const tags = graph.attestations.filter((a) => a.kind === 'TAG')
+    // No TAG targets the fresh file-ANCHOR (symbolically or concretely) — only
+    // folders are tagged. The only TAG target here is the supplied existing ancestor.
+    const targets = tags.map((t) => (isSymbolicRef(t.refUID) ? t.refUID.ref : t.refUID))
+    expect(targets).not.toContain(REF.FILE_ANCHOR)
+    expect(targets).toEqual([EX1])
   })
 })

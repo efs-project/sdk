@@ -465,10 +465,13 @@ export {
   resolvePathToAnchor,
   resolveParentAnchor,
   resolveOrPlanParents,
+  planExistingAncestorVisibilityTags,
   splitPath,
   ParentNotFoundError,
   type ParentPlan,
   type ResolvePublicClient,
+  type TagReadPublicClient,
+  type VisibilityTagPlanInput,
 } from './reads/resolve.js'
 // Lens-scoped read engine (resolve/stat/cat/fetch/list internals + context).
 export {

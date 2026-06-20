@@ -37,6 +37,7 @@
  */
 
 import type { Address, Hex } from 'viem'
+import { edgeResolverAbi } from '../chain/abi/edgeResolver.js'
 import { indexerAbi } from '../chain/abi/indexer.js'
 import { EfsError } from '../errors.js'
 
@@ -169,6 +170,14 @@ export type ParentPlan =
       readonly fileName: string
       /** No folders to create. */
       readonly missingSegments: readonly []
+      /**
+       * The EXISTING ancestor folder anchor UIDs the walk resolved, ordered
+       * SHALLOWEST-first and **excluding the root anchor** (root is never tagged —
+       * the visibility walk is "up to root exclusive", overview.md step 7). For a
+       * fully-resolved path this is every parent segment's anchor; the visibility-TAG
+       * planner walks it bottom-up. Empty when the file lives directly under root.
+       */
+      readonly existingAncestorUIDs: readonly Hex[]
     }
   | {
       /** The deepest ancestor that DOES exist — the chain of created folders extends
@@ -177,6 +186,14 @@ export type ParentPlan =
       readonly fileName: string
       /** The ordered (shallowest-first) folder segments that must be created. */
       readonly missingSegments: readonly string[]
+      /**
+       * The EXISTING ancestor folder anchor UIDs resolved before the walk hit the
+       * gap, ordered SHALLOWEST-first and **excluding the root anchor**. These are
+       * the already-on-chain ancestors whose visibility TAGs the planner must check
+       * (the newly-created `missingSegments` always need a TAG). Empty when the gap
+       * starts at the first parent segment (the created chain hangs off root).
+       */
+      readonly existingAncestorUIDs: readonly Hex[]
     }
 
 /**
@@ -211,6 +228,10 @@ export async function resolveOrPlanParents(
   })) as Hex
 
   let parent = root
+  // The EXISTING ancestor anchor UIDs the walk resolves (shallowest-first). The root
+  // anchor is deliberately NOT seeded here — the visibility walk is "up to root
+  // exclusive" (overview.md step 7), so root never gets a TAG.
+  const existingAncestorUIDs: Hex[] = []
   for (let i = 0; i < parentSegments.length; i++) {
     const segment = parentSegments[i] as string
     const child = (await publicClient.readContract({
@@ -226,12 +247,14 @@ export async function resolveOrPlanParents(
         deepestExistingAnchorUID: parent,
         fileName,
         missingSegments: parentSegments.slice(i),
+        existingAncestorUIDs,
       }
     }
+    existingAncestorUIDs.push(child)
     parent = child
   }
 
-  return { parentAnchorUID: parent, fileName, missingSegments: [] }
+  return { parentAnchorUID: parent, fileName, missingSegments: [], existingAncestorUIDs }
 }
 
 /**
@@ -260,4 +283,97 @@ export async function resolveParentAnchor(
   const parentPath = parentSegments.join('/')
   const parentAnchorUID = await resolvePathToAnchor(publicClient, indexerAddr, parentPath)
   return { parentAnchorUID, fileName }
+}
+
+/**
+ * The minimal viem public surface the visibility-TAG walk needs: a typed
+ * `readContract` for `EdgeResolver.getActiveTagWeight`. Kept separate from
+ * {@link ResolvePublicClient} (which is indexer-typed) so each read stays
+ * trivially mockable. A viem `PublicClient` structurally satisfies both.
+ */
+export interface TagReadPublicClient {
+  readContract(args: {
+    address: Address
+    abi: typeof edgeResolverAbi
+    functionName: 'getActiveTagWeight'
+    args: readonly unknown[]
+  }): Promise<unknown>
+}
+
+/** Inputs the visibility-TAG planner needs beyond the ancestor list. */
+export interface VisibilityTagPlanInput {
+  /** The `EdgeResolver` address (active-TAG reads). */
+  readonly edgeResolver: Address
+  /** The uploader = attester whose lens listing must show these folders. */
+  readonly attester: Address
+  /** The DATA schema UID — the folder-visibility TAG's `definition` (ADR-0038). */
+  readonly dataSchemaUID: Hex
+  /** The ANCHOR schema UID — the `targetSchema` of a TAG whose target is a folder
+   * anchor (`_activeByAAS[definition][attester][targetSchema]`). */
+  readonly anchorSchemaUID: Hex
+}
+
+/**
+ * Plan which EXISTING ancestor folders need a folder-visibility TAG from the
+ * uploader (overview.md "Upload flow" step 7; specs/02 §4a + §Schema-Hierarchy
+ * step 6; ADR-0038, ADR-0041).
+ *
+ * The semantics: a folder only appears in an attester's lens listing if that
+ * attester has an active `TAG(definition = DATA_SCHEMA_UID, refUID = folderAnchor)`
+ * under it. On a write, every generic ancestor folder from the file's immediate
+ * parent up to **root exclusive** must carry such a TAG. Newly-created folders
+ * (the `createParents` chain) ALWAYS need one (handled by the graph builder); this
+ * function covers only the **already-existing** ancestors.
+ *
+ * Walk + short-circuit: `existingAncestorUIDs` is shallowest-first (root already
+ * excluded). We read `getActiveTagWeight(attester, ancestor, DATA_SCHEMA_UID,
+ * ANCHOR_SCHEMA_UID)` and emit a TAG only for ancestors with no active TAG yet.
+ * Because a TAG is always emitted walking UP to root, an ancestor that is already
+ * tagged guarantees every ancestor ABOVE it is too — so the walk goes BOTTOM-UP
+ * (deepest existing parent first) and STOPS at the first already-tagged ancestor
+ * ("steady-state zero cost", overview.md step 7). Everything below the stop point
+ * that was untagged gets a TAG.
+ *
+ * The existence checks are fanned with `Promise.all` (independent reads), then the
+ * short-circuit is applied to the resolved bottom-up sequence — we read upward,
+ * then cut at the first tagged ancestor. Weight is irrelevant to activity (ADR-0041
+ * §4): any unrevoked TAG counts as covered.
+ *
+ * @returns The existing-ancestor anchor UIDs that need a NEW visibility TAG, in no
+ *   particular order (each is an independent TAG; order does not matter to the DAG).
+ */
+export async function planExistingAncestorVisibilityTags(
+  publicClient: TagReadPublicClient,
+  existingAncestorUIDs: readonly Hex[],
+  input: VisibilityTagPlanInput,
+): Promise<Hex[]> {
+  if (existingAncestorUIDs.length === 0) return []
+
+  // Bottom-up: deepest existing ancestor (immediate parent) first, root-ward last.
+  const bottomUp = [...existingAncestorUIDs].reverse()
+
+  // Fan the independent active-TAG existence reads. We read them all, then apply the
+  // short-circuit on the resolved sequence (read upward, then cut) — cheaper in round
+  // trips than a serial walk, and the cut still honors "stop at the first tagged".
+  const exists = await Promise.all(
+    bottomUp.map(async (ancestor) => {
+      const [hasTag] = (await publicClient.readContract({
+        address: input.edgeResolver,
+        abi: edgeResolverAbi,
+        functionName: 'getActiveTagWeight',
+        // (attester, target, definition, targetSchema) — see edgeResolver ABI note.
+        args: [input.attester, ancestor, input.dataSchemaUID, input.anchorSchemaUID],
+      })) as readonly [boolean, bigint]
+      return hasTag
+    }),
+  )
+
+  const needTags: Hex[] = []
+  for (let i = 0; i < bottomUp.length; i++) {
+    // Steady-state short-circuit: the first already-tagged ancestor means every
+    // ancestor above it is tagged too — stop the walk.
+    if (exists[i]) break
+    needTags.push(bottomUp[i] as Hex)
+  }
+  return needTags
 }

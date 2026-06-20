@@ -16,6 +16,8 @@ import { describe, expect, it } from 'vitest'
 import {
   ParentNotFoundError,
   type ResolvePublicClient,
+  type TagReadPublicClient,
+  planExistingAncestorVisibilityTags,
   resolveOrPlanParents,
   resolveParentAnchor,
   resolvePathToAnchor,
@@ -174,5 +176,99 @@ describe('resolveOrPlanParents (mkdir -p planning)', () => {
   it('throws InvalidArgument when there is no file-name segment', async () => {
     const { client } = makeResolver({})
     await expect(resolveOrPlanParents(client, INDEXER, '/')).rejects.toThrow(/no file-name segment/)
+  })
+
+  it('captures the existing-ancestor anchor chain (shallowest-first, root excluded)', async () => {
+    const photos = uid(0x20)
+    const y2026 = uid(0x21)
+    const { client } = makeResolver({
+      [`${ROOT}|photos`]: photos,
+      [`${photos}|2026`]: y2026,
+    })
+    const plan = await resolveOrPlanParents(client, INDEXER, '/photos/2026/trip.jpg')
+    // Both parent anchors are captured; ROOT is NOT in the list.
+    expect(plan.existingAncestorUIDs).toEqual([photos, y2026])
+    expect(plan.existingAncestorUIDs).not.toContain(ROOT)
+  })
+
+  it('captures only the existing prefix when a suffix is missing', async () => {
+    const photos = uid(0x20)
+    const { client } = makeResolver({ [`${ROOT}|photos`]: photos }) // 2026 missing
+    const plan = await resolveOrPlanParents(client, INDEXER, '/photos/2026/trip.jpg')
+    // Only /photos resolved before the gap; the created /2026 is NOT here.
+    expect(plan.existingAncestorUIDs).toEqual([photos])
+  })
+
+  it('a file directly under root has no existing ancestors', async () => {
+    const { client } = makeResolver({})
+    const plan = await resolveOrPlanParents(client, INDEXER, '/readme.md')
+    expect(plan.existingAncestorUIDs).toEqual([])
+  })
+})
+
+describe('planExistingAncestorVisibilityTags (ancestor walk + short-circuit)', () => {
+  const EDGE = '0x00000000000000000000000000000000000000Ed' as Address
+  const ATTESTER = '0x000000000000000000000000000000000000A77e' as Address
+  const DATA_SCHEMA = uid(0xda7a)
+  const ANCHOR_SCHEMA = uid(0xa9c0)
+
+  /**
+   * Stub the `getActiveTagWeight` read off a set of already-tagged anchor UIDs.
+   * Records every queried target so we can assert the short-circuit stops early.
+   */
+  function makeTagReader(tagged: readonly Hex[]): {
+    client: TagReadPublicClient
+    queried: Hex[]
+  } {
+    const set = new Set<string>(tagged)
+    const queried: Hex[] = []
+    const client: TagReadPublicClient = {
+      async readContract(args) {
+        const [attester, target, definition, targetSchema] = args.args as [Address, Hex, Hex, Hex]
+        expect(attester).toBe(ATTESTER)
+        expect(definition).toBe(DATA_SCHEMA)
+        expect(targetSchema).toBe(ANCHOR_SCHEMA)
+        queried.push(target)
+        return [set.has(target), set.has(target) ? 1n : 0n]
+      },
+    }
+    return { client, queried }
+  }
+
+  const A = uid(0xa1)
+  const B = uid(0xb2)
+  const C = uid(0xc3)
+  const input = {
+    edgeResolver: EDGE,
+    attester: ATTESTER,
+    dataSchemaUID: DATA_SCHEMA,
+    anchorSchemaUID: ANCHOR_SCHEMA,
+  }
+
+  it('returns [] for an empty ancestor list (no reads)', async () => {
+    const { client, queried } = makeTagReader([])
+    const out = await planExistingAncestorVisibilityTags(client, [], input)
+    expect(out).toEqual([])
+    expect(queried).toHaveLength(0)
+  })
+
+  it('none tagged: emits a TAG for every ancestor', async () => {
+    const { client } = makeTagReader([])
+    // Input is shallowest-first [A, B, C]; output is the untagged set (order-agnostic).
+    const out = await planExistingAncestorVisibilityTags(client, [A, B, C], input)
+    expect(out.sort()).toEqual([A, B, C].sort())
+  })
+
+  it('immediate parent (deepest) already tagged: short-circuits to zero TAGs', async () => {
+    const { client } = makeTagReader([C]) // C = the deepest existing parent
+    const out = await planExistingAncestorVisibilityTags(client, [A, B, C], input)
+    expect(out).toEqual([])
+  })
+
+  it('immediate parent untagged but its parent IS tagged: exactly one TAG (the untagged parent)', async () => {
+    const { client } = makeTagReader([B]) // B tagged, C not
+    const out = await planExistingAncestorVisibilityTags(client, [A, B, C], input)
+    // Bottom-up: C untagged → tag it; B tagged → stop (A above is left alone).
+    expect(out).toEqual([C])
   })
 })

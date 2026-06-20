@@ -134,9 +134,14 @@ function makeCtx(
     edges?: Record<string, Hex>
     transports?: Record<string, Hex>
     onchainAutoLimit?: number
+    /** Anchor UIDs the uploader already has an active visibility TAG on. The mock's
+     * `getActiveTagWeight` returns `[true, 1n]` for these, `[false, 0n]` otherwise —
+     * the short-circuit input for the ancestor-walk. */
+    taggedAncestors?: readonly Hex[]
   } = {},
 ): { ctx: FileWriteContext; sent: SentLayer[]; deploys: SentDeploy[] } {
   const edges = opts.edges ?? { [`${ROOT}|docs`]: DOCS_ANCHOR }
+  const tagged = new Set<string>(opts.taggedAncestors ?? [])
   const sent: SentLayer[] = []
   const deploys: SentDeploy[] = []
   let globalIndex = 0
@@ -152,6 +157,12 @@ function makeCtx(
       if (args.functionName === 'resolvePath') {
         const [parent, name] = args.args as [Hex, string]
         return edges[`${parent}|${name}`] ?? ZERO_UID
+      }
+      if (args.functionName === 'getActiveTagWeight') {
+        // (attester, target, definition, targetSchema) — the active visibility-TAG
+        // check. `target` is the folder anchor being walked.
+        const [, target] = args.args as [Address, Hex, Hex, Hex]
+        return tagged.has(target) ? [true, 1n] : [false, 0n]
       }
       throw new Error(`unexpected readContract ${args.functionName}`)
     },
@@ -237,20 +248,35 @@ describe('writeFileTier1 — full Tier-1 path with on-chain (web3://) default st
       contentType: 'text/markdown',
     })
 
-    // 3 DAG layers submitted (DATA / L2 / PINs). 13 attestations total for a full
-    // fresh file with all 3 reserved-key triplets.
-    expect(sent).toHaveLength(3)
+    // 4 DAG layers submitted (DATA / L2 / PINs / visibility TAGs). 14 attestations
+    // total: the full 13-node fresh-file graph + 1 visibility TAG for the existing
+    // `/docs` ancestor (untagged here), emitted last.
+    expect(sent).toHaveLength(4)
     const total = sent.reduce((n, s) => n + s.entries.length, 0)
-    expect(total).toBe(13)
+    expect(total).toBe(14)
+
+    // The last layer is exactly the one visibility TAG, targeting the /docs anchor.
+    const tagLayer = sent[3]
+    expect(tagLayer.entries).toHaveLength(1)
+    expect(tagLayer.entries[0].schema).toBe(SCHEMAS.tag)
+    expect(tagLayer.entries[0].refUID).toBe(DOCS_ANCHOR)
+    expect(tagLayer.entries[0].revocable).toBe(true)
+    // TAG data = (definition = DATA schema UID, weight = 1).
+    const { SchemaEncoder: TagEnc } = await import('../src/eas/schema-encoder.js')
+    const { EFS_SCHEMA_FIELDS: TagFields } = await import('../src/eas/schemas.js')
+    const tagEnc = new TagEnc(TagFields.tag)
+    const [tagDef, tagWeight] = tagEnc.decodeData(tagLayer.entries[0].data) as [Hex, bigint]
+    expect(tagDef).toBe(SCHEMAS.data)
+    expect(tagWeight).toBe(1n)
 
     // Receipt: contentHash is the bare SHA-256 of the bytes (ADR-0006).
     expect(receipt.contentHash).toBe(hashContent(CONTENT))
     expect(receipt.mechanism).toBe('sequential')
     expect(receipt.status).toBe('confirmed')
     // One signature per layer.
-    expect(receipt.signatureCount).toBe(3)
-    // Every minted attestation is recorded as a done step (13 refs).
-    expect(receipt.steps).toHaveLength(13)
+    expect(receipt.signatureCount).toBe(4)
+    // Every minted attestation is recorded as a done step (14 refs).
+    expect(receipt.steps).toHaveLength(14)
     expect(receipt.steps.every((s) => s.done)).toBe(true)
 
     // The DATA ref points at the file's content-identity UID, resolved by the
@@ -379,9 +405,18 @@ describe('writeFileTier1 — createParents (mkdir -p)', () => {
       contentType: 'image/jpeg',
     })
 
-    // Layers: photos(1) → 2026(2) → DATA(3) → L2(4) → PINs(5) = 5 signatures.
-    expect(sent).toHaveLength(5)
-    expect(receipt.signatureCount).toBe(5)
+    // Layers: photos(1) → 2026(2) → DATA(3) → L2(4) → PINs(5) → visTAGs(6) = 6
+    // signatures. Both created folders (photos, 2026) get a visibility TAG (last
+    // layer); root is never tagged.
+    expect(sent).toHaveLength(6)
+    expect(receipt.signatureCount).toBe(6)
+
+    // The final layer is the two created-folder visibility TAGs, each targeting a
+    // freshly-minted folder anchor (photos → uid(0xd000), 2026 → uid(0xd001)).
+    const visTags = sent[5]
+    expect(visTags.entries).toHaveLength(2)
+    expect(visTags.entries.every((e) => e.schema === SCHEMAS.tag)).toBe(true)
+    expect(visTags.entries.map((e) => e.refUID).sort()).toEqual([uid(0xd000), uid(0xd001)].sort())
 
     const anchors = await anchorEntries(sent)
     const photos = anchors.find((a) => a.name === 'photos')!
@@ -442,8 +477,13 @@ describe('writeFileTier1 — createParents (mkdir -p)', () => {
     // It hangs off the EXISTING /photos anchor (concrete), not a fresh one.
     expect(y2026.refUID).toBe(PHOTOS_ANCHOR)
 
-    // One created folder → 4 layers (folder, DATA, L2, PINs).
-    expect(sent).toHaveLength(4)
+    // One created folder → 5 layers (folder, DATA, L2, PINs, visTAGs). The TAG layer
+    // covers BOTH the created `2026` folder and the existing (untagged) `/photos`.
+    expect(sent).toHaveLength(5)
+    const visTags = sent[4]
+    // 2 TAGs: created `2026` (fresh anchor uid(0xd000)) + existing `/photos` (concrete).
+    expect(visTags.entries).toHaveLength(2)
+    expect(visTags.entries.map((e) => e.refUID).sort()).toEqual([uid(0xd000), PHOTOS_ANCHOR].sort())
 
     const file = anchors.find((a) => a.name === 'trip.jpg')!
     // file refs the mined 2026 UID (first minted, uid(0xd000)).
@@ -456,12 +496,66 @@ describe('writeFileTier1 — createParents (mkdir -p)', () => {
     const { ctx, sent } = makeCtx()
     await writeFileTier1('/docs/readme.md', CONTENT, ctx, { createParents: true })
 
-    expect(sent).toHaveLength(3) // base DATA / L2 / PINs — no folder layer prepended
+    // base DATA / L2 / PINs + the visibility-TAG layer for the existing /docs.
+    expect(sent).toHaveLength(4)
     const anchors = await anchorEntries(sent)
     // No 'docs' anchor is re-created; the file-ANCHOR refs the existing /docs anchor.
     expect(anchors.some((a) => a.name === 'docs')).toBe(false)
     const file = anchors.find((a) => a.name === 'readme.md')!
     expect(file.refUID).toBe(DOCS_ANCHOR)
+  })
+})
+
+describe('writeFileTier1 — folder-visibility TAGs (overview.md step 7, ADR-0038/0041)', () => {
+  // A three-deep existing tree /a/b/c; the file lands at /a/b/c/file.txt. The three
+  // ancestor anchors (a, b, c) are the visibility-TAG walk's targets; root is never.
+  const A = uid(0xa1)
+  const B = uid(0xb2)
+  const C = uid(0xc3)
+  const DEEP_EDGES: Record<string, Hex> = {
+    [`${ROOT}|a`]: A,
+    [`${A}|b`]: B,
+    [`${B}|c`]: C,
+  }
+
+  /** Collect every submitted TAG entry's target (refUID), across all layers. */
+  const tagTargets = (sent: SentLayer[]): Hex[] =>
+    sent.flatMap((l) => l.entries.filter((e) => e.schema === SCHEMAS.tag).map((e) => e.refUID))
+
+  it('no ancestors tagged yet: emits one TAG per ancestor (a, b, c) — never root or the file', async () => {
+    const { ctx, sent } = makeCtx({ edges: DEEP_EDGES })
+    await writeFileTier1('/a/b/c/file.txt', CONTENT, ctx, { contentType: 'text/plain' })
+
+    const targets = tagTargets(sent)
+    // Exactly the three existing generic ancestors; root (ROOT) is excluded, and the
+    // file's own leaf anchor (a fresh file ANCHOR) is never a TAG target.
+    expect(targets.sort()).toEqual([A, B, C].sort())
+    expect(targets).not.toContain(ROOT)
+    // No TAG targets the file anchor (file anchors are minted fresh; assert none of
+    // the TAG targets is a freshly-minted UID in the 0xd000 range used for new nodes).
+    expect(targets.every((t) => t === A || t === B || t === C)).toBe(true)
+  })
+
+  it('immediate parent already tagged: short-circuits — NO new TAGs at all', async () => {
+    // The uploader already has a visibility TAG on /a/b/c (the immediate parent).
+    // Walking bottom-up, the first ancestor is already covered ⇒ everything above is
+    // too ⇒ zero TAGs (steady-state zero cost).
+    const { ctx, sent } = makeCtx({ edges: DEEP_EDGES, taggedAncestors: [C] })
+    await writeFileTier1('/a/b/c/file.txt', CONTENT, ctx, { contentType: 'text/plain' })
+    expect(tagTargets(sent)).toEqual([])
+    // The base graph (no TAG layer) is the only thing submitted: DATA / L2 / PINs.
+    expect(sent).toHaveLength(3)
+  })
+
+  it('immediate parent untagged but its parent IS tagged: exactly one TAG (the untagged parent)', async () => {
+    // /a/b/c: the uploader has tagged /a/b (B) but not /a/b/c (C). Bottom-up walk
+    // tags C, then stops at B (already tagged) — so above B (A) is left untouched.
+    const { ctx, sent } = makeCtx({ edges: DEEP_EDGES, taggedAncestors: [B] })
+    await writeFileTier1('/a/b/c/file.txt', CONTENT, ctx, { contentType: 'text/plain' })
+    const targets = tagTargets(sent)
+    expect(targets).toEqual([C]) // only the untagged immediate parent
+    expect(targets).not.toContain(B)
+    expect(targets).not.toContain(A)
   })
 })
 

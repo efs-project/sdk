@@ -27,6 +27,8 @@ import { TRANSPORT } from '../mirror/transport.js'
 import {
   ParentNotFoundError,
   type ResolvePublicClient,
+  type TagReadPublicClient,
+  planExistingAncestorVisibilityTags,
   resolveOrPlanParents,
   splitPath,
 } from '../reads/resolve.js'
@@ -130,7 +132,10 @@ export async function resolveMirrors(
 
 /** The viem clients + deployment context the file-write orchestrator needs. */
 export interface FileWriteContext {
-  readonly publicClient: ResolvePublicClient & SubmitPublicClient & OnchainPublicClient
+  readonly publicClient: ResolvePublicClient &
+    TagReadPublicClient &
+    SubmitPublicClient &
+    OnchainPublicClient
   readonly walletClient: SubmitWalletClient & OnchainWalletClient
   readonly deployment: EfsDeployment
   /** The signing account (forwarded to the submitter's `writeContract`). */
@@ -216,7 +221,7 @@ export async function writeFileTier1(
     deployment.contracts.indexer,
     path,
   )
-  const { fileName } = parentPlan
+  const { fileName, existingAncestorUIDs } = parentPlan
   // The anchor the file-ANCHOR hangs off of: the resolved parent (no gap) or, when
   // creating ancestors, the deepest existing anchor the created chain extends from.
   let parentAnchorUID: Hex
@@ -242,6 +247,25 @@ export async function writeFileTier1(
   // bytes on-chain (SSTORE2) and yields a web3:// mirror — the zero-infra default.
   const { mirrors, transportDefinition } = await resolveMirrors(content, ctx, opts)
 
+  // 3a. Folder-visibility TAGs (overview.md "Upload flow" step 7; ADR-0038/0041).
+  // Walk the EXISTING ancestors bottom-up and find the ones the uploader hasn't
+  // tagged yet (short-circuiting at the first already-tagged ancestor). The
+  // freshly-created `missingParents` folders always need a TAG and are derived
+  // inside the graph builder, so they are NOT walked here. The attester is the
+  // connected account — its lens listing is what these TAGs make the folders visible
+  // in.
+  const attester = accountAddress(ctx.account)
+  const existingAncestorTagUIDs = await planExistingAncestorVisibilityTags(
+    ctx.publicClient,
+    existingAncestorUIDs,
+    {
+      edgeResolver: deployment.contracts.edgeResolver,
+      attester,
+      dataSchemaUID: deployment.schemas.data,
+      anchorSchemaUID: deployment.schemas.anchor,
+    },
+  )
+
   // 4. Build the pure write plan (the 9-schema, layered attestation DAG).
   const plan = buildFileWriteGraph({
     path,
@@ -259,6 +283,7 @@ export async function writeFileTier1(
     transportDefinition,
     parentAnchorUID,
     ...(missingParents.length > 0 ? { missingParents } : {}),
+    ...(existingAncestorTagUIDs.length > 0 ? { existingAncestorTagUIDs } : {}),
     fileName,
   })
 
@@ -272,8 +297,8 @@ export async function writeFileTier1(
   })
 
   // 6. Map to the public receipt. The attester is the connected account (lenses
-  // key on it); `opts.lens` is reserved but not yet honored on Tier-1.
-  const attester = accountAddress(ctx.account)
+  // key on it, computed in step 3a); `opts.lens` is reserved but not yet honored on
+  // Tier-1.
   return toReceipt(result, contentHash, deployment.chainId, attester)
 }
 
