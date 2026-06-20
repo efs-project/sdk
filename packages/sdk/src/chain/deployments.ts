@@ -4,8 +4,9 @@
  * supplied via the `deployments` config override.
  */
 
-import type { Address, Hex, PublicClient } from 'viem'
-import { DeploymentNotFound, EfsError } from '../errors.js'
+import type { Abi, Address, Hex, PublicClient } from 'viem'
+import { DeploymentNotFound, EfsError, SchemaMismatchError } from '../errors.js'
+import { aliasResolverAbi, indexerAbi, listEntryResolverAbi, listResolverAbi } from './abi/index.js'
 
 /** The EFS + EAS contract addresses on a chain. The view/router addresses are the
  * read-resolution trust root, so they are integrity-checked at construct time.
@@ -100,20 +101,10 @@ export function resolveDeployment(chainId: number, override?: DeploymentsMap): E
  * Construct-time sanity gate (ADR-0005 / review S1). Verifies each EFS contract
  * address has *some* bytecode on the target chain — this catches a wrong/typo'd
  * or non-contract address, nothing more. It does NOT authenticate that the code
- * is the *right* EFS contract.
+ * is the *right* EFS contract; for that, see {@link assertSchemaIntegrity}.
  *
- * The real trust gate is the **schema-UID match**: assert `deployment.schemas`
- * equal the indexer's on-chain UID getters (a malicious/wrong indexer can't fake
- * the frozen UIDs). That lands with the read layer (TODO below) and is what makes
- * an overridden `deployments` map safe to trust. Until then, treat a passing
- * bytecode check as "addresses are contracts," not "addresses are EFS."
- *
- * TODO(build): add the schema-UID assertion once the eas read layer can call the
- * per-schema UID sources. They are NOT all on the Indexer:
- *   - anchor, property, data, pin, tag, mirror → Indexer getters.
- *   - list → ListResolver.
- *   - listEntry → ListEntryResolver (self-derived; no Indexer getter).
- *   - redirect → AliasResolver.redirectSchemaUID() (self-derived; no Indexer getter).
+ * Treat a passing bytecode check as "addresses are contracts," not "addresses
+ * are EFS." {@link verifyDeployment} runs both gates back to back.
  */
 export async function assertDeploymentIntegrity(
   publicClient: PublicClient,
@@ -127,4 +118,165 @@ export async function assertDeploymentIntegrity(
       )
     }
   }
+}
+
+/**
+ * One schema-UID source: the deployment key, the contract address that owns the
+ * authoritative getter, the ABI + function to read, and the expected (registered)
+ * UID from the `deployment.schemas` map.
+ */
+type SchemaUidSource = {
+  /** The key in {@link EfsSchemaUIDs} this source authenticates. */
+  schema: keyof EfsSchemaUIDs
+  /** Human label for the on-chain source (used in the mismatch diff). */
+  sourceLabel: string
+  /** The contract whose getter is authoritative for this UID. */
+  address: Address
+  abi: Abi
+  functionName: string
+  /** The UID the (possibly overridden) deployment claims for this schema. */
+  expected: Hex
+}
+
+/**
+ * Map every frozen schema UID to its **authoritative** on-chain getter. Not all
+ * nine live on the Indexer — three are self-derived by their resolver against
+ * that resolver's own (proxy) address, so the resolver is the only contract that
+ * can vouch for them (ADR-0048):
+ *
+ *   - anchor / property / data / pin / tag / mirror → Indexer `*_SCHEMA_UID()`
+ *     (the kernel's ERC-7201 config; EFSIndexer.sol).
+ *   - list      → ListResolver.listSchemaUID()       (self-derived, baked into the UID).
+ *   - listEntry → ListEntryResolver.listEntrySchemaUID() (self-derived; no Indexer getter).
+ *   - redirect  → AliasResolver.redirectSchemaUID()  (self-derived; no Indexer getter).
+ *
+ * Reading each from its own owner is what makes a `deployments` override safe to
+ * trust: a wrong/hostile contract set can't fake the frozen UIDs without also
+ * controlling the address each UID hashes in.
+ */
+function schemaUidSources(deployment: EfsDeployment): SchemaUidSource[] {
+  const { contracts, schemas } = deployment
+  const indexer = (functionName: string, schema: keyof EfsSchemaUIDs): SchemaUidSource => ({
+    schema,
+    sourceLabel: `Indexer.${functionName}`,
+    address: contracts.indexer,
+    abi: indexerAbi as unknown as Abi,
+    functionName,
+    expected: schemas[schema],
+  })
+  return [
+    indexer('ANCHOR_SCHEMA_UID', 'anchor'),
+    indexer('PROPERTY_SCHEMA_UID', 'property'),
+    indexer('DATA_SCHEMA_UID', 'data'),
+    indexer('PIN_SCHEMA_UID', 'pin'),
+    indexer('TAG_SCHEMA_UID', 'tag'),
+    indexer('MIRROR_SCHEMA_UID', 'mirror'),
+    {
+      schema: 'list',
+      sourceLabel: 'ListResolver.listSchemaUID',
+      address: contracts.listResolver,
+      abi: listResolverAbi as unknown as Abi,
+      functionName: 'listSchemaUID',
+      expected: schemas.list,
+    },
+    {
+      schema: 'listEntry',
+      sourceLabel: 'ListEntryResolver.listEntrySchemaUID',
+      address: contracts.listEntryResolver,
+      abi: listEntryResolverAbi as unknown as Abi,
+      functionName: 'listEntrySchemaUID',
+      expected: schemas.listEntry,
+    },
+    {
+      schema: 'redirect',
+      sourceLabel: 'AliasResolver.redirectSchemaUID',
+      address: contracts.aliasResolver,
+      abi: aliasResolverAbi as unknown as Abi,
+      functionName: 'redirectSchemaUID',
+      expected: schemas.redirect,
+    },
+  ]
+}
+
+/**
+ * Compare two `bytes32` UIDs by value, tolerant of casing and leading-zero
+ * width (`0xAB…` vs `0xab…`, `0x01` vs `0x00…01`) — viem returns the canonical
+ * 32-byte form, while a registry entry may be written either way. A non-hex /
+ * unparseable value never equals (fail-closed). */
+function sameUid(a: Hex, b: Hex): boolean {
+  try {
+    return BigInt(a) === BigInt(b)
+  } catch {
+    return false
+  }
+}
+
+/**
+ * The real trust gate (ADR-0005 / review P1 #9). For each of the nine frozen
+ * schema UIDs, read the value its **authoritative** on-chain getter reports and
+ * assert it equals what `deployment.schemas` claims. A wrong/hostile
+ * `deployments` override fails here even when every address is a real contract
+ * (which {@link assertDeploymentIntegrity} alone can't catch) — the frozen UIDs
+ * hash in the deploying Safe + each resolver's own address, so they can't be
+ * forged.
+ *
+ * The reads are batched via `Promise.all` (one `eth_call` per UID; viem will
+ * fold them into a multicall when the chain supports it and the client has
+ * `batch.multicall` enabled). On any mismatch this throws {@link
+ * SchemaMismatchError} with a precise diff: which schema, expected vs on-chain,
+ * and the source getter.
+ */
+export async function assertSchemaIntegrity(
+  publicClient: PublicClient,
+  deployment: EfsDeployment,
+): Promise<void> {
+  const sources = schemaUidSources(deployment)
+  const onchain = await Promise.all(
+    sources.map(
+      (s) =>
+        publicClient.readContract({
+          address: s.address,
+          abi: s.abi,
+          functionName: s.functionName,
+        }) as Promise<Hex>,
+    ),
+  )
+
+  const diffs: string[] = []
+  for (let i = 0; i < sources.length; i++) {
+    const s = sources[i]
+    const got = onchain[i]
+    if (!s || got === undefined) continue
+    if (!sameUid(s.expected, got)) {
+      diffs.push(
+        `  - ${s.schema}: deployment claims ${s.expected}, but ${s.sourceLabel} reports ${got}`,
+      )
+    }
+  }
+
+  if (diffs.length > 0) {
+    const count = `${diffs.length} of ${sources.length} schema UID(s) do not match the on-chain source`
+    const header = `EFS deployment schema-UID integrity check failed on chainId ${deployment.chainId} — ${count} (the \`deployments\` override does not point at the real EFS contracts):`
+    throw new SchemaMismatchError(`${header}\n${diffs.join('\n')}`)
+  }
+}
+
+/**
+ * Full deployment trust gate: bytecode presence ({@link
+ * assertDeploymentIntegrity}) **then** schema-UID authenticity ({@link
+ * assertSchemaIntegrity}). Bytecode runs first so a missing/typo'd address
+ * surfaces as the clearer `EfsError` before any schema read is attempted.
+ *
+ * Opt-in by design (ADR-0005): the client does NOT run this on every construct —
+ * that would add an RPC round-trip to a path that may never touch a custom
+ * deployment. It's exposed as `efs.raw.verifyDeployment()` for a caller to run
+ * once after wiring a `deployments` override (recommended), and is cheap enough
+ * to run eagerly in that case (nine `eth_call`s, batched).
+ */
+export async function verifyDeployment(
+  publicClient: PublicClient,
+  deployment: EfsDeployment,
+): Promise<void> {
+  await assertDeploymentIntegrity(publicClient, deployment)
+  await assertSchemaIntegrity(publicClient, deployment)
 }

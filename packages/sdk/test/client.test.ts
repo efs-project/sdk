@@ -19,10 +19,11 @@ import {
   EfsError,
   type EfsSchemaUIDs,
   NotImplemented,
+  SchemaMismatchError,
   WalletRequired,
   createEfsClient,
 } from '../src/index.js'
-import { createMockProvider } from './helpers/mock-eip1193.js'
+import { type MethodHandler, createMockProvider } from './helpers/mock-eip1193.js'
 
 const CHAIN_ID = 31337
 
@@ -128,21 +129,72 @@ describe('createEfsClient — deployment resolution via chainId (ADR-0005)', () 
     expect(() => efs.raw.deployment()).toThrow(DeploymentNotFound)
   })
 
-  it('verifyDeployment passes when every contract address has bytecode', async () => {
-    // Give every contract address some bytecode so the integrity gate passes.
+  // The nine schema-UID getter selectors → the deployment key each authenticates.
+  // verifyDeployment reads each from its authoritative on-chain getter and asserts
+  // the value matches `deployment.schemas` (review P1 #9). Returning the *matching*
+  // UID makes the schema gate pass; the bytecode-absent / mismatch cases below
+  // exercise the two failure modes.
+  const SCHEMA_SELECTORS: Record<string, keyof EfsSchemaUIDs> = {
+    '0x1fc47af2': 'anchor',
+    '0x069745bc': 'property',
+    '0xc719acf0': 'data',
+    '0xbb9ca7cc': 'pin',
+    '0x9f5cd3ab': 'tag',
+    '0x32d1163e': 'mirror',
+    '0xe64bb23e': 'list',
+    '0xfab5c5eb': 'listEntry',
+    '0xc135da58': 'redirect',
+  }
+  const pad32 = (h: string) => `0x${h.replace(/^0x/, '').padStart(64, '0')}`
+  /** Answer a schema-UID `eth_call` with the deployment's claimed UID (a match). */
+  const matchingSchemaCall: MethodHandler = (params) => {
+    const data = String((params[0] as { data?: string })?.data ?? '')
+    const key = SCHEMA_SELECTORS[data.slice(0, 10)]
+    return key ? pad32(deployment.schemas[key]) : '0x'
+  }
+  /** Give every contract address some bytecode so the presence gate passes. */
+  const allCode = (): Record<string, string> => {
     const code: Record<string, string> = {}
     for (const a of Object.values(contracts)) code[a.toLowerCase()] = '0x60006000'
-    const provider = createMockProvider({ chainId: CHAIN_ID, code })
+    return code
+  }
+
+  it('verifyDeployment passes when bytecode is present and schema UIDs match', async () => {
+    const provider = createMockProvider({
+      chainId: CHAIN_ID,
+      code: allCode(),
+      handlers: { eth_call: matchingSchemaCall },
+    })
     const efs = createEfsClient({ provider, chain: localChain, deployments })
     await expect(efs.raw.verifyDeployment()).resolves.toBeUndefined()
-    // The gate probed each contract via eth_getCode.
+    // The presence gate probed each contract via eth_getCode...
     expect(provider.callCount('eth_getCode')).toBe(Object.keys(contracts).length)
+    // ...and the schema gate read all nine UIDs via eth_call.
+    expect(provider.callCount('eth_call')).toBe(9)
   })
 
   it('verifyDeployment throws when a contract address has no bytecode', async () => {
-    // Default mock returns '0x' (no code) for every address → first probe fails.
+    // Default mock returns '0x' (no code) for every address → first probe fails
+    // (bytecode runs before any schema read).
     const provider = createMockProvider({ chainId: CHAIN_ID })
     const efs = createEfsClient({ provider, chain: localChain, deployments })
     await expect(efs.raw.verifyDeployment()).rejects.toThrow(EfsError)
+    expect(provider.callCount('eth_call')).toBe(0)
+  })
+
+  it('verifyDeployment throws SchemaMismatchError when an on-chain UID differs', async () => {
+    const wrongData: MethodHandler = (params) => {
+      const data = String((params[0] as { data?: string })?.data ?? '')
+      // The DATA getter reports a UID that disagrees with the deployment claim.
+      if (data.startsWith('0xc719acf0')) return pad32('0xdead')
+      return matchingSchemaCall(params)
+    }
+    const provider = createMockProvider({
+      chainId: CHAIN_ID,
+      code: allCode(),
+      handlers: { eth_call: wrongData },
+    })
+    const efs = createEfsClient({ provider, chain: localChain, deployments })
+    await expect(efs.raw.verifyDeployment()).rejects.toThrow(SchemaMismatchError)
   })
 })

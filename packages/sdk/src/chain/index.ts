@@ -7,6 +7,8 @@ export {
   deployments,
   resolveDeployment,
   assertDeploymentIntegrity,
+  assertSchemaIntegrity,
+  verifyDeployment,
   type DeploymentsMap,
   type EfsDeployment,
   type EfsContracts,

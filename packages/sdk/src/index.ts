@@ -27,8 +27,8 @@ import {
 import {
   type DeploymentsMap,
   type EfsDeployment,
-  assertDeploymentIntegrity,
   resolveDeployment,
+  verifyDeployment,
 } from './chain/deployments.js'
 import {
   SchemaEncoder,
@@ -219,6 +219,14 @@ export type EfsEasNs = {
 
 export type EfsRawNs = {
   deployment(): EfsDeployment
+  /**
+   * Run the full deployment trust gate: bytecode presence **then** schema-UID
+   * authenticity (each of the nine frozen UIDs is read from its authoritative
+   * on-chain getter and compared to the registry; ADR-0005 / review P1 #9).
+   * Opt-in — call it once after wiring a custom `deployments` override.
+   * Resolves on success; rejects with `EfsError` (no bytecode) or
+   * `SchemaMismatchError` (a UID the deployment claims doesn't match chain).
+   */
   verifyDeployment(): Promise<void>
 }
 
@@ -363,7 +371,7 @@ export function createEfsClient(config: EfsClientConfig): EfsClient {
     },
     raw: {
       deployment: getDeployment,
-      verifyDeployment: () => assertDeploymentIntegrity(publicClient, getDeployment()),
+      verifyDeployment: () => verifyDeployment(publicClient, getDeployment()),
     },
     batch: () => {
       requireWallet()
@@ -408,6 +416,8 @@ export {
   deployments,
   resolveDeployment,
   assertDeploymentIntegrity,
+  assertSchemaIntegrity,
+  verifyDeployment,
   type DeploymentsMap,
   type EfsDeployment,
   type EfsContracts,
