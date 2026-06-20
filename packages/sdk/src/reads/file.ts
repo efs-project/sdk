@@ -47,6 +47,7 @@ import type {
   FileInfo,
   ReadOpts,
   ReadResult,
+  RedirectRecord,
   SourceUIDs,
 } from '../types.js'
 import { attestationFor, attestationsForUIDs } from './attestations.js'
@@ -58,6 +59,7 @@ import {
   read,
   resolveAttesters,
 } from './context.js'
+import { type RedirectFollowResult, followRedirectChain, resolveHopCap } from './redirects.js'
 import { ParentNotFoundError, resolvePathToAnchor } from './resolve.js'
 
 /** The reserved PROPERTY keys the SDK reads as typed slots. Custom `fields` keys
@@ -71,15 +73,21 @@ function isReservedKey(k: string): k is ReservedKey {
 
 /** The full active-placement resolution: the file's DATA UID + the winning lens. */
 export type ResolvedPlacement = {
-  /** The active DATA UID at the path under the lens. */
+  /** The active DATA UID at the path under the lens. When a REDIRECT was followed
+   * (`followRedirects`), this is the TERMINAL canonical DATA, not the literal one. */
   dataUID: DataUID
-  /** The placement (lens) attester whose active PIN won — `resolvedBy`. */
+  /** The placement (lens) attester whose active PIN won — `resolvedBy`. When a
+   * REDIRECT was followed, this is the attester who asserted the LAST hop (who
+   * vouched for the canonical), so mirrors/properties scope to the canonical's voucher. */
   resolvedBy: Address
   /** The file's own anchor UID (the parent of its placements). */
   fileAnchorUID: Hex
   /** The active placement PIN attestation UID (provenance: `sourceUIDs.placement`).
    * Read via `getActivePinSlot` against the file anchor under the winning lens. */
   placementPinUID?: Hex
+  /** The REDIRECT alias chain followed to reach `dataUID`, when `followRedirects` was
+   * set AND at least one hop was taken (ADR-0050). Absent ⇒ literal placement. */
+  via?: readonly RedirectRecord[]
 }
 
 /** Build the static {@link DataRef} for a resolved placement on this chain. */
@@ -142,11 +150,34 @@ export async function resolvePlacement(
     args: [fileAnchorUID, winner.attester, schemas.data],
   })
 
+  // Read-time REDIRECT following (ADR-0050) — OPT-IN via `followRedirects`. The
+  // on-chain resolver does not follow redirects, so this is SDK logic: from the
+  // resolved DATA, walk the active `sameAs`/`supersededBy` alias chain (the dedup /
+  // versioning case) under the SAME lens, to its canonical terminal. `symlink`
+  // (kind=2) is followed too where a source UID is also a redirect source, but the
+  // common path here is DATA→DATA. Cycle/hop-cap fail closed (typed throws). Default
+  // (`followRedirects` unset/false) ⇒ cap 0 ⇒ no walk, literal placement preserved.
+  const cap = resolveHopCap(opts?.followRedirects)
+  let dataUID = winner.uid as DataUID
+  let resolvedBy = winner.attester
+  let via: readonly RedirectRecord[] | undefined
+  if (cap > 0) {
+    const followed: RedirectFollowResult = await followRedirectChain(ctx, dataUID, attesters, cap)
+    if (followed.via.length > 0) {
+      dataUID = followed.target as DataUID
+      // The canonical's voucher is whoever asserted the LAST hop — scope the target's
+      // mirrors/properties to that attester (they vouched for the canonical).
+      resolvedBy = followed.via[followed.via.length - 1]?.attester ?? resolvedBy
+      via = followed.via
+    }
+  }
+
   return {
-    dataUID: winner.uid as DataUID,
-    resolvedBy: winner.attester,
+    dataUID,
+    resolvedBy,
     fileAnchorUID,
     ...(slot.pinUID !== ZERO_UID ? { placementPinUID: slot.pinUID } : {}),
+    ...(via !== undefined ? { via } : {}),
   }
 }
 
@@ -165,7 +196,11 @@ export async function locate(
   const placement = await resolvePlacement(ctx, path, opts)
   if (!placement) return null
   const data = toDataRef(placement.dataUID, ctx.deployment.chainId, placement.resolvedBy)
-  return { data, resolvedBy: placement.resolvedBy }
+  return {
+    data,
+    resolvedBy: placement.resolvedBy,
+    ...(placement.via !== undefined ? { via: placement.via } : {}),
+  }
 }
 
 /** A reserved-key PROPERTY read: the decoded `value` (or `undefined`) PLUS the

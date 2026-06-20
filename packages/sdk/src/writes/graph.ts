@@ -128,7 +128,16 @@ export interface PlannedAttestation {
   /** The DAG layer (1 | 2 | 3) — the submit ordering unit. */
   readonly layer: WriteLayer
   /** Human label for the kind of node, for diagnostics/progress. */
-  readonly kind: 'DATA' | 'MIRROR' | 'PROPERTY' | 'ANCHOR' | 'PIN' | 'TAG' | 'LIST' | 'LIST_ENTRY'
+  readonly kind:
+    | 'DATA'
+    | 'MIRROR'
+    | 'PROPERTY'
+    | 'ANCHOR'
+    | 'PIN'
+    | 'TAG'
+    | 'LIST'
+    | 'LIST_ENTRY'
+    | 'REDIRECT'
   /** The frozen schema UID to attest against. */
   readonly schema: Hex
   /** ABI-encoded attestation `data` (via {@link SchemaEncoder} + {@link EFS_SCHEMA_FIELDS}). */

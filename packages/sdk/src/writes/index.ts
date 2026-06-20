@@ -39,6 +39,7 @@ export {
   buildTagPlan,
   buildPropertyPlan,
   buildPlacementPinPlan,
+  buildRedirectPlan,
   buildCreateListPlan,
   buildAddEntryPlan,
   validateListConfig,
@@ -46,6 +47,8 @@ export {
   TARGET_TYPE_CODE,
   EDGE_REF,
   DEFAULT_TAG_WEIGHT,
+  REDIRECT_KIND,
+  REDIRECT_FOLLOW_MAX_KIND,
   type ListCreateConfig,
 } from './edge.js'
 export {

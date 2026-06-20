@@ -162,6 +162,10 @@ function makeCtx(opts: {
   attestations?: Record<string, Hex> // propertyUID -> data blob (getAttestation)
   mirrors?: readonly { uri: string; attester: Address }[]
   dirPage?: { items: readonly Item[]; nextCursor: bigint }
+  // REDIRECT (ADR-0050): `${source}|${attester}` -> the active redirect from that
+  // source under that attester. Backs getReferencingBySchemaAndAttester (returns the
+  // redirectUID) + getAttestation (returns the encoded `(target, kind)` blob).
+  redirects?: Record<string, { redirectUID: Hex; target: Hex; kind: number }>
   calls?: { fn: string; args: readonly unknown[] }[]
 }): ReadContext {
   const {
@@ -173,8 +177,17 @@ function makeCtx(opts: {
     attestations = {},
     mirrors = [],
     dirPage = { items: [], nextCursor: 0n },
+    redirects = {},
     calls = [],
   } = opts
+  // Index redirectUID -> encoded redirect data, for the getAttestation branch.
+  const redirectByUID = new Map<Hex, Hex>()
+  for (const r of Object.values(redirects)) {
+    redirectByUID.set(
+      r.redirectUID,
+      encodeAbiParameters([{ type: 'bytes32' }, { type: 'uint16' }], [r.target, r.kind]) as Hex,
+    )
+  }
   const publicClient: ReadContext['publicClient'] = {
     async readContract(args) {
       calls.push({ fn: args.functionName, args: args.args ?? [] })
@@ -202,8 +215,19 @@ function makeCtx(opts: {
           const [keyAnchor, attester] = args.args as [Hex, Address]
           return pinTargets[`${keyAnchor}|${attester.toLowerCase()}`] ?? ZERO
         }
+        case 'getReferencingBySchemaAndAttester': {
+          // (source, REDIRECT_SCHEMA, attester, …) → the active redirect UID, if any.
+          const [source, , attester] = args.args as [Hex, Hex, Address]
+          const r = redirects[`${source}|${(attester as string).toLowerCase()}`]
+          return r ? [r.redirectUID] : []
+        }
         case 'getAttestation': {
           const [u] = args.args as [Hex]
+          // A redirect attestation (its data is the `(target, kind)` blob)?
+          const redirectData = redirectByUID.get(u)
+          if (redirectData !== undefined) {
+            return attestation({ uid: u, data: redirectData, schema: SCHEMAS.redirect })
+          }
           const data = attestations[u]
           return attestation({ uid: data !== undefined ? u : ZERO, data })
         }
@@ -255,6 +279,71 @@ describe('locate', () => {
   it('returns null when the file anchor does not exist', async () => {
     const ctx = makeCtx({ edges: { [`${ROOT}|docs`]: DOCS_ANCHOR }, files: [] })
     expect(await locate(ctx, '/docs/missing.md', { lens: LENS })).toBeNull()
+  })
+
+  // ── locate + followRedirects (ADR-0050 read-time resolution) ───────────────────
+
+  const CANON = uid(0xca0) as DataUID // a canonical DATA the duplicate redirects to
+
+  it('does NOT follow a redirect by default (opt-out is the default)', async () => {
+    const ctx = makeCtx({
+      edges: README_EDGES,
+      files: [fileItem({})],
+      // DATA_UID → CANON (sameAs), asserted by the winning lens.
+      redirects: {
+        [`${DATA_UID}|${LENS.toLowerCase()}`]: { redirectUID: uid(0xf01), target: CANON, kind: 0 },
+      },
+    })
+    const res = await locate(ctx, '/docs/readme.md', { lens: LENS })
+    // Literal placement preserved — no follow, no `via`.
+    expect(res?.data.uid).toBe(DATA_UID)
+    expect(res?.via).toBeUndefined()
+  })
+
+  it('follows a sameAs redirect to the canonical when followRedirects:true, surfacing `via`', async () => {
+    const ctx = makeCtx({
+      edges: README_EDGES,
+      files: [fileItem({})],
+      redirects: {
+        [`${DATA_UID}|${LENS.toLowerCase()}`]: { redirectUID: uid(0xf01), target: CANON, kind: 0 },
+      },
+    })
+    const res = await locate(ctx, '/docs/readme.md', { lens: LENS, followRedirects: true })
+    expect(res?.data.uid).toBe(CANON) // resolved to the canonical
+    expect(res?.via).toHaveLength(1)
+    expect(res?.via?.[0]?.from).toBe(DATA_UID) // redirectedFrom = the requested identity
+    expect(res?.via?.[0]?.to).toBe(CANON)
+    expect(res?.via?.[0]?.kind).toBe('sameAs')
+  })
+
+  it('follows a multi-hop chain DATA→CANON→FINAL', async () => {
+    const FINAL = uid(0xf1aa1) as DataUID
+    const ctx = makeCtx({
+      edges: README_EDGES,
+      files: [fileItem({})],
+      redirects: {
+        [`${DATA_UID}|${LENS.toLowerCase()}`]: { redirectUID: uid(0xf01), target: CANON, kind: 1 },
+        [`${CANON}|${LENS.toLowerCase()}`]: { redirectUID: uid(0xf02), target: FINAL, kind: 1 },
+      },
+    })
+    const res = await locate(ctx, '/docs/readme.md', { lens: LENS, followRedirects: true })
+    expect(res?.data.uid).toBe(FINAL)
+    expect(res?.via?.map((v) => v.to)).toEqual([CANON, FINAL])
+  })
+
+  it('throws RedirectHopLimit when followRedirects:1 caps a 2-hop chain', async () => {
+    const FINAL = uid(0xf1aa1) as DataUID
+    const ctx = makeCtx({
+      edges: README_EDGES,
+      files: [fileItem({})],
+      redirects: {
+        [`${DATA_UID}|${LENS.toLowerCase()}`]: { redirectUID: uid(0xf01), target: CANON, kind: 0 },
+        [`${CANON}|${LENS.toLowerCase()}`]: { redirectUID: uid(0xf02), target: FINAL, kind: 0 },
+      },
+    })
+    await expect(
+      locate(ctx, '/docs/readme.md', { lens: LENS, followRedirects: 1 }),
+    ).rejects.toMatchObject({ code: 'RedirectHopLimit' })
   })
 
   it('returns null when no attester in the lens placed data', async () => {

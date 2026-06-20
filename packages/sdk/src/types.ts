@@ -63,6 +63,59 @@ export type ReadOpts<E extends readonly ExpandToken[] = readonly ExpandToken[]> 
   /** Verify fetched bytes against the attester's `contentHash` (default true).
    * On the value-sugar path a mismatch throws (fail-closed) unless this is false. */
   verify?: boolean
+  /**
+   * Follow active REDIRECT aliases (ADR-0050) at read time. The on-chain resolver
+   * does NOT follow redirects — it is write-time-guards-only, and `EFSRouter` reads
+   * only the DATA-pin slot — so following is the SDK's job, scoped to the read lens.
+   *
+   *   - `false` (DEFAULT) — do NOT follow; resolve the literal placement. (A redirect
+   *     reroutes file *identity* with a larger blast radius than a normal PIN, and
+   *     ADR-0050's normative resolution spec — lens precedence + cycle = lowest-UID-
+   *     in-SCC — is not yet pinned. Off by default keeps reads literal and avoids the
+   *     "silent teleport" footgun; opt in explicitly.)
+   *   - `true` — follow auto-followable kinds (`sameAs`/`supersededBy`/`symlink`) up
+   *     to the default hop cap (8; ADR-0050 `D_MAX`). `relatedVersion` (kind ≥ 3) is
+   *     never auto-followed.
+   *   - a `number` — follow with that explicit max-hop cap (≤ 32, the hard ceiling =
+   *     `MAX_ANCHOR_DEPTH`). `0` is equivalent to `false`.
+   *
+   * On a cycle, throws {@link import('./errors.js').RedirectCycle}; over the cap,
+   * throws {@link import('./errors.js').RedirectHopLimit} (fail-closed — a silent
+   * stop at a partial chain would resolve to an attacker-influenceable node). The
+   * result surfaces where it landed via {@link ReadResult.via}.
+   */
+  followRedirects?: boolean | number
+}
+
+/** The frozen REDIRECT `kind` literal union (ADR-0050; values in
+ * {@link import('./writes/edge.js').REDIRECT_KIND}). Open tail: the kind taxonomy is
+ * resolver+client convention (not in the schema UID), so a new kind name is additive
+ * and must not break an exhaustive `switch`. */
+export type RedirectKind =
+  | 'sameAs'
+  | 'supersededBy'
+  | 'symlink'
+  | 'relatedVersion'
+  | (string & Record<never, never>)
+
+/**
+ * One decoded active REDIRECT record (ADR-0050) under a resolving lens — what
+ * `efs.redirects.get` returns and a single hop in {@link ReadResult.via}.
+ */
+export type RedirectRecord = {
+  /** The SOURCE this redirect points FROM (the EAS `refUID`). */
+  from: Hex
+  /** The DESTINATION this redirect points TO (the decoded `target`). */
+  to: Hex
+  /** The decoded `kind` discriminator (`0=sameAs`, `1=supersededBy`, `2=symlink`,
+   * `3+`=reserved/never-auto-followed). The raw `uint16`. */
+  kindCode: number
+  /** The named kind, when recognized (else `undefined` for a reserved `kind >= 4`). */
+  kind?: RedirectKind
+  /** The REDIRECT attestation's own UID — the revoke handle for `redirects.remove`. */
+  redirectUID: Hex
+  /** The attester who asserted this redirect (the lens member whose redirect won). */
+  attester: Address
 }
 
 /** Back-compat alias: the read option type was `ReadOptions` before the read-surface
@@ -443,7 +496,21 @@ export type WriteEstimate = {
 /** A resolved read pointer (`efs.fs.locate`): the data ref plus which attester/lens
  * won (review UX-4). `resolvedBy` is also folded into `DataRef` (review A2) so a ref
  * carried to `read(ref)` alone can still verify; kept here for the read-time view. */
-export type ReadResult = { data: DataRef; resolvedBy: Address }
+export type ReadResult = {
+  data: DataRef
+  resolvedBy: Address
+  /**
+   * The REDIRECT alias chain followed to reach `data`, when `{ followRedirects }`
+   * was set AND at least one hop was taken (ADR-0050). Each entry is one hop, in
+   * traversal order (the first is the redirect on the originally-requested target,
+   * the last lands on `data`). ABSENT when no redirect was followed — so the mere
+   * presence of `via` signals "this was redirected", and `via[0].from` is the
+   * originally-requested identity (`redirectedFrom`). Never silently teleport: a UI
+   * should surface `via` (the asserting attester + the hop) per ADR-0050's
+   * client-UX invariant.
+   */
+  via?: readonly RedirectRecord[]
+}
 
 // ── Lists (curated collections — ADR-0044/0046) ─────────────────────────────────
 

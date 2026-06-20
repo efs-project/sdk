@@ -57,6 +57,7 @@ const propertyEncoder = new SchemaEncoder(EFS_SCHEMA_FIELDS.property)
 const pinEncoder = new SchemaEncoder(EFS_SCHEMA_FIELDS.pin)
 const listEncoder = new SchemaEncoder(EFS_SCHEMA_FIELDS.list)
 const listEntryEncoder = new SchemaEncoder(EFS_SCHEMA_FIELDS.listEntry)
+const redirectEncoder = new SchemaEncoder(EFS_SCHEMA_FIELDS.redirect)
 
 /** Stable local ref ids for the edge/value plans (the seam resolves symbols by name). */
 export const EDGE_REF = {
@@ -69,7 +70,37 @@ export const EDGE_REF = {
   LIST: 'list',
   /** The minted LIST_ENTRY attestation (its UID is the entry handle / revoke target). */
   LIST_ENTRY: 'listEntry',
+  /** The minted REDIRECT attestation (its UID is the redirect handle / revoke target). */
+  REDIRECT: 'redirect',
 } as const
+
+/**
+ * The frozen REDIRECT `kind` discriminators (ADR-0050). **Only the field string
+ * `"bytes32 target, uint16 kind"` is frozen — the kind taxonomy is resolver logic +
+ * client convention, versioned/upgradeable, NOT part of the schema UID** — so this
+ * map is an SDK convention that can grow additively, not an Etched surface.
+ *
+ *   - `sameAs`       (0) — strong dedup: a duplicate DATA → its canonical DATA. Both
+ *     endpoints must be DATA (AliasResolver write-time guard). Auto-followed.
+ *   - `supersededBy` (1) — version replacement: an old DATA → its newer DATA. Both
+ *     endpoints DATA. Auto-followed.
+ *   - `symlink`      (2) — path symlink: a path Anchor → an Anchor or DATA. Source
+ *     must be an Anchor (write-time guard). Auto-followed (one hop per ADR-0050).
+ *   - `relatedVersion` (3) — weak discovery hint; **never** auto-followed (the SKOS
+ *     guard against "sameAs explosion"). `kind >= 3` is resolver-reserved (recorded,
+ *     not type-checked on-chain).
+ */
+export const REDIRECT_KIND = {
+  sameAs: 0,
+  supersededBy: 1,
+  symlink: 2,
+  relatedVersion: 3,
+} as const
+
+/** The lowest auto-followed `kind` boundary: `kind < REDIRECT_FOLLOW_MAX_KIND` is
+ * auto-followed (0,1,2); `kind >= 3` is a discovery hint, never auto-followed
+ * (ADR-0050 §"Kind following"). */
+export const REDIRECT_FOLLOW_MAX_KIND = 3
 
 /** Map the `'any' | 'addr' | 'schema'` literal union to the on-chain `uint8`
  * `targetType` (0 = ANY, 1 = ADDR, 2 = SCHEMA — IListReader/ListResolver). */
@@ -211,6 +242,51 @@ export function buildPlacementPinPlan(
     dataRefs: [], // no fresh siblings — the anchor is concrete, encoded in `data`
   }
   return { hardlink: false, attestations: [pin] }
+}
+
+/**
+ * Build the single-attestation plan for a **REDIRECT** (ADR-0050; AliasResolver):
+ * `REDIRECT(refUID = from, data = (to, kind))`. The SOURCE rides in `refUID`; the
+ * DESTINATION + `kind` ride in the payload. Single-layer (both endpoints are
+ * pre-existing concrete UIDs), so it submits as one `multiAttest` — one signature.
+ *
+ * Mirrors the AliasResolver `onAttest` shape (AliasResolver.sol:161-198): revocable
+ * MUST be `true` (`NotRevocable`), expirationTime MUST be 0 (`HasExpiration`),
+ * `target != 0` (`ZeroTarget`), `target != source` (`SelfLoop`). Per-`kind` typing
+ * (sameAs/supersededBy → DATA↔DATA; symlink → Anchor source) is enforced ON-CHAIN —
+ * the SDK does not pre-read endpoint schemas (it would cost reads on the write hot
+ * path and the resolver is authoritative), so a typing violation surfaces as a typed
+ * `ContractReverted` (e.g. `SourceNotData`/`TargetNotAnchorOrData`) at submit.
+ *
+ * Cardinality: REDIRECT is NOT a cardinality-1 schema (unlike PIN). The resolver
+ * keeps no `(source, attester)` slot — a source may carry multiple active redirects.
+ * `redirects.set` therefore does NOT auto-supersede a prior redirect; replacement is
+ * `set` the new one + `remove` the old. Read-time resolution is lens + first-active
+ * scoped (see `reads/redirects.ts`).
+ *
+ * @param schemas The frozen schema-UID set (for the REDIRECT schema UID).
+ * @param from    The SOURCE UID (the duplicate DATA, or the path Anchor) — `refUID`.
+ * @param to      The DESTINATION UID (the canonical DATA, or target Anchor/DATA).
+ * @param kind    The redirect class (see {@link REDIRECT_KIND}); default `sameAs` (0).
+ */
+export function buildRedirectPlan(
+  schemas: EfsSchemaUIDs,
+  from: Hex,
+  to: Hex,
+  kind: number = REDIRECT_KIND.sameAs,
+): FileWriteGraph {
+  const redirect: PlannedAttestation = {
+    ref: EDGE_REF.REDIRECT,
+    layer: 1,
+    kind: 'REDIRECT',
+    schema: schemas.redirect,
+    // data = (target, kind) — `kind` is a uint16; SchemaEncoder takes it as a number/bigint.
+    data: redirectEncoder.encodeData([to, kind]),
+    revocable: true, // AliasResolver.sol:172 — REDIRECT must be revocable
+    refUID: from, // AliasResolver — the SOURCE rides in refUID (concrete pre-existing UID)
+    dataRefs: [], // no fresh siblings — both endpoints are concrete, encoded in data/refUID
+  }
+  return { hardlink: false, attestations: [redirect] }
 }
 
 // ── LIST / LIST_ENTRY (curated collections — ADR-0044/0046/0047) ──────────────────

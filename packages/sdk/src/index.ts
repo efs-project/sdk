@@ -105,6 +105,7 @@ import { type FileWriteContext, writeFileTier1 } from './writes/file.js'
 import { type ListsWriteNs, makeListsWriteNs } from './writes/lists.js'
 import { type PinsNs, makePinsNs } from './writes/pins.js'
 import { type PropsNs, makePropsNs } from './writes/props.js'
+import { type RedirectsNs, makeRedirectsNs } from './writes/redirects.js'
 import { type TagsNs, makeTagsNs } from './writes/tags.js'
 
 /**
@@ -403,6 +404,12 @@ export type EfsClient = EfsReadClient & {
   graph: EfsGraphNs
   /** Standalone PROPERTY value writes: `props.{set,get,list}`. */
   props: PropsNs
+  /** REDIRECT (alias) primitive (ADR-0050): `redirects.{set,remove,get}` — the
+   * trust-scoped "this points at that" edge (canonical/dedup, version supersession,
+   * symlinks). Read-time *following* of an alias chain is on `efs.fs.locate`/`read`
+   * via `{ followRedirects }`; this namespace is the write verbs + the literal
+   * active-record read. */
+  redirects: RedirectsNs
   /** Curated-collection reads + writes (`efs.lists.*`): the read verbs plus
    * `create`/`add`/`remove` (LIST / LIST_ENTRY). */
   lists: EfsListsWriteNs
@@ -522,6 +529,15 @@ export function createEfsClient(config: EfsClientConfig): EfsClient {
     readContext,
     submitContext: edgeSubmitContext,
     attester: () => account,
+  })
+  // The `efs.redirects.*` write verbs (set/remove) + the literal active-record read
+  // (get). Like graph/props, merged unconditionally and gated at the type level; a
+  // no-wallet runtime call to set/remove throws via the wallet-bound submit/revoke.
+  const redirectsNs = makeRedirectsNs({
+    getDeployment,
+    readContext,
+    submitContext: edgeSubmitContext,
+    revoke: (schema, uid) => easVerbs.revoke({ schema, uid }),
   })
   // The `efs.lists.*` write verbs (create/add/remove). Merged onto the read verbs
   // below; the type-level write gate hides them on a read-only client, and each
@@ -727,6 +743,7 @@ export function createEfsClient(config: EfsClientConfig): EfsClient {
     // through the wallet-bound submit/revoke (so a no-wallet runtime call throws).
     graph: { tags: tagsNs, pins: pinsNs },
     props: propsNs,
+    redirects: redirectsNs,
     batch: () => {
       requireWallet()
       throw new NotImplemented('efs.batch()', {
@@ -923,3 +940,22 @@ export {
   type SortSourceType,
   type SortReadOptions,
 } from './reads/sorts.js'
+// REDIRECT (alias) — read-time resolution engine (ADR-0050).
+export {
+  readActiveRedirect,
+  followRedirectChain,
+  resolveHopCap,
+  redirectKindName,
+  isAutoFollowedKind,
+  DEFAULT_REDIRECT_HOPS,
+  MAX_REDIRECT_HOPS,
+  type RedirectFollowResult,
+} from './reads/redirects.js'
+// REDIRECT (alias) — `efs.redirects.*` write verbs + plan builder + kind constants.
+export {
+  makeRedirectsNs,
+  type RedirectsNs,
+  type RedirectSetOptions,
+  type RedirectGetOptions,
+} from './writes/redirects.js'
+export type { RedirectKind, RedirectRecord } from './types.js'
