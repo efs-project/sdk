@@ -28,104 +28,116 @@ import { type ResolvePublicClient, resolveParentAnchor } from '../reads/resolve.
 import type { DataRef, DataUID, WriteOptions, WriteReceipt } from '../types.js'
 import { buildFileWriteGraph } from './graph.js'
 import {
+  DEFAULT_ONCHAIN_AUTO_LIMIT,
+  type OnchainPublicClient,
+  type OnchainWalletClient,
+  PayloadTooLarge,
+  storeOnchain,
+} from './onchain.js'
+import {
   type SubmitPublicClient,
   type SubmitWalletClient,
   type Tier1WriteResult,
   submitWriteTier1,
 } from './submit.js'
 
-/**
- * Default cap on inline (`data:`) content. Above this, the caller MUST supply
- * `opts.mirrors` — a multi-kilobyte payload encoded into the MIRROR `uri` field
- * (and re-encoded across signatures) is pathological on-chain. 8 KiB mirrors the
- * MirrorResolver `MAX_URI_LENGTH` (ADR-0022); the base64 `data:` envelope is
- * larger than the raw bytes, so we cap the *raw* bytes well under it.
- */
-export const MAX_INLINE_BYTES = 4 * 1024
-
-/** Bytes → a base64 `data:` URI. Self-contained retrieval needing no network —
- * the inline-fallback mirror when the caller supplies no `opts.mirrors`. */
-function toDataUri(bytes: Uint8Array, contentType: string | undefined): string {
-  // btoa over a binary string. Build the binary string in chunks to avoid a giant
-  // spread (apply arg-count limits) on large inputs — capped at MAX_INLINE_BYTES
-  // anyway, so this stays small.
-  let binary = ''
-  for (let i = 0; i < bytes.length; i += 0x8000) {
-    binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000))
-  }
-  const b64 = btoa(binary)
-  const media = contentType ?? 'application/octet-stream'
-  return `data:${media};base64,${b64}`
-}
-
-/** Extract the URI scheme (`ipfs` from `ipfs://Qm…`, `data` from `data:…`). */
+/** Extract the URI scheme (`ipfs` from `ipfs://Qm…`, `web3` from `web3://0x…`). */
 function schemeOf(uri: string): string {
   const m = /^([a-z][a-z0-9+.-]*):/i.exec(uri)
   return m?.[1] !== undefined ? m[1].toLowerCase() : ''
 }
 
 /**
- * Decide the file's mirrors and the transport-definition anchor UID for them.
+ * Look up the `/transports/<scheme>` anchor UID for a mirror's scheme: an explicit
+ * `opts.transportDefinition` wins, else the deployment's `transports` map.
  *
- * - Caller-supplied `opts.mirrors` are used verbatim (the bytes live there). The
- *   transport definition comes from `opts.transportDefinition`, else the
- *   deployment's `transports` map keyed by the FIRST mirror's scheme.
- * - No mirrors → fall back to a single inline `data:` URI (guarded by
- *   {@link MAX_INLINE_BYTES}); its transport definition is the `data` transport.
- *
- * @throws {EfsError} `MissingTransport` when no transport-definition anchor can be
- *   determined (the deploy seeds these; name what's missing).
- * @throws {EfsError} `InvalidArgument` when content exceeds the inline cap and no
- *   mirrors were supplied.
+ * @throws {EfsError} `MissingTransport` when neither source has one.
  */
-export function resolveMirrors(
-  bytes: Uint8Array,
+function transportDefinitionFor(
+  scheme: string,
   deployment: EfsDeployment,
   opts: WriteOptions | undefined,
-): { mirrors: string[]; transportDefinition: Hex } {
-  const transports = deployment.transports ?? {}
-
-  // Caller supplied where the bytes live → use those mirrors.
-  const first = opts?.mirrors?.[0]
-  if (opts?.mirrors !== undefined && first !== undefined) {
-    const mirrors = [...opts.mirrors]
-    const scheme = schemeOf(first)
-    const transportDefinition = opts.transportDefinition ?? transports[scheme]
-    if (transportDefinition === undefined) {
-      throw new EfsError(
-        `EFS write: no transport definition for scheme '${scheme}'. Pass \`opts.transportDefinition\` (the on-chain /transports/${scheme} anchor UID), or use a deployment whose \`transports\` map records it (the deploy seeds these).`,
-        { code: 'MissingTransport' },
-      )
-    }
-    return { mirrors, transportDefinition }
-  }
-
-  // No mirrors → inline data: fallback (size-capped).
-  if (bytes.byteLength > MAX_INLINE_BYTES) {
-    throw new EfsError(
-      `EFS write: content is ${bytes.byteLength} bytes, over the ${MAX_INLINE_BYTES}-byte inline cap. Supply \`opts.mirrors\` (URIs where the bytes are hosted) for content this large.`,
-      { code: 'InvalidArgument' },
-    )
-  }
-  const transportDefinition = opts?.transportDefinition ?? transports[TRANSPORT.data]
+): Hex {
+  const transportDefinition = opts?.transportDefinition ?? deployment.transports?.[scheme]
   if (transportDefinition === undefined) {
     throw new EfsError(
-      `EFS write: no transport definition for the inline 'data' scheme. Pass \`opts.transportDefinition\` (the on-chain /transports/data anchor UID) or supply \`opts.mirrors\`; the deploy seeds the transports map.`,
+      `EFS write: no transport definition for scheme '${scheme}'. Pass \`opts.transportDefinition\` (the on-chain /transports/${scheme} anchor UID), or use a deployment whose \`transports\` map records it (the deploy seeds these).`,
       { code: 'MissingTransport' },
     )
   }
-  return { mirrors: [toDataUri(bytes, opts?.contentType)], transportDefinition }
+  return transportDefinition
+}
+
+/**
+ * Decide the file's mirrors + transport-definition anchor UID, storing on-chain
+ * when that is the resolved path. Three branches:
+ *
+ *  1. Caller-supplied `opts.mirrors` → used verbatim (bytes live there; no storage
+ *     happens). Transport from `opts.transportDefinition`, else the deployment map
+ *     keyed by the FIRST mirror's scheme.
+ *  2. No mirrors, `{ storage: 'onchain' }` OR within the on-chain auto-cap →
+ *     deploy the bytes on-chain (SSTORE2 chunk + manager) and publish the
+ *     `web3://<manager>` URI as the mirror, with the `web3` (`/transports/onchain`)
+ *     transport anchor. The cap is bypassed when `storage:'onchain'` is set.
+ *  3. No mirrors, over the cap, no override → throw {@link PayloadTooLarge}.
+ *
+ * @throws {EfsError} `MissingTransport` when no transport-definition anchor exists.
+ * @throws {PayloadTooLarge} no mirrors + over the auto-cap + no `storage` override.
+ * @throws {MultiChunkUnsupported} on-chain payload exceeds one SSTORE2 chunk.
+ */
+export async function resolveMirrors(
+  bytes: Uint8Array,
+  ctx: FileWriteContext,
+  opts: WriteOptions | undefined,
+): Promise<{ mirrors: string[]; transportDefinition: Hex }> {
+  const { deployment } = ctx
+
+  // 1. Caller supplied where the bytes live → use those mirrors (no storage).
+  const first = opts?.mirrors?.[0]
+  if (opts?.mirrors !== undefined && first !== undefined) {
+    return {
+      mirrors: [...opts.mirrors],
+      transportDefinition: transportDefinitionFor(schemeOf(first), deployment, opts),
+    }
+  }
+
+  // 2/3. No mirrors → on-chain SSTORE2 storage (the zero-infra default). Forced by
+  // `storage:'onchain'` (cap bypassed), else gated by the on-chain auto-cap.
+  const forced = opts?.storage === 'onchain'
+  const limit = ctx.onchainAutoLimit ?? DEFAULT_ONCHAIN_AUTO_LIMIT
+  if (!forced && bytes.byteLength > limit) {
+    throw new PayloadTooLarge(bytes.byteLength, limit)
+  }
+
+  // The web3:// mirror's transport is the `web3` scheme (the /transports/onchain
+  // anchor). Resolve it first (a missing one throws MissingTransport before any
+  // deploy); `storeOnchain` then deploys and throws MultiChunkUnsupported for an
+  // over-one-chunk payload (only reachable via the `storage:'onchain'` cap bypass).
+  const transportDefinition = transportDefinitionFor(TRANSPORT.web3, deployment, opts)
+  const { web3Uri } = await storeOnchain(bytes, {
+    walletClient: ctx.walletClient,
+    publicClient: ctx.publicClient,
+    ...(ctx.account !== undefined ? { account: ctx.account } : {}),
+    ...(ctx.chain !== undefined ? { chain: ctx.chain } : {}),
+  })
+  return { mirrors: [web3Uri], transportDefinition }
 }
 
 /** The viem clients + deployment context the file-write orchestrator needs. */
 export interface FileWriteContext {
-  readonly publicClient: ResolvePublicClient & SubmitPublicClient
-  readonly walletClient: SubmitWalletClient
+  readonly publicClient: ResolvePublicClient & SubmitPublicClient & OnchainPublicClient
+  readonly walletClient: SubmitWalletClient & OnchainWalletClient
   readonly deployment: EfsDeployment
   /** The signing account (forwarded to the submitter's `writeContract`). */
   readonly account?: Address | Account
   /** The chain to assert against (forwarded to the submitter). */
   readonly chain?: Chain
+  /**
+   * Client-level cap (bytes) for the no-mirrors AUTO on-chain store
+   * (`write.onchainAutoLimit`). Omitted ⇒ {@link DEFAULT_ONCHAIN_AUTO_LIMIT}
+   * (16 KB). A per-call `{ storage: 'onchain' }` bypasses it.
+   */
+  readonly onchainAutoLimit?: number
 }
 
 /**
@@ -188,15 +200,18 @@ export async function writeFileTier1(
   const contentHash = hashContent(content)
   const size = BigInt(content.byteLength)
 
-  // 2. Mirror + transport-definition (caller mirrors, else inline data:).
-  const { mirrors, transportDefinition } = resolveMirrors(content, deployment, opts)
-
-  // 3. Resolve the parent folder anchor (require it to exist) + the file name.
+  // 2. Resolve the parent folder anchor (require it to exist) + the file name.
+  // Done BEFORE storage so a missing-parent write fails fast — never deploying
+  // on-chain chunks for a path that can't be placed.
   const { parentAnchorUID, fileName } = await resolveParentAnchor(
     ctx.publicClient,
     deployment.contracts.indexer,
     path,
   )
+
+  // 3. Mirror + transport-definition. With no caller `mirrors` this STORES the
+  // bytes on-chain (SSTORE2) and yields a web3:// mirror — the zero-infra default.
+  const { mirrors, transportDefinition } = await resolveMirrors(content, ctx, opts)
 
   // 4. Build the pure write plan (the 9-schema, layered attestation DAG).
   const plan = buildFileWriteGraph({

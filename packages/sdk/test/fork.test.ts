@@ -19,17 +19,12 @@
  *
  *   EFS_FORK_TEST=1 pnpm --filter @efs/sdk test fork
  *
- * ## Transport choice (why `https://` and not the default inline `data:`)
- *
- * The SDK's default inline path mints a `data:` MIRROR, but the on-chain
- * MirrorResolver's `_isAllowedScheme` REJECTS `data:` (it is an inline-payload /
- * active-content scheme excluded for XSS safety), and the bootstrap seeds no
- * `/transports/data` anchor anyway. So the default write would revert at the
- * MIRROR layer. For a self-contained round-trip we publish an `https://` MIRROR
- * (an allowed scheme, with a seeded `/transports/https` anchor) pointing at a
- * tiny in-test loopback server, and read it back with the SSRF guard disabled
- * (`allowPrivateHosts` — the caller owns egress here). This exercises the real
- * MIRROR `onAttest` validation AND the real fetch+verify read path.
+ * The first test publishes an explicit `https://` MIRROR (a loopback server) so it
+ * can read the bytes back through the SDK's off-chain fetch+verify engine — which
+ * does NOT resolve `web3://` yet (that needs a chain client + ERC-6944 decode). The
+ * second test exercises the new zero-infra DEFAULT: `fs.write` with no `mirrors`
+ * stores the bytes on-chain (SSTORE2 chunk + manager) and publishes a `web3://`
+ * MIRROR, then reads them back through the canonical EFSRouter (ERC-5219 `request`).
  */
 
 import { type Server, createServer } from 'node:http'
@@ -266,5 +261,95 @@ describe.skipIf(!liveEnabled)('fork write→read round-trip (live deploy)', () =
     expect(file.verification).toBe('matches-author')
     expect(new Uint8Array(file.bytes)).toEqual(payload)
     expect(file.hashAuthor.toLowerCase()).toBe(account.address.toLowerCase())
+  }, 300_000)
+
+  // ── On-chain (web3:// + SSTORE2) default storage round-trip ─────────────────
+  //
+  // Exercises the ZERO-INFRA default: `fs.write` with NO `mirrors`. The SDK
+  // deploys the bytes on-chain (one SSTORE2 chunk + an EFSBytesStore manager) and
+  // publishes a `web3://<manager>` MIRROR. We read the bytes back two ways and
+  // assert they agree: (1) through the canonical EFSRouter (ERC-5219 `request(path)`),
+  // which serves web3:// content by `extcodecopy`-ing the chunk — proving the URI the
+  // SDK forms is exactly what the router parses; and (2) through the SDK's OWN public
+  // read path (`efs.fs.read` / `efs.fs.readBytes`), which now resolves web3:// via the
+  // chain-client SSTORE2 read transport (mirror/web3.ts) and contentHash-verifies it.
+  it('stores a small file on-chain (no mirrors) and reads it back via the router AND the SDK', async () => {
+    const account = privateKeyToAccount(ACCOUNT_0_PK)
+    const transport = http(NODE_URL, { timeout: 90_000 })
+    const publicClient = createPublicClient({ chain: localChain, transport })
+    const walletClient = createWalletClient({ account, chain: localChain, transport })
+    const efs = createEfsClient({ publicClient, walletClient, deployments })
+
+    const onchainRunId = `${runId}-oc`
+    const onchainPath = `/onchain-${onchainRunId}.txt`
+    const onchainBytes = new TextEncoder().encode(`on-chain EFS round-trip ${onchainRunId} ✅`)
+
+    // WRITE — no mirrors → on-chain SSTORE2 storage (the default).
+    const receipt = await efs.fs.write(onchainPath, onchainBytes, {
+      contentType: 'text/plain; charset=utf-8',
+    })
+    expect(receipt.status).toBe('confirmed')
+    expect(receipt.steps.every((s) => s.done)).toBe(true)
+
+    // Confirm a web3:// MIRROR landed on the DATA (read the raw mirror attestations
+    // for the file via the SDK's info+expand, scoped to the wallet lens).
+    const info = await efs.fs.info(onchainPath, { expand: ['mirrors'] as const })
+    expect(info.exists).toBe(true)
+
+    // READ via the canonical EFSRouter ERC-5219 `request(path, params)`. The router
+    // resolves the placement, finds the web3:// mirror, and returns the bytes.
+    const routerRequestAbi = [
+      {
+        type: 'function',
+        name: 'request',
+        stateMutability: 'view',
+        inputs: [
+          { name: 'resource', type: 'string[]' },
+          {
+            name: 'params',
+            type: 'tuple[]',
+            components: [
+              { name: 'key', type: 'string' },
+              { name: 'value', type: 'string' },
+            ],
+          },
+        ],
+        outputs: [
+          { name: 'statusCode', type: 'uint16' },
+          { name: 'body', type: 'string' },
+          {
+            name: 'headers',
+            type: 'tuple[]',
+            components: [
+              { name: 'key', type: 'string' },
+              { name: 'value', type: 'string' },
+            ],
+          },
+        ],
+      },
+    ] as const
+    const [status, body] = (await publicClient.readContract({
+      address: deployment.contracts.router,
+      abi: routerRequestAbi,
+      functionName: 'request',
+      args: [[onchainPath.replace(/^\//, '')], [{ key: 'lenses', value: account.address }]],
+    })) as readonly [number, string, unknown]
+
+    expect(status).toBe(200)
+    // The router returns the raw bytes as a string body; compare byte-for-byte.
+    expect(new TextEncoder().encode(body)).toEqual(onchainBytes)
+
+    // ── READ via the SDK's own public path (the real round-trip) ───────────────
+    // `efs.fs.read` resolves the placement, reads the web3:// mirror, and now reads
+    // the SSTORE2 chunks back via the chain client (mirror/web3.ts), then verifies
+    // the bytes against the attester's contentHash PROPERTY.
+    const file = await efs.fs.read(onchainPath)
+    expect(file.verification).toBe('matches-author')
+    expect(new Uint8Array(file.bytes)).toEqual(onchainBytes)
+    expect(file.hashAuthor?.toLowerCase()).toBe(account.address.toLowerCase())
+
+    // readBytes is fail-closed: it returns the bytes only when verification passes.
+    const readBack = await efs.fs.readBytes(onchainPath)
+    expect(new Uint8Array(readBack)).toEqual(onchainBytes)
   }, 300_000)
 })

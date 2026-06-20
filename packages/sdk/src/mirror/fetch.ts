@@ -24,6 +24,7 @@ import { type SsrfGuardOptions, checkSsrf } from './ssrf.js'
 import {
   type ResolveOptions,
   type ResolvedTransport,
+  TRANSPORT,
   resolveTransport,
   summarizeUri,
 } from './transport.js'
@@ -40,6 +41,14 @@ function mirrorUri(m: Mirror): string {
   return typeof m === 'string' ? m : m.uri
 }
 
+/**
+ * Resolve a `web3://` mirror URI to its on-chain (SSTORE2) bytes. Injected by the
+ * read path (which threads its `publicClient` into {@link readWeb3Bytes}); the
+ * mirror engine itself stays chain-free. Absent ⇒ `web3://` mirrors are recorded as
+ * a failed attempt (the original NotImplemented seam), so a later mirror can win.
+ */
+export type Web3Reader = (uri: string) => Promise<Uint8Array>
+
 /** Options for {@link fetchVerified}. */
 export type FetchVerifiedOptions = ResolveOptions &
   SsrfGuardOptions & {
@@ -51,6 +60,10 @@ export type FetchVerifiedOptions = ResolveOptions &
     signal?: AbortSignal
     /** Inject a `fetch` implementation (tests stub this). Defaults to global. */
     fetchImpl?: typeof fetch
+    /** Resolve a `web3://` mirror to its on-chain bytes (see {@link Web3Reader}).
+     * When provided, `web3://` mirrors become a real transport; when absent they
+     * stay the NotImplemented seam (recorded as a failed attempt). */
+    web3Reader?: Web3Reader
   }
 
 /** One failed attempt, kept so callers can surface why every mirror failed. */
@@ -275,9 +288,10 @@ async function fetchOne(
  * `expectedHash`. Tries mirrors in order; within a mirror, tries each candidate
  * gateway URL in order; SSRF-blocked URLs are skipped (recorded as attempts).
  *
- * `data:` URIs short-circuit to their inline bytes (no network). `web3://`
- * throws NotImplemented when its (lazy) `httpUrls` is read - recorded as a
- * failed attempt so a later mirror can still win.
+ * `data:` URIs short-circuit to their inline bytes (no network). `web3://` reads its
+ * on-chain (SSTORE2) bytes via the injected `web3Reader` when one is provided;
+ * without a reader it throws NotImplemented (recorded as a failed attempt so a later
+ * mirror can still win).
  *
  * @throws {AllMirrorsFailedError} if no mirror yielded bytes.
  */
@@ -332,6 +346,30 @@ export async function fetchVerified(
           : {}),
         mirrorUsed: uri,
         attempts,
+      }
+    }
+
+    // web3:// — read the on-chain (SSTORE2) bytes via the injected reader, when one
+    // is provided. No network/SSRF: the bytes come off the chain client. Still cap
+    // the size + verify like any mirror (the on-chain store is a locator, not the
+    // hash). With no reader, fall through to httpUrls() → the NotImplemented seam.
+    if (resolved.scheme === TRANSPORT.web3 && opts.web3Reader) {
+      try {
+        const bytes = await opts.web3Reader(uri)
+        const maxBytes = opts.maxBytes ?? DEFAULT_MAX_BYTES
+        if (bytes.byteLength > maxBytes) {
+          attempts.push({
+            uri: safeUri,
+            scheme: resolved.scheme,
+            reason: `on-chain payload ${bytes.byteLength} bytes exceeds cap (${maxBytes})`,
+          })
+          continue
+        }
+        const verification = statusFor(bytes, expectedHash)
+        return { bytes, verification, mirrorUsed: uri, attempts }
+      } catch (err) {
+        attempts.push({ uri: safeUri, scheme: resolved.scheme, reason: errMsg(err) })
+        continue
       }
     }
 

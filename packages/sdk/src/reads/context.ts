@@ -55,6 +55,10 @@ export interface ReadPublicClient {
     args?: readonly unknown[]
   }): Promise<unknown>
   getEnsAddress?(args: { name: string }): Promise<Address | null>
+  /** Read a contract's deployed bytecode — used by the `web3://` (SSTORE2) read
+   * transport to code-copy each chunk. Optional on the structural type (mocks may
+   * omit it); a real viem `PublicClient` always provides it. */
+  getCode?(args: { address: Address }): Promise<Hex | undefined>
 }
 
 /** Everything a read verb needs, assembled once by the client. */

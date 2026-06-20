@@ -19,7 +19,8 @@
  * omitted reads the SDK's read + write-path-resolution paths need. Added:
  *   - `getDirectoryPage` (single-attester unfiltered page; bare `FileSystemItem[]`).
  *   - `getFilesAtPath` (per-lens active-PIN file resolution; `DirectoryPage`).
- *   - `getDataMirrors` (per-DATA active mirrors; returns `MirrorItem[]`).
+ *   - `getDataMirrors` (LENS-SCOPED per-DATA active mirrors; returns `MirrorItem[]`).
+ *   - `getDataMirrorsAllAttesters` (cross-attester discovery; returns `MirrorItem[]`).
  *   - `getCanonicalData` (deprecated no-op reverse lookup; returns bytes32(0)).
  *   - `decodeName` (pure anchor-name decoder).
  *
@@ -170,13 +171,27 @@ export const getFilesAtPathAbi = [
   },
 ] as const
 
+/** `MirrorItem` tuple components, shared by both mirror reads. Mirrors
+ * `EFSFileView.MirrorItem` (EFSFileView.sol:118-124):
+ * `{ bytes32 uid; bytes32 transportDefinition; string uri; address attester; uint64 timestamp }`. */
+const mirrorItemComponents = [
+  { name: 'uid', type: 'bytes32' },
+  { name: 'transportDefinition', type: 'bytes32' },
+  { name: 'uri', type: 'string' },
+  { name: 'attester', type: 'address' },
+  { name: 'timestamp', type: 'uint64' },
+] as const
+
 /**
- * `EFSFileView.getDataMirrors(bytes32 dataUID, uint256 start, uint256 length)
- * -> MirrorItem[]` (EFSFileView.sol:919-923). The per-DATA active-mirror lookup
- * (revoked excluded). `MirrorItem` (EFSFileView.sol:118-124):
- * `{ bytes32 uid; bytes32 transportDefinition; string uri; address attester; uint64 timestamp }`.
- * Mirror selection (transport priority + lens scope) is the SDK's / router's job over
- * this list — this read does not itself pick a winner.
+ * `EFSFileView.getDataMirrors(bytes32 dataUID, address attester, uint256 start,
+ * uint256 length) -> MirrorItem[]` (EFSFileView.sol:935-952). The LENS-SCOPED per-DATA
+ * active-mirror lookup (revoked excluded on-chain). The lens `attester` is a REQUIRED
+ * parameter (reads are lens-scoped — overview.md load-bearing invariants): this returns
+ * ONLY the named attester's active mirrors, so a foreign attester's mirror (arbitrary-scheme
+ * bytes since ADR-0056) can never surface on data served under someone else's lens. The SDK
+ * read path passes the winning lens (`resolvedBy`) here, so the scope is enforced on-chain,
+ * not by post-filtering. Mirror selection (transport priority) is the SDK's / router's job
+ * over this list — this read does not itself pick a winner.
  */
 export const getDataMirrorsAbi = [
   {
@@ -185,59 +200,34 @@ export const getDataMirrorsAbi = [
     stateMutability: 'view',
     inputs: [
       { name: 'dataUID', type: 'bytes32' },
-      { name: 'start', type: 'uint256' },
-      { name: 'length', type: 'uint256' },
-    ],
-    outputs: [
-      {
-        name: '',
-        type: 'tuple[]',
-        components: [
-          { name: 'uid', type: 'bytes32' },
-          { name: 'transportDefinition', type: 'bytes32' },
-          { name: 'uri', type: 'string' },
-          { name: 'attester', type: 'address' },
-          { name: 'timestamp', type: 'uint64' },
-        ],
-      },
-    ],
-  },
-] as const
-
-/**
- * `EFSFileView.getDataMirrorsByAttester(bytes32 dataUID, address attester, uint256 start,
- * uint256 length) -> MirrorItem[]` (EFSFileView.sol:984-989). The LENS-SCOPED per-DATA
- * active-mirror lookup (ADR-0056 lens-scoping fix): unlike the unscoped `getDataMirrors`
- * (which returns every attester's mirrors and forces the caller to filter), this returns
- * ONLY the named attester's active mirrors. The SDK read path scopes to the winning lens
- * (`resolvedBy`) by passing that address here, so a foreign attester's mirror can never
- * surface on data served under someone else's lens. Same `MirrorItem` shape as
- * `getDataMirrors`.
- */
-export const getDataMirrorsByAttesterAbi = [
-  {
-    type: 'function',
-    name: 'getDataMirrorsByAttester',
-    stateMutability: 'view',
-    inputs: [
-      { name: 'dataUID', type: 'bytes32' },
       { name: 'attester', type: 'address' },
       { name: 'start', type: 'uint256' },
       { name: 'length', type: 'uint256' },
     ],
-    outputs: [
-      {
-        name: '',
-        type: 'tuple[]',
-        components: [
-          { name: 'uid', type: 'bytes32' },
-          { name: 'transportDefinition', type: 'bytes32' },
-          { name: 'uri', type: 'string' },
-          { name: 'attester', type: 'address' },
-          { name: 'timestamp', type: 'uint64' },
-        ],
-      },
+    outputs: [{ name: '', type: 'tuple[]', components: mirrorItemComponents }],
+  },
+] as const
+
+/**
+ * `EFSFileView.getDataMirrorsAllAttesters(bytes32 dataUID, uint256 start, uint256 length)
+ * -> MirrorItem[]` (EFSFileView.sol:965-980). The cross-attester per-DATA active-mirror
+ * lookup — explicitly NOT lens-scoped (debug / discovery only). Returns every attester's
+ * mirrors; each `MirrorItem.attester` is returned so a consumer can label/filter, but a
+ * consumer MUST NOT render a foreign URI as a live link or auto-fetch it (ADR-0056). The
+ * SDK's trusted read path uses the lens-scoped `getDataMirrors(dataUID, attester, …)`;
+ * this exists only for cross-attester inspection. Same `MirrorItem` shape.
+ */
+export const getDataMirrorsAllAttestersAbi = [
+  {
+    type: 'function',
+    name: 'getDataMirrorsAllAttesters',
+    stateMutability: 'view',
+    inputs: [
+      { name: 'dataUID', type: 'bytes32' },
+      { name: 'start', type: 'uint256' },
+      { name: 'length', type: 'uint256' },
     ],
+    outputs: [{ name: '', type: 'tuple[]', components: mirrorItemComponents }],
   },
 ] as const
 
@@ -283,7 +273,7 @@ export const fileViewAbi = [
   ...getDirectoryPageFilteredAbi,
   ...getFilesAtPathAbi,
   ...getDataMirrorsAbi,
-  ...getDataMirrorsByAttesterAbi,
+  ...getDataMirrorsAllAttestersAbi,
   ...getCanonicalDataAbi,
   ...decodeNameAbi,
 ] as const

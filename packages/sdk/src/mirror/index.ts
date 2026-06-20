@@ -32,7 +32,15 @@ export {
   type FetchVerifiedOptions,
   type FetchVerifiedResult,
   type AttemptError,
+  type Web3Reader,
 } from './fetch.js'
+
+export {
+  readWeb3Bytes,
+  parseWeb3Uri,
+  Web3ReadError,
+  type Web3ReadClient,
+} from './web3.js'
 
 export {
   checkSsrf,

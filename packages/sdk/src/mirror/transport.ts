@@ -5,8 +5,10 @@
  *
  * Doctrine (future-proofing.md §2, standards.md "Content addressing"):
  *   - `ipfs://`/`ar://`/`https://` ADOPT; `data:` SEAM (tiny inline content);
- *     `web3://` we own but resolution needs a chain + ERC-6944 → NotImplemented
- *     here (clear seam); `magnet://` parse-only (no HTTP resolution).
+ *     `web3://` we own — it resolves to on-chain (SSTORE2) bytes via a chain client,
+ *     handled in `fetch.ts` (the injected `web3Reader`), not here; this layer keeps
+ *     the `httpUrls()` NotImplemented seam as the fallback when no reader is wired.
+ *     `magnet://` parse-only (no HTTP resolution).
  *   - CID is a *locator only* — never trusted as `sha256(bytes)` (ADR-0006).
  *     We always re-verify fetched bytes against the attested `contentHash`.
  *   - Multi-gateway fallback: a transport can expand to several candidate URLs;
@@ -191,17 +193,17 @@ export function resolveTransport(uri: string, opts: { maxBytes?: number } = {}):
       }
 
     case 'web3':
-      // Recognized, but resolution needs a chain client plus ERC-6944
-      // (resolveMode == "5219") decoding — out of scope for the off-chain fetch
-      // engine. The seam: a future web3 resolver yields the on-chain (status,
-      // body, headers) which this engine would then treat like inline bytes.
+      // Recognized. Resolution needs a chain client (read the SSTORE2 chunks via the
+      // EFSBytesStore manager), so it is handled in fetch.ts by an injected
+      // `web3Reader` — NOT via HTTP URLs. `httpUrls()` stays the NotImplemented seam
+      // for the no-reader path (recorded as a failed attempt so a later mirror wins).
       return {
         scheme: TRANSPORT.web3,
         uri,
         httpUrls: () => {
           throw new TransportNotImplementedError(
             TRANSPORT.web3,
-            'needs a chain client and ERC-6944 resolveMode decoding',
+            'web3:// resolves via a chain client (mirror/web3.ts), not HTTP — wire a web3Reader',
           )
         },
       }

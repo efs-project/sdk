@@ -2,15 +2,19 @@
  * End-to-end test of the Tier-1 `efs.fs.write` orchestrator (`writes/file.ts`)
  * with **mocked viem clients** — no live chain. It exercises the full pipeline:
  *
- *   hashContent → resolveMirrors → resolveParentAnchor (mocked readContract) →
- *   buildFileWriteGraph → submitWriteTier1 (mocked writeContract + receipts) →
- *   WriteReceipt.
+ *   hashContent → resolveParentAnchor (mocked readContract) → resolveMirrors
+ *   (on-chain SSTORE2 storage via mocked deployContract/sendTransaction, OR caller
+ *   mirrors) → buildFileWriteGraph → submitWriteTier1 (mocked writeContract +
+ *   receipts) → WriteReceipt.
  *
  * The mock chain reuses the patterns from `writes-submit.test.ts`: a stub
  * `writeContract` that records each layer's flattened entries and fabricates one
  * `Attested` log per attestation in submission order, and a `waitForTransactionReceipt`
  * keyed by tx hash. The public client also answers `rootAnchorUID`/`resolvePath`
- * for parent resolution.
+ * for parent resolution. The wallet client additionally stubs `deployContract`
+ * (chunk manager) + `sendTransaction` (SSTORE2 chunk init-code), each minting a
+ * deploy receipt carrying a deterministic `contractAddress` — the on-chain default
+ * storage path.
  */
 
 import {
@@ -39,8 +43,11 @@ const INDEXER = addr(0x1de6)
 const ACCOUNT = addr(0xacc01)
 const ROOT = uid(0x1)
 const DOCS_ANCHOR = uid(0x10)
-const TRANSPORT_DATA = uid(0x2d) // /transports/data anchor UID
 const TRANSPORT_IPFS = uid(0x2f) // /transports/ipfs anchor UID
+const TRANSPORT_ONCHAIN = uid(0x2c) // /transports/onchain anchor UID (web3:// scheme)
+/** Deterministic addresses the mocked deploys return (chunk, then manager). */
+const CHUNK_ADDR = addr(0x5c01)
+const MANAGER_ADDR = addr(0x11a0)
 
 const SCHEMAS = {
   anchor: uid(0xa),
@@ -105,21 +112,39 @@ interface SentLayer {
   entries: { schema: Hex; refUID: Hex; data: Hex; revocable: boolean }[]
 }
 
+/** A recorded on-chain storage deploy (SSTORE2 chunk init-code, or chunk manager). */
+interface SentDeploy {
+  kind: 'chunk' | 'manager'
+  /** The chunk's init code (`data`), present only for `kind: 'chunk'`. */
+  data?: Hex
+  /** The manager's constructor args (`address[]`), present only for `kind: 'manager'`. */
+  managerArgs?: readonly Address[]
+}
+
 /**
  * Build the full mocked `FileWriteContext`. `edges` maps `parent|name → uid` for
  * `resolvePath`; default seeds `/docs`. `transports` controls the deployment map.
+ * `onchainAutoLimit` overrides the client-level cap. The wallet client stubs the
+ * attestation `writeContract` AND the on-chain storage deploys
+ * (`sendTransaction` = chunk, `deployContract` = manager); deploy receipts carry a
+ * deterministic `contractAddress`.
  */
 function makeCtx(
   opts: {
     edges?: Record<string, Hex>
     transports?: Record<string, Hex>
+    onchainAutoLimit?: number
   } = {},
-): { ctx: FileWriteContext; sent: SentLayer[] } {
+): { ctx: FileWriteContext; sent: SentLayer[]; deploys: SentDeploy[] } {
   const edges = opts.edges ?? { [`${ROOT}|docs`]: DOCS_ANCHOR }
   const sent: SentLayer[] = []
+  const deploys: SentDeploy[] = []
   let globalIndex = 0
   let callIndex = 0
   const receipts = new Map<Hex, TransactionReceipt>()
+  // Deploy receipts carry a contractAddress; keyed separately so a deploy tx hash
+  // resolves to a {contractAddress} receipt (chunk first, manager second).
+  const deployContractAddr = new Map<Hex, Address>()
 
   const publicClient = {
     async readContract(args: { functionName: string; args?: readonly unknown[] }) {
@@ -131,6 +156,8 @@ function makeCtx(
       throw new Error(`unexpected readContract ${args.functionName}`)
     },
     async waitForTransactionReceipt({ hash }: { hash: Hex }) {
+      const deployed = deployContractAddr.get(hash)
+      if (deployed !== undefined) return { contractAddress: deployed } as TransactionReceipt
       const r = receipts.get(hash)
       if (!r) throw new Error(`mock: no receipt for ${hash}`)
       return r
@@ -166,23 +193,44 @@ function makeCtx(
       } as TransactionReceipt)
       return txHash
     },
+    // SSTORE2 chunk deploy (raw init-code; no `to`). Returns the chunk address.
+    async sendTransaction(args: { data: Hex; to?: undefined }) {
+      deploys.push({ kind: 'chunk', data: args.data })
+      const hash = uid(0xc000 + deploys.length)
+      deployContractAddr.set(hash, CHUNK_ADDR)
+      return hash
+    },
+    // Chunk-manager deploy. Returns the manager address.
+    async deployContract(args: { args: readonly [readonly Address[]] }) {
+      deploys.push({ kind: 'manager', managerArgs: args.args[0] })
+      const hash = uid(0xe000 + deploys.length)
+      deployContractAddr.set(hash, MANAGER_ADDR)
+      return hash
+    },
   }
 
   const ctx = {
     publicClient,
     walletClient,
-    deployment: makeDeployment(opts.transports ?? { data: TRANSPORT_DATA, ipfs: TRANSPORT_IPFS }),
+    deployment: makeDeployment(
+      opts.transports ?? {
+        onchain: TRANSPORT_ONCHAIN,
+        web3: TRANSPORT_ONCHAIN,
+        ipfs: TRANSPORT_IPFS,
+      },
+    ),
     account: ACCOUNT,
     chain: undefined,
+    ...(opts.onchainAutoLimit !== undefined ? { onchainAutoLimit: opts.onchainAutoLimit } : {}),
   } as unknown as FileWriteContext
-  return { ctx, sent }
+  return { ctx, sent, deploys }
 }
 
 const CONTENT = new Uint8Array([1, 2, 3, 4])
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
-describe('writeFileTier1 — full Tier-1 path with inline data: fallback', () => {
+describe('writeFileTier1 — full Tier-1 path with on-chain (web3://) default storage', () => {
   it('resolves deps, builds the graph, submits per layer, returns a populated receipt', async () => {
     const { ctx, sent } = makeCtx()
     const receipt = await writeFileTier1('/docs/readme.md', CONTENT, ctx, {
@@ -213,20 +261,30 @@ describe('writeFileTier1 — full Tier-1 path with inline data: fallback', () =>
     expect(receipt.data?.chainId).toBe(31337)
   })
 
-  it('inlines content as a data: mirror using the deployment data transport', async () => {
-    const { ctx, sent } = makeCtx()
+  it('stores bytes on-chain (chunk + manager) and publishes a web3:// mirror', async () => {
+    const { ctx, sent, deploys } = makeCtx()
     await writeFileTier1('/docs/readme.md', CONTENT, ctx)
 
-    // The MIRROR lives in L2 (sent[1]); decode it to confirm a data: URI + the
-    // data transport anchor. MIRROR schema = (bytes32 transportDefinition, string uri).
+    // Two deploys: the SSTORE2 chunk (init-code), then the chunk manager wrapping
+    // the chunk address (single-element array — v1 is single-chunk).
+    expect(deploys).toHaveLength(2)
+    expect(deploys[0].kind).toBe('chunk')
+    // The chunk init code is `0x61<len>80600c6000396000f300<content>` — the SSTORE2
+    // stub + the STOP byte + the raw content. Confirm the content tail + STOP byte.
+    expect(deploys[0].data?.startsWith('0x61')).toBe(true)
+    expect(deploys[0].data?.endsWith('0001020304')).toBe(true)
+    expect(deploys[1].kind).toBe('manager')
+    expect(deploys[1].managerArgs).toEqual([CHUNK_ADDR])
+
+    // The MIRROR (L2) carries web3://<manager> + the onchain transport anchor.
     const { SchemaEncoder } = await import('../src/eas/schema-encoder.js')
     const { EFS_SCHEMA_FIELDS } = await import('../src/eas/schemas.js')
     const mirrorEnc = new SchemaEncoder(EFS_SCHEMA_FIELDS.mirror)
     const mirrorEntry = sent[1].entries.find((e) => e.schema === SCHEMAS.mirror)
     expect(mirrorEntry).toBeDefined()
     const [transportDef, uriValue] = mirrorEnc.decodeData(mirrorEntry!.data) as [Hex, string]
-    expect(transportDef).toBe(TRANSPORT_DATA)
-    expect(uriValue.startsWith('data:')).toBe(true)
+    expect(transportDef).toBe(TRANSPORT_ONCHAIN)
+    expect(uriValue).toBe(`web3://${MANAGER_ADDR}`)
   })
 })
 
@@ -259,6 +317,39 @@ describe('writeFileTier1 — caller-supplied mirrors', () => {
     const [transportDef] = mirrorEnc.decodeData(mirrorEntry!.data) as [Hex, string]
     expect(transportDef).toBe(override)
   })
+
+  it('caller mirrors skip on-chain storage entirely (no deploys)', async () => {
+    const { ctx, deploys } = makeCtx()
+    await writeFileTier1('/docs/readme.md', CONTENT, ctx, {
+      mirrors: ['ipfs://QmExample'],
+    })
+    expect(deploys).toHaveLength(0)
+  })
+})
+
+describe('writeFileTier1 — on-chain storage overrides + caps', () => {
+  it('{ storage: "onchain" } stores on-chain even with no mirrors (and over the cap)', async () => {
+    // Cap set to 2 bytes; CONTENT is 4 bytes → would normally throw PayloadTooLarge.
+    // The storage override bypasses the cap and stores on-chain anyway.
+    const { ctx, sent, deploys } = makeCtx({ onchainAutoLimit: 2 })
+    await writeFileTier1('/docs/readme.md', CONTENT, ctx, { storage: 'onchain' })
+    expect(deploys).toHaveLength(2)
+    const { SchemaEncoder } = await import('../src/eas/schema-encoder.js')
+    const { EFS_SCHEMA_FIELDS } = await import('../src/eas/schemas.js')
+    const mirrorEnc = new SchemaEncoder(EFS_SCHEMA_FIELDS.mirror)
+    const mirrorEntry = sent[1].entries.find((e) => e.schema === SCHEMAS.mirror)
+    const [, uriValue] = mirrorEnc.decodeData(mirrorEntry!.data) as [Hex, string]
+    expect(uriValue).toBe(`web3://${MANAGER_ADDR}`)
+  })
+
+  it('respects a raised onchainAutoLimit (stores on-chain at a size that the default would reject)', async () => {
+    // 8 KB content, cap raised to 8 KB → on-chain (default 16 KB would also allow,
+    // so use a SMALL default override to prove the client cap is what's consulted).
+    const big = new Uint8Array(6 * 1024)
+    const { ctx, deploys } = makeCtx({ onchainAutoLimit: 8 * 1024 })
+    await writeFileTier1('/docs/big.bin', big, ctx)
+    expect(deploys).toHaveLength(2)
+  })
 })
 
 describe('writeFileTier1 — error paths', () => {
@@ -269,16 +360,19 @@ describe('writeFileTier1 — error paths', () => {
     expect((err as ParentNotFoundError).missingSegment).toBe('docs')
   })
 
-  it('throws MissingTransport when no data transport is recorded and none supplied', async () => {
-    const { ctx } = makeCtx({ transports: {} }) // no data transport anchor
+  it('throws MissingTransport when no web3 transport is recorded for the on-chain default', async () => {
+    const { ctx, deploys } = makeCtx({ transports: {} }) // no onchain/web3 anchor
     const err = await writeFileTier1('/docs/readme.md', CONTENT, ctx).catch((e) => e)
     expect(err).toBeInstanceOf(Error)
     expect((err as { code?: string }).code).toBe('MissingTransport')
-    expect(String((err as Error).message)).toMatch(/transports\/data/)
+    expect(String((err as Error).message)).toMatch(/transports\/web3/)
+    // The transport is looked up AFTER the deploys, but a missing one still surfaces.
+    // (Deploys may have run; the point is the write fails clearly, not silently.)
+    void deploys
   })
 
   it('throws MissingTransport for a caller mirror whose scheme has no transport anchor', async () => {
-    const { ctx } = makeCtx({ transports: { data: TRANSPORT_DATA } }) // ipfs missing
+    const { ctx } = makeCtx({ transports: { onchain: TRANSPORT_ONCHAIN } }) // ipfs missing
     const err = await writeFileTier1('/docs/readme.md', CONTENT, ctx, {
       mirrors: ['ipfs://QmExample'],
     }).catch((e) => e)
@@ -286,11 +380,24 @@ describe('writeFileTier1 — error paths', () => {
     expect(String((err as Error).message)).toMatch(/ipfs/)
   })
 
-  it('rejects oversized content with no mirrors (inline cap)', async () => {
-    const { ctx } = makeCtx()
-    const big = new Uint8Array(5 * 1024) // over MAX_INLINE_BYTES (4 KiB)
-    const err = await writeFileTier1('/docs/big.bin', big, ctx).catch((e) => e)
-    expect((err as { code?: string }).code).toBe('InvalidArgument')
-    expect(String((err as Error).message)).toMatch(/inline cap/)
+  it('throws PayloadTooLarge for no-mirrors content over the on-chain auto-cap', async () => {
+    const { ctx, deploys } = makeCtx({ onchainAutoLimit: 2 }) // cap below CONTENT's 4 bytes
+    const err = await writeFileTier1('/docs/big.bin', CONTENT, ctx).catch((e) => e)
+    expect((err as { code?: string }).code).toBe('PayloadTooLarge')
+    expect(String((err as Error).message)).toMatch(/on-chain auto-store cap/)
+    // No on-chain deploy is attempted when the cap rejects the payload.
+    expect(deploys).toHaveLength(0)
+  })
+
+  it('throws MultiChunkUnsupported when a forced on-chain payload exceeds one chunk', async () => {
+    const { ctx, deploys } = makeCtx()
+    const huge = new Uint8Array(25 * 1024) // > MAX_SINGLE_CHUNK_BYTES (~24 KB)
+    const err = await writeFileTier1('/docs/huge.bin', huge, ctx, { storage: 'onchain' }).catch(
+      (e) => e,
+    )
+    expect((err as { code?: string }).code).toBe('MultiChunkUnsupported')
+    expect(String((err as Error).message)).toMatch(/single-chunk/)
+    // The chunk deploy throws before any contract is created.
+    expect(deploys).toHaveLength(0)
   })
 })

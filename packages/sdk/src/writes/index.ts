@@ -30,9 +30,17 @@ export {
   type RefMap,
 } from './submit.js'
 
+export { writeFileTier1, resolveMirrors, type FileWriteContext } from './file.js'
+
 export {
-  writeFileTier1,
-  resolveMirrors,
-  MAX_INLINE_BYTES,
-  type FileWriteContext,
-} from './file.js'
+  storeOnchain,
+  buildSstore2InitCode,
+  DEFAULT_ONCHAIN_AUTO_LIMIT,
+  MAX_SINGLE_CHUNK_BYTES,
+  EFS_BYTES_STORE_ABI,
+  PayloadTooLarge,
+  MultiChunkUnsupported,
+  type OnchainStoreContext,
+  type OnchainWalletClient,
+  type OnchainPublicClient,
+} from './onchain.js'

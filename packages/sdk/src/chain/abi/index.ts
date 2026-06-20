@@ -30,6 +30,7 @@ export {
   listReaderAbi,
 } from './listReader.js'
 export { fileViewAbi } from './fileView.js'
+export { chunkedSstore2Abi } from './chunkStore.js'
 
 // ── Per-contract fragment namespaces (collision-free access to single-fn ABIs) ─
 export * as routerAbiFragments from './router.js'

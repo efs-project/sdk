@@ -9,7 +9,7 @@
  *   - `getFilesAtPath`                        → winning placement under the lens
  *   - `getActivePinSlot`                      → placement PIN UID (provenance)
  *   - `resolveAnchor` + `getActivePinTarget` + `getAttestation` → reserved PROPERTY
- *   - `getDataMirrorsByAttester`              → lens-scoped per-DATA active mirrors
+ *   - `getDataMirrors`                        → lens-scoped per-DATA active mirrors
  *   - `getDirectoryPageByAddressList`         → directory page
  *
  * What is asserted (sdk-read-surface verbs + semantics):
@@ -206,7 +206,7 @@ function makeCtx(opts: {
           const data = attestations[u]
           return attestation({ uid: data !== undefined ? u : ZERO, data })
         }
-        case 'getDataMirrorsByAttester': {
+        case 'getDataMirrors': {
           const [, attester] = args.args as [Hex, Address]
           // The lens-scoped view returns ONLY the named attester's mirrors.
           return mirrors

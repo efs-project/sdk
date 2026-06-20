@@ -70,6 +70,7 @@ import type {
   PreviewOptions,
   ReadOpts,
   ReadResult,
+  WriteConfig,
   WriteEstimate,
   WriteOptions,
   WriteReceipt,
@@ -90,6 +91,12 @@ type CommonConfig = {
   deployments?: DeploymentsMap
   /** Default lens when a read passes none (resolves to the connected account). */
   defaultLens?: Lens
+  /**
+   * Client-level write defaults. Notably `write.onchainAutoLimit` — the byte cap
+   * under which a no-mirrors `fs.write` auto-stores the bytes on-chain (SSTORE2 +
+   * a `web3://` mirror); over it throws `PayloadTooLarge`. Default 16 KB.
+   */
+  write?: WriteConfig
 }
 
 /** Standard form: an EIP-1193 provider + the chain. Pass an `account` to enable writes. */
@@ -316,6 +323,10 @@ export function createEfsClient(config: EfsClientConfig): EfsClient {
           // provider/account config; forward them so `writeContract` has them.
           account: wallet.account,
           chain: wallet.chain,
+          // Client-level on-chain auto-store cap (default applied in resolveMirrors).
+          ...(config.write?.onchainAutoLimit !== undefined
+            ? { onchainAutoLimit: config.write.onchainAutoLimit }
+            : {}),
         } as unknown as FileWriteContext
         return writeFileTier1(path, content, ctx, opts)
       },
@@ -414,6 +425,7 @@ export type {
   SourceUIDs,
   OverviewResult,
   OverviewOptions,
+  WriteConfig,
   WriteReceipt,
   WriteMechanism,
   CallStatus,

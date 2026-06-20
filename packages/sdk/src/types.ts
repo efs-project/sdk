@@ -194,12 +194,23 @@ export type WriteOptions = {
   resume?: WriteReceipt
   signal?: AbortSignal
   /**
+   * Where to store the bytes when no `mirrors` are supplied. Default behavior
+   * (omitted): if the content is within the client's on-chain auto-cap
+   * (`write.onchainAutoLimit`, default 16 KB) it is stored ON-CHAIN via SSTORE2
+   * and published as a `web3://` MIRROR — zero setup, no off-chain infra; over the
+   * cap throws `PayloadTooLarge`. Set `'onchain'` to FORCE on-chain storage
+   * regardless of size (bypasses the auto-cap; still single-chunk only — a payload
+   * over ~24 KB throws `MultiChunkUnsupported`). Ignored when `mirrors` is given
+   * (those take precedence and store off-chain).
+   */
+  storage?: 'onchain'
+  /**
    * Retrieval URIs where the bytes live (one MIRROR per entry). When supplied,
-   * the SDK does NOT inline the content — it publishes these as the file's
-   * mirrors. The URI scheme of the FIRST entry selects the transport definition
-   * (the on-chain `/transports/<scheme>` anchor) unless `transportDefinition` is
-   * given. Omit to fall back to a self-contained inline `data:` URI (guarded by a
-   * size cap — large content must supply `mirrors`).
+   * the SDK does NOT store the content (on-chain or inline) — it publishes these
+   * as the file's mirrors. The URI scheme of the FIRST entry selects the transport
+   * definition (the on-chain `/transports/<scheme>` anchor) unless
+   * `transportDefinition` is given. Omit to fall back to on-chain SSTORE2 storage
+   * (the zero-infra default, size-capped — see `storage`).
    */
   mirrors?: readonly string[]
   /**
@@ -216,6 +227,23 @@ export type WriteOptions = {
    * the connected account is not yet honored (a later slice).
    */
   lens?: Address
+}
+
+/**
+ * Client-level write defaults (the `write` key of the client config). Currently
+ * just the on-chain auto-store cap; additive — new write defaults land here without
+ * touching the per-call {@link WriteOptions}.
+ */
+export type WriteConfig = {
+  /**
+   * Cap (bytes) on the no-mirrors AUTO on-chain store. A `write(path, bytes)` with
+   * no `mirrors` and no `storage` override stores on-chain when
+   * `bytes.length <= onchainAutoLimit`, else throws `PayloadTooLarge`. Resets the
+   * built-in default (16 KB). A per-call `{ storage: 'onchain' }` bypasses this cap
+   * entirely (still single-chunk only). Must stay within one SSTORE2 chunk
+   * (~24 KB) — a larger value still throws `MultiChunkUnsupported` at store time.
+   */
+  onchainAutoLimit?: number
 }
 
 /** Options for `fs.preview`. Reserved now (review A12) so the write-simulation

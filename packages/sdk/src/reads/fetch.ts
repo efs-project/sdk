@@ -3,10 +3,10 @@
  * (`readText`/`readBytes`/`readJson`).
  *
  * Given a path or a {@link DataRef} (DATA UID + chainId + `resolvedBy`):
- *   1. `EFSFileView.getDataMirrorsByAttester(dataUID, resolvedBy, start, length)` →
- *      the winning lens's active mirrors (ADR-0056 lens-scoping fix; revoked excluded
- *      on-chain). We pass the winning attester so a foreign attester's mirror can
- *      never surface — the scope is enforced by the view, not by post-filtering.
+ *   1. `EFSFileView.getDataMirrors(dataUID, resolvedBy, start, length)` →
+ *      the winning lens's active mirrors (lens-scoped: the `attester` arg is required;
+ *      revoked excluded on-chain). We pass the winning attester so a foreign attester's
+ *      mirror can never surface — the scope is enforced by the view, not by post-filtering.
  *   2. Read the author's attested `contentHash` PROPERTY, scoped to `resolvedBy`.
  *   3. Hand the mirror URIs + that contentHash to the hardened {@link fetchVerified}
  *      engine (SSRF guard, size cap, data: decode, hash check) — pure orchestration.
@@ -29,6 +29,7 @@ import { fileViewAbi } from '../chain/abi/fileView.js'
 import { classifyError } from '../errors.js'
 import { ContentHashMismatch, FileNotFoundError, MalformedClaim } from '../errors.js'
 import { type FetchVerifiedOptions, type Mirror, fetchVerified } from '../mirror/fetch.js'
+import { type Web3ReadClient, readWeb3Bytes } from '../mirror/web3.js'
 import type {
   DataRef,
   EfsFile,
@@ -41,7 +42,7 @@ import { attestationFor } from './attestations.js'
 import { type ReadContext, read as readContract } from './context.js'
 import { readReservedProperty, resolvePlacement } from './file.js'
 
-/** A row returned by `getDataMirrorsByAttester`. */
+/** A row returned by `getDataMirrors` (lens-scoped). */
 type MirrorItem = {
   uid: Hex
   transportDefinition: Hex
@@ -50,14 +51,14 @@ type MirrorItem = {
   timestamp: bigint
 }
 
-/** How many mirrors to read per `getDataMirrorsByAttester` window. */
+/** How many mirrors to read per `getDataMirrors` window. */
 const MIRROR_PAGE = 50
 /** Hard cap on mirror rows scanned (matches the router's 500-row ceiling). */
 const MAX_MIRRORS = 500
 
 /**
  * Read the active mirror URIs for a DATA UID, scoped to the winning lens via the
- * lens-scoped view (ADR-0056). `getDataMirrorsByAttester` returns ONLY the named
+ * lens-scoped view. `getDataMirrors(dataUID, attester, …)` returns ONLY the named
  * attester's mirrors (already revoked-excluded), so no post-filtering by attester
  * is needed — the scope is enforced on-chain.
  */
@@ -71,7 +72,7 @@ async function lensMirrorUris(
     const rows = await readContract<readonly MirrorItem[]>(ctx.publicClient, {
       address: ctx.deployment.contracts.fileView,
       abi: fileViewAbi,
-      functionName: 'getDataMirrorsByAttester',
+      functionName: 'getDataMirrors',
       args: [dataUID, resolvedBy, BigInt(start), BigInt(MIRROR_PAGE)],
     })
     for (const m of rows) {
@@ -121,6 +122,13 @@ export async function fetchRef(
     ...(opts?.allowPrivateHosts !== undefined ? { allowPrivateHosts: opts.allowPrivateHosts } : {}),
     ...(opts?.allowHosts !== undefined ? { allowlist: opts.allowHosts } : {}),
     ...(opts?.fetchImpl !== undefined ? { fetchImpl: opts.fetchImpl } : {}),
+    // Thread the read `publicClient` into the `web3://` (SSTORE2) read transport so
+    // on-chain-stored files read back. Enabled only when the client can read bytecode
+    // (`getCode`) — a real viem PublicClient always can. The engine stays chain-free;
+    // the reader is the only chain-touching closure.
+    ...(typeof ctx.publicClient.getCode === 'function'
+      ? { web3Reader: (uri: string) => readWeb3Bytes(uri, ctx.publicClient as Web3ReadClient) }
+      : {}),
   }
   try {
     const result = await fetchVerified(mirrors, claimedHash, engineOpts)
