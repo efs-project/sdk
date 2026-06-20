@@ -299,7 +299,7 @@ contract EFSWriterTest is Test {
     }
 
     /// @dev Assert one reserved-key triplet starting at call index `base`:
-    ///      base   = key-ANCHOR (refUID = DATA, non-revocable, data = (key, generic forSchema))
+    ///      base   = key-ANCHOR (refUID = DATA, non-revocable, data = (key, PROPERTY forSchema))
     ///      base+1 = PROPERTY   (refUID = 0,    non-revocable, data = (value))
     ///      base+2 = binding-PIN(refUID = PROPERTY, revocable, definition = key-ANCHOR)
     function _assertReservedTriplet(
@@ -312,7 +312,9 @@ contract EFSWriterTest is Test {
         assertEq(keyAnchor.schema, schemas.anchor, "key-ANCHOR schema");
         assertEq(keyAnchor.refUID, dataUID, "key-ANCHOR refUID = DATA");
         assertEq(keyAnchor.revocable, false, "key-ANCHOR non-revocable");
-        assertEq(keyAnchor.data, abi.encode(key, bytes32(0)), "key-ANCHOR data = (key, generic)");
+        assertEq(
+            keyAnchor.data, abi.encode(key, schemas.property), "key-ANCHOR data = (key, PROPERTY)"
+        );
 
         MockEAS.Call memory property = eas.callAt(base + 1);
         assertEq(property.schema, schemas.property, "PROPERTY schema");

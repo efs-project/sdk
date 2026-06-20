@@ -151,12 +151,14 @@ contract EFSWritesTest is Test {
 
         assertEq(eas.callCount(), 3, "property triple = 3 attestations");
 
-        // 0: key-ANCHOR (name = key, refUID = DATA, generic forSchema, non-revocable)
+        // 0: key-ANCHOR (name = key, refUID = DATA, forSchema = PROPERTY schema, non-revocable)
         MockEAS.Call memory ka = eas.callAt(0);
         assertEq(ka.schema, schemas.anchor, "key-ANCHOR schema");
         assertEq(ka.refUID, DATA_UID, "key-ANCHOR refUID = DATA");
         assertEq(ka.revocable, false, "key-ANCHOR non-revocable");
-        assertEq(ka.data, abi.encode("author", bytes32(0)), "key-ANCHOR data = (key, generic)");
+        assertEq(
+            ka.data, abi.encode("author", schemas.property), "key-ANCHOR data = (key, PROPERTY)"
+        );
         assertEq(keyAnchorUID, _uid(0));
 
         // 1: PROPERTY (free-floating value)

@@ -186,9 +186,15 @@ library EFSLib {
             ReservedKey memory rk = w.reservedKeys[i];
 
             // L2 key-ANCHOR: name = the reserved key, refUID = DATA (binds the metadata anchor to
-            // the file identity). forSchema is generic (PROPERTY binding targets via the PIN's
-            // definition/refUID, not via this field) — matches graph.ts GENERIC_FOR_SCHEMA.
-            bytes32 keyAnchorUID = _attestAnchor(eas, w.schemas.anchor, rk.key, EMPTY_UID, dataUID);
+            // the file identity). forSchema MUST be the PROPERTY schema UID — it is the third key of
+            // the EFSIndexer anchor directory (_nameToAnchor[parent][name][forSchema], :432/:527), so
+            // a property key-anchor written under a generic forSchema lands in a different slot and is
+            // invisible to every spec-conformant reader, incl. EFSRouter._getContentType (which
+            // resolves contentType via resolveAnchor(DATA, key, PROPERTY_SCHEMA_UID)). Matches
+            // graph.ts, which writes the key-anchor with schemas.property. (Generic forSchema is for
+            // plain folder/file path nodes only — see {anchorAt}.)
+            bytes32 keyAnchorUID =
+                _attestAnchor(eas, w.schemas.anchor, rk.key, w.schemas.property, dataUID);
 
             // L2 PROPERTY + L3 binding-PIN: the interned value (refUID 0, non-revocable) plus the
             // cardinality-1 PIN(definition = key-ANCHOR, refUID = PROPERTY) — same triple
@@ -340,8 +346,11 @@ library EFSLib {
         string memory keyName,
         string memory value
     ) internal returns (bytes32 keyAnchorUID, bytes32 propertyUID, bytes32 bindingPinUID) {
-        // L2 key-ANCHOR: name = key, refUID = DATA, generic forSchema — binds the slot to the DATA.
-        keyAnchorUID = _attestAnchor(eas, schemas.anchor, keyName, EMPTY_UID, dataUID);
+        // L2 key-ANCHOR: name = key, refUID = DATA, forSchema = PROPERTY schema UID. forSchema is the
+        // third key of the EFSIndexer anchor directory (:432/:527), so it MUST be schemas.property —
+        // a generic forSchema files the property under a different slot, invisible to spec-conformant
+        // readers (EFSRouter, graph.ts/props.get). Generic forSchema is for folder/file nodes only.
+        keyAnchorUID = _attestAnchor(eas, schemas.anchor, keyName, schemas.property, dataUID);
         (propertyUID, bindingPinUID) = _bindProperty(eas, schemas, keyAnchorUID, value);
     }
 
