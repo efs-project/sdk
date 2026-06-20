@@ -445,6 +445,92 @@ export type WriteEstimate = {
  * carried to `read(ref)` alone can still verify; kept here for the read-time view. */
 export type ReadResult = { data: DataRef; resolvedBy: Address }
 
+// ── Lists (curated collections — ADR-0044/0046) ─────────────────────────────────
+
+/**
+ * The kind of target a LIST holds, denormalized from the LIST config's `uint8
+ * targetType` (`IListReader.ListMode.targetType`; `ListReader.sol`):
+ *   - `'any'`    (0) — opaque member keys (`bytes32`); use `targetAsMemberKey`.
+ *   - `'addr'`   (1) — Ethereum addresses; use `targetAsAddress`.
+ *   - `'schema'` (2) — attestation/anchor UIDs of one schema (`targetSchema`); use
+ *     `targetAsUID`.
+ * A literal union (not the raw `uint8`) so the value is self-describing on the DTO.
+ */
+export type ListTargetType = 'any' | 'addr' | 'schema'
+
+/**
+ * A LIST's configuration + identity — the `efs.lists.get` result, decoded from the
+ * LIST attestation via `ListReader.getMode(listUID)` (schema-checked BEFORE decode,
+ * so a non-LIST UID surfaces `exists:false` rather than a spoofed config). NOT
+ * lens-scoped: the config is the curator's own declaration, read by UID. A plain
+ * serializable DTO (matches the read-surface DTO rule).
+ */
+export type ListConfig = {
+  /** The LIST UID this config describes (echoed for convenience). */
+  listUID: Hex
+  /** `false` when no LIST attestation exists at `listUID` (or it is the wrong
+   * schema). Every other field is a zero/default value when `exists:false`. */
+  exists: boolean
+  /** The curator — the LIST attestation's `attester` (`ListMode.curator`). The
+   * default lens for the entry reads (a single-curator list reads its own entries). */
+  curator: Address
+  /** Whether the same target may appear more than once (`allowsDuplicates`). When
+   * `false`, {@link ListsNs.entries} dedupes by identity key (first occurrence wins). */
+  allowsDuplicates: boolean
+  /** Append-only (entries can never be revoked/removed) vs revocable. */
+  appendOnly: boolean
+  /** The target kind (`any`/`addr`/`schema`) the typed entry accessors key on. */
+  targetType: ListTargetType
+  /** For `targetType:'schema'`, the single schema UID every target must be; the
+   * zero word otherwise. */
+  targetSchema: Hex
+  /** Cap on the number of entries (`0` = uncapped). */
+  maxEntries: bigint
+}
+
+/**
+ * One resolved LIST entry — an item of the `efs.lists.entries` page. The `target`
+ * is decoded per the list's {@link ListTargetType}: an `Address` for `addr`, a UID
+ * `Hex` for `schema`, or an opaque member-key `Hex` for `any` (the `targetKind`
+ * field tells a consumer which). Plain serializable data; insertion order preserved.
+ */
+export type ListEntry = {
+  /** The LIST_ENTRY attestation UID (the entry's own identity; revoke target). */
+  entryUID: Hex
+  /** Which flavor `target` is — mirrors the owning list's {@link ListTargetType}. */
+  targetKind: ListTargetType
+  /** The resolved target: an `Address` (`addr`), a UID (`schema`), or an opaque
+   * member key (`any`). The on-chain `identityKey` for ADDR/ANY; the decoded UID for
+   * SCHEMA. */
+  target: Address | Hex
+  /** The attester whose entry this is (the lens attester the entries were read for).
+   * For a single-curator list this equals {@link ListConfig.curator}. */
+  attester: Address
+}
+
+/** Options for the lens-scoped LIST entry reads (`entries`/`length`/`has`). */
+export type ListReadOptions = {
+  /** The lens to resolve the contributing attester through. A `Lens`, a raw
+   * `Address` (literal lens), or omitted (defaults to the client `defaultLens`, then
+   * the connected wallet, then the deployment SystemAccount — same ladder as the
+   * file reads). The list entries are read for the FIRST resolved attester that has
+   * any (first-attester-wins), mirroring how the on-chain reads key on one
+   * `attester` and how file placement resolves first-wins. */
+  lens?: Lens | Address
+  /** Max entries per page (the SDK windows `ListReader.entries`). */
+  limit?: number
+  /** Opaque resumable cursor from a prior {@link Page}. */
+  cursor?: string
+}
+
+/** Options for `efs.lists.get` — lens accepted for API symmetry, but the config is
+ * read by UID (the LIST attestation), so the lens does not scope it. */
+export type ListGetOptions = {
+  /** Accepted for symmetry with the other list verbs; the config read is by-UID and
+   * NOT lens-scoped (it decodes the curator's own LIST attestation). */
+  lens?: Lens | Address
+}
+
 /**
  * A raw EAS attestation record (the `IEAS.getAttestation` return), inlined as plain
  * serializable data when `expand:['attestations']` is requested (sdk-read-surface

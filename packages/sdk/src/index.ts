@@ -60,6 +60,18 @@ import {
 } from './reads/fetch.js'
 import { exists as existsRead, info as infoRead, locate as locateRead } from './reads/file.js'
 import { list as listRead } from './reads/list.js'
+import {
+  getList as getListRead,
+  listEntries as listEntriesRead,
+  listHas as listHasRead,
+  listLength as listLengthRead,
+} from './reads/lists.js'
+import {
+  type SortInfo,
+  type SortReadOptions,
+  applySort as applySortRead,
+  getSort as getSortRead,
+} from './reads/sorts.js'
 import type {
   AccountCapabilities,
   Attestation,
@@ -72,7 +84,11 @@ import type {
   Expanded,
   FetchOptions,
   FileInfo,
+  ListConfig,
+  ListEntry,
+  ListGetOptions,
   ListOptions,
+  ListReadOptions,
   OverviewOptions,
   OverviewResult,
   PreviewOptions,
@@ -216,6 +232,45 @@ export type EfsLensesNs = {
 }
 
 /**
+ * The `efs.lists.*` namespace — read surface for curated collections (LISTs;
+ * ADR-0044/0046). Reads only; the write primitives are authored via the Solidity
+ * SDK / EAS verbs. Available on read-only and write clients alike (no wallet needed).
+ *
+ *   - `get(listUID, { lens? })` — the LIST config + identity (`getMode`). NOT
+ *     lens-scoped (the config is the curator's declaration); `exists:false` when
+ *     absent (a probe — never throws on absence).
+ *   - `entries(listUID, { lens?, limit?, cursor? })` — the lens-scoped, ordered,
+ *     deduped entries as an {@link EfsList} (first-attester-wins; dedupe honors the
+ *     list's `allowsDuplicates`; target decoded per `targetType`). Throws
+ *     `ListNotFound` (on first read) when no LIST exists.
+ *   - `length(listUID, { lens? })` / `has(listUID, target, { lens? })` — O(1) count
+ *     and membership for the resolved lens attester. Both throw `ListNotFound`.
+ */
+export type EfsListsNs = {
+  get(listUID: Hex, opts?: ListGetOptions): Promise<ListConfig>
+  entries(listUID: Hex, opts?: ListReadOptions): EfsList<ListEntry>
+  length(listUID: Hex, opts?: ListReadOptions): Promise<bigint>
+  has(listUID: Hex, target: Address | Hex, opts?: ListReadOptions): Promise<boolean>
+}
+
+/**
+ * The `efs.sorts.*` namespace — read surface for SORT overlays (sorted views over
+ * kernel child arrays).
+ *
+ * @experimental — DEFERRED. SORT_INFO is not yet in the frozen schema set /
+ * deployments registry, so every verb throws `NotImplemented` with a pointer (the
+ * on-chain encoding could still change; the SDK does not guess it). The namespace +
+ * signatures are present so the real implementation lands additively. Use
+ * `efs.lists.*` for curated ordering today.
+ */
+export type EfsSortsNs = {
+  /** @experimental — throws `NotImplemented` until SORT_INFO is frozen + deployed. */
+  get(sortInfoUID: Hex, opts?: SortReadOptions): Promise<SortInfo>
+  /** @experimental — throws `NotImplemented` until SORT_INFO is frozen + deployed. */
+  apply(parentAnchor: Hex, sortInfoUID: Hex, opts?: SortReadOptions): Promise<never>
+}
+
+/**
  * The `efs.account.*` namespace (sdk-wallet-architecture §Public surface) —
  * read-by-default account introspection over the execution seam. Present only on a
  * write-capable client (it answers questions about the SIGNING account). Today just
@@ -297,6 +352,10 @@ export type EfsRawNs = EfsRawReadNs
 export type EfsReadClient = {
   fs: EfsFsRead
   lenses: EfsLensesNs
+  /** Curated-collection reads (`efs.lists.*`); no wallet required. */
+  lists: EfsListsNs
+  /** SORT overlay reads (`efs.sorts.*`); @experimental — deferred, throws today. */
+  sorts: EfsSortsNs
   eas: EfsEasReadNs
   raw: EfsRawReadNs
   /** Round-trip bridge: raw {@link Attestation} (or a UID) → the typed view. */
@@ -537,6 +596,21 @@ export function createEfsClient(config: EfsClientConfig): EfsClient {
       lens,
       identity,
     },
+    // Curated-collection reads (`efs.lists.*`). `get`/`length`/`has` are async over
+    // the read context; `entries` is synchronous (a lazy EfsList) — defer the context
+    // into a thunk so the synchronous call never throws (mirrors `fs.list`).
+    lists: {
+      get: (listUID, opts) => getListRead(readContext(), listUID, opts),
+      entries: (listUID, opts) => listEntriesRead(readContext, listUID, opts),
+      length: (listUID, opts) => listLengthRead(readContext(), listUID, opts),
+      has: (listUID, target, opts) => listHasRead(readContext(), listUID, target, opts),
+    },
+    // SORT overlay reads (`efs.sorts.*`). @experimental — every verb throws
+    // NotImplemented until SORT_INFO is frozen + deployed (see reads/sorts.ts).
+    sorts: {
+      get: (sortInfoUID, opts) => getSortRead(sortInfoUID, opts),
+      apply: (parentAnchor, sortInfoUID, opts) => applySortRead(parentAnchor, sortInfoUID, opts),
+    },
     eas: {
       encoder: (schema) => new SchemaEncoder(schema),
       computeUID: computeAttestationUID,
@@ -706,6 +780,11 @@ export type {
   ExpandToken,
   Expanded,
   ListOptions,
+  ListConfig,
+  ListEntry,
+  ListTargetType,
+  ListReadOptions,
+  ListGetOptions,
   FetchOptions,
   TransportName,
   WriteOptions,
@@ -790,3 +869,19 @@ export {
   type HydratedItem,
 } from './reads/attestations.js'
 export { list, DEFAULT_PAGE_SIZE } from './reads/list.js'
+// Curated-collection (LIST) reads — `efs.lists.*` internals (ADR-0044/0046).
+export {
+  getList,
+  listEntries,
+  listLength,
+  listHas,
+  DEFAULT_LIST_PAGE_SIZE,
+} from './reads/lists.js'
+// SORT overlay reads — `efs.sorts.*`. @experimental (deferred; throws until frozen).
+export {
+  getSort,
+  applySort,
+  type SortInfo,
+  type SortSourceType,
+  type SortReadOptions,
+} from './reads/sorts.js'

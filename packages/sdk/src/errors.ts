@@ -6,6 +6,7 @@
  */
 
 import { BaseError, ContractFunctionRevertedError } from 'viem'
+import type { Hex } from 'viem'
 import { easAbi } from './eas/abi.js'
 
 /** Open string-union of error codes — open (`string & {}`) so adding a code is
@@ -24,6 +25,12 @@ export type EfsErrorCode =
   | 'ParentNotFound'
   /** No file is placed at a path under the read's lens (a byte read needs one). */
   | 'FileNotFound'
+  /** No LIST attestation exists at the given UID (or it is the wrong schema). A
+   * `lists.get` returns `exists:false`; the lens-scoped entry reads throw this. */
+  | 'ListNotFound'
+  /** A typed list-entry accessor was called for the wrong `targetType` (e.g.
+   * `targetAsAddress` on a SCHEMA-typed list). Mirrors the ListReader revert. */
+  | 'WrongListTargetType'
   /** The winning attestation is revoked — distinct from absent (sdk-read-surface
    * error matrix). A byte read throws this; metadata surfaces `verified:'revoked'`. */
   | 'Revoked'
@@ -186,6 +193,43 @@ export class FileNotFoundError extends EfsError {
       code: 'FileNotFound',
     })
     this.path = path
+  }
+}
+
+/** No LIST attestation exists at `listUID` (or the UID points at a non-LIST
+ * attestation — `ListReader.getMode` schema-checks before decode). The cheap
+ * `lists.get` probe surfaces this as `exists:false`; the lens-scoped entry reads
+ * (`entries`/`length`/`has`) throw it, since reading entries of a non-existent list
+ * is a caller error, not a normal empty. */
+export class ListNotFound extends EfsError {
+  override name = 'ListNotFound'
+  readonly listUID: Hex
+  constructor(listUID: Hex) {
+    super(
+      `EFS lists: no LIST attestation exists at '${listUID}' (absent or wrong schema). Check the UID, or call efs.lists.get(uid) which reports { exists: false } instead of throwing.`,
+      { code: 'ListNotFound' },
+    )
+    this.listUID = listUID
+  }
+}
+
+/** A typed list-target accessor was requested for a list whose `targetType` does not
+ * match — e.g. asking for `addr` targets on a `schema`-typed list. The ListReader
+ * typed accessors revert in this case; the SDK refuses up front with the list's
+ * actual target type so the caller can pick the right read. */
+export class WrongListTargetType extends EfsError {
+  override name = 'WrongListTargetType'
+  readonly listUID: Hex
+  readonly actual: string
+  readonly requested: string
+  constructor(listUID: Hex, actual: string, requested: string) {
+    super(
+      `EFS lists: list '${listUID}' has targetType '${actual}', not '${requested}'. Read its entries with the matching target kind.`,
+      { code: 'WrongListTargetType' },
+    )
+    this.listUID = listUID
+    this.actual = actual
+    this.requested = requested
   }
 }
 
