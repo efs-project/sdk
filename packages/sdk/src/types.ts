@@ -186,9 +186,18 @@ export type DirEntry = {
 
 // ── Writes ─────────────────────────────────────────────────────────────────────
 
-/** How a batched write was delivered. Exported so additions are localized, not a
- * breaking change to an exhaustive `switch` (review C5). */
-export type WriteMechanism = 'sequential' | 'eip5792' | 'erc4337' | 'gateway'
+/** How a write was delivered. Open union (the `(string & {})` tail) so a new
+ * execution path is additive, never a breaking change to an exhaustive `switch`
+ * (review C5; wallet-arch review P2-C). `eip7702` = the user's EOA ran the EFS
+ * routine in-account via a 7702 authorization; `gateway` = the delegated-attestation
+ * relayer path. */
+export type WriteMechanism =
+  | 'sequential'
+  | 'eip5792'
+  | 'eip7702'
+  | 'erc4337'
+  | 'gateway'
+  | (string & Record<never, never>)
 
 /** Lifecycle status of a write/batch (review A3). Models EIP-5792 status `600`
  * (a half-written file) which a binary `done`/`ok` can't represent — without it
