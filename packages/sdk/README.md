@@ -2,7 +2,7 @@
 
 TypeScript SDK for the **Ethereum File System (EFS)** — read and write an on-chain filesystem built on EAS attestations.
 
-> **Status: scaffold.** The public surface is shaped; method bodies are stubs until the build lands. See [`docs/specs/overview.md`](../../docs/specs/overview.md) for how it works and [`docs/adr/`](../../docs/adr) for decisions.
+> **Status: pre-1.0.** The read/write core (fetch + verify + lens-scoped resolution, single-file write) is implemented; some surfaces (folder Overviews, preview, one-signature batch, directory filtering) still throw `NotImplemented`. See [`docs/specs/overview.md`](../../docs/specs/overview.md) for how it works and [`docs/adr/`](../../docs/adr) for decisions.
 
 ## Install
 
@@ -12,7 +12,7 @@ npm i @efs/sdk viem
 
 `viem` is a peer dependency (ADR-0002) — the SDK is viem-native and pulls in no `ethers`.
 
-## Quickstart (target API)
+## Quickstart
 
 The client is resource-namespaced (`efs.fs.*` for files, `efs.lenses.*`, `efs.eas.*`, `efs.raw.*`). Its boundary is the **standard** — an [EIP-1193](https://eips.ethereum.org/EIPS/eip-1193) provider + chain — so any wallet works; viem is the engine inside ([standards](../../docs/specs/standards.md)).
 
@@ -28,19 +28,35 @@ const efs = createEfsClient({
 })
 // (viem-native callers can pass `{ publicClient, walletClient }` instead.)
 
-// Resolve "the file at /logo" through an identity (ENS → key-set → lens).
-// `read` returns a reference + who resolved it; `fetch` gets the bytes (verified).
-const result = await efs.fs.read('/logo', { lens: identity('jamescarnley.eth') })
-if (result) {
-  const file = await efs.fs.fetch(result.data)
-  console.log(file.bytes, file.verification) // 'matches-author' | 'mismatch' | 'no-claim'
+// Read a file in one line. `read*` verbs fetch + verify the bytes; the fail-closed
+// sugar (`readText`/`readBytes`/`readJson`) throws on a contentHash mismatch.
+const text = await efs.fs.readText('/docs/readme.md', { lens: identity('jamescarnley.eth') })
+
+// No lens, no wallet? A read-only client falls back to the deployment's system lens,
+// so a public file still reads in one line:
+const readme = await createEfsClient({ provider, chain: sepolia }).fs.readText('/docs/readme.md')
+
+// Need the bytes + the trust status (not just the value)? Use `read`:
+const file = await efs.fs.read('/logo.png', { lens: identity('jamescarnley.eth') })
+console.log(file.bytes, file.verification) // 'matches-author' | 'mismatch' | 'no-claim'
+
+// The pointer only (which DATA/version + who resolved it, no bytes):
+const ref = await efs.fs.locate('/logo.png', { lens: identity('jamescarnley.eth') })
+
+// Metadata, presence, and listings:
+const meta = await efs.fs.info('/docs/readme.md', { lens: identity('jamescarnley.eth') })
+const there = await efs.fs.exists('/docs/readme.md', { lens: identity('jamescarnley.eth') })
+for await (const entry of efs.fs.list('/docs', { lens: identity('jamescarnley.eth') })) {
+  console.log(entry.kind, entry.name) // 'file' | 'dir'
 }
 
-// Write a file (batched multi-attestation under the hood).
+// Write a file (Tier-1 multi-attestation under the hood; needs an `account`).
 await efs.fs.write('/notes/hello.txt', new TextEncoder().encode('gm'))
 ```
 
-> **Status:** `efs.lenses`, `efs.eas`, content hashing, and the deployments registry are implemented; the `efs.fs.*` verbs above are the target shape and currently throw `NotImplemented`.
+> **Implemented:** `efs.fs.read`/`readText`/`readBytes`/`readJson`, `locate`, `info`, `exists`, `list`, `write`; `efs.lenses`, `efs.eas`, `efs.raw`, the off-chain fetch/mirror engine, content hashing, and the deployments registry.
+>
+> **Coming (throws `NotImplemented` with a workaround today):** `efs.fs.overview`/`setOverview` (folder READMEs — read/write `README.md` directly for now), `efs.fs.preview` (write cost estimate), `efs.batch` (one-signature multi-write — call `fs.write` per file for now), and `list({ excludes })` directory filtering (ADR-0011).
 
 ## Design notes that shape this API
 

@@ -13,9 +13,13 @@
  * The lens defaults, in order:
  *   1. `opts.lens` (a {@link Lens} or a raw `Address` treated as a literal lens);
  *   2. the SDK client's `defaultLens` (config);
- *   3. the connected wallet account (a single-address literal lens).
- * If none of those yields an attester, the read throws {@link LensRequired} — a
- * read with no attester to resolve against is meaningless, never a silent empty.
+ *   3. the connected wallet account (a single-address literal lens);
+ *   4. the deployment's {@link SYSTEM_LENS} — the SystemAccount address.
+ * Step 4 lets a no-wallet, no-lens client read a public file in one line
+ * (`createEfsClient({ provider, chain }).readText('/docs/readme.md')`), mirroring
+ * the contracts router's own `system` fallback. Only if even the SystemAccount is
+ * unavailable does the read throw {@link LensRequired} — a read with no attester to
+ * resolve against is meaningless, never a silent empty.
  *
  * ## Reads exclude revoked (ADR-0051)
  *
@@ -41,6 +45,16 @@ import type { ReadOptions } from '../types.js'
 
 /** `bytes32(0)` — the kernel's "empty slot" sentinel (mirrors `reads/resolve.ts`). */
 export const ZERO_UID = '0x0000000000000000000000000000000000000000000000000000000000000000' as Hex
+
+/**
+ * The default read lens when no explicit lens / default-lens / wallet account is
+ * available: the deployment's **SystemAccount** (`contracts.systemAccount`). This
+ * mirrors the contracts router's own `system` fallback so a read-only client can
+ * resolve a public file with zero lens knowledge. Resolved per-deployment at read
+ * time (the address is deployment-specific), so this is a marker, not a constant
+ * address — {@link resolveAttesters} reads `ctx.deployment.contracts.systemAccount`.
+ */
+export const SYSTEM_LENS = 'system' as const
 
 /**
  * The minimal viem public surface the read verbs need: a typed `readContract`.
@@ -73,16 +87,23 @@ export type ReadContext = {
 
 /**
  * Resolve the effective lens for a read into an ordered, deduped attester set.
- * Tries `opts.lens` → `ctx.defaultLens` → `ctx.account`; throws {@link LensRequired}
- * when none is available. The returned order is load-bearing (first-attester-wins).
+ * Tries `opts.lens` → `ctx.defaultLens` → `ctx.account` → the deployment's
+ * {@link SYSTEM_LENS} (SystemAccount); throws {@link LensRequired} only when even
+ * the SystemAccount is unavailable. The returned order is load-bearing
+ * (first-attester-wins).
  *
- * @throws {LensRequired} when no lens, default lens, or wallet account is present.
+ * @throws {LensRequired} when no lens, default lens, wallet account, OR deployment
+ *   SystemAccount is available.
  */
 export async function resolveAttesters(
   ctx: ReadContext,
   opts: ReadOptions | undefined,
 ): Promise<readonly Address[]> {
-  const input: Lens | Address | undefined = opts?.lens ?? ctx.defaultLens ?? ctx.account
+  // The SystemAccount is the last-resort lens (mirrors the router's `system`
+  // fallback), so a read-only client resolves public files with no lens knowledge.
+  const systemAccount = ctx.deployment.contracts.systemAccount
+  const input: Lens | Address | undefined =
+    opts?.lens ?? ctx.defaultLens ?? ctx.account ?? systemAccount
   if (input === undefined) throw new LensRequired()
   try {
     const attesters = await resolveLens(input, { publicClient: ctx.publicClient as never })

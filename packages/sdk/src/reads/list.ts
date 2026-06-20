@@ -126,7 +126,7 @@ export function list(
   // surfaces at call time rather than on first iteration.
   if (opts?.excludes && opts.excludes.length > 0) {
     throw new InvalidDirectoryQuery(
-      'Tag-exclusion filtering (opts.excludes) is not wired in fs.list yet — the unfiltered listing would leak excluded entries, so it is refused rather than silently ignored. Omit `excludes` for now.',
+      "directory exclude-filtering isn't implemented yet (tracked: ADR-0011) — the unfiltered listing would leak the entries you asked to hide, so it is refused rather than silently ignored. Omit `excludes`/`minWeights` for now.",
     )
   }
 

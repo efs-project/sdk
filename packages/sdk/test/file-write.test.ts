@@ -423,10 +423,9 @@ describe('writeFileTier1 — createParents (mkdir -p)', () => {
     const { ctx, sent } = makeCtx({ edges: {} })
     await writeFileTier1('/photos/2026/trip.jpg', CONTENT, ctx)
     const anchors = await anchorEntries(sent)
-    expect(anchors.filter((a) => a.name === 'photos' || a.name === '2026').map((a) => a.name)).toEqual([
-      'photos',
-      '2026',
-    ])
+    expect(
+      anchors.filter((a) => a.name === 'photos' || a.name === '2026').map((a) => a.name),
+    ).toEqual(['photos', '2026'])
   })
 
   it('only the leaf folder missing: creates ONLY that segment, reusing the deepest existing ancestor', async () => {

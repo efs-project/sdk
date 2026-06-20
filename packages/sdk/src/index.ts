@@ -300,7 +300,11 @@ export function createEfsClient(config: EfsClientConfig): EfsClient {
       // verbs). The thunk is evaluated inside `listRead`'s lazy `prime()`.
       list: (path, opts) => listRead(readContext, path, opts),
       overview: async (_path, _opts) => {
-        throw new NotImplemented('efs.fs.overview()')
+        throw new NotImplemented('efs.fs.overview()', {
+          alternative:
+            "read the folder's README.md directly for now: efs.fs.readText(`${path}/README.md`).",
+          tracking: 'ADR-0011',
+        })
       },
       write: async (path, content, opts) => {
         requireWallet()
@@ -331,11 +335,18 @@ export function createEfsClient(config: EfsClientConfig): EfsClient {
         return writeFileTier1(path, content, ctx, opts)
       },
       preview: async (_path, _content) => {
-        throw new NotImplemented('efs.fs.preview()')
+        throw new NotImplemented('efs.fs.preview()', {
+          alternative:
+            'call efs.fs.write() directly for now — it returns a receipt; pre-flight cost estimation is a later slice.',
+        })
       },
       setOverview: async (_container, _markdown, _opts) => {
         requireWallet()
-        throw new NotImplemented('efs.fs.setOverview()')
+        throw new NotImplemented('efs.fs.setOverview()', {
+          alternative:
+            "write the folder's README.md directly for now: efs.fs.write(`${container}/README.md`, bytes).",
+          tracking: 'ADR-0011',
+        })
       },
     },
     lenses: {
@@ -356,7 +367,10 @@ export function createEfsClient(config: EfsClientConfig): EfsClient {
     },
     batch: () => {
       requireWallet()
-      throw new NotImplemented('efs.batch()')
+      throw new NotImplemented('efs.batch()', {
+        alternative:
+          'call fs.write() per file for now — one signature per file; the one-signature batch path is a later slice.',
+      })
     },
   }
 }
@@ -463,6 +477,7 @@ export {
   type FileSystemItem,
   type DirectoryPageRaw,
   resolveAttesters,
+  SYSTEM_LENS,
 } from './reads/context.js'
 export {
   locate,

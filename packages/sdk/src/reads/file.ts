@@ -128,14 +128,19 @@ export async function resolvePlacement(
   // The active placement PIN's attestation UID — provenance for `sourceUIDs.placement`
   // and the record `info`/`expand:['attestations']` hydrates for the placement. The
   // slot is keyed by (definition=file anchor, attester=winning lens, targetSchema=DATA);
-  // `getActivePinSlot` returns `{ pinUID, targetID }` in one read. Absent → undefined
-  // (the placement still resolved via getFilesAtPath; the PIN-UID read is best-effort).
+  // `getActivePinSlot` returns `{ pinUID, targetID }` in one read.
+  //
+  // An EMPTY slot is a legitimate absence: the contract returns `pinUID: ZERO_UID`
+  // (a value, not a revert), which we surface as no `placementPinUID`. An RPC /
+  // transport failure is NOT absence — it must propagate (via `read`'s
+  // `classifyError` funnel) rather than be swallowed into a false "no provenance".
+  // So we do NOT `.catch()` here: only a real zero slot empties the provenance.
   const slot = await read<{ pinUID: Hex; targetID: Hex }>(ctx.publicClient, {
     address: contracts.edgeResolver,
     abi: edgeResolverAbi,
     functionName: 'getActivePinSlot',
     args: [fileAnchorUID, winner.attester, schemas.data],
-  }).catch(() => ({ pinUID: ZERO_UID, targetID: ZERO_UID }))
+  })
 
   return {
     dataUID: winner.uid as DataUID,
@@ -274,14 +279,17 @@ export async function info(ctx: ReadContext, path: string, opts?: ReadOpts): Pro
     if (v !== undefined) properties[k] = v
   })
 
-  // Verified status: a placement that resolved is matches-author at the metadata
-  // level (the byte-hash check is `read`'s job). The view already excludes revoked
-  // placements (ADR-0051), so a resolved placement is not revoked.
+  // Verified status: `info` never fetches or hashes the bytes, so it cannot claim
+  // `matches-author`/`mismatch` — those are reserved for paths that actually
+  // compared bytes (`read`/`cat`). A resolved placement only tells us the metadata
+  // record exists and is not revoked (the view excludes revoked placements,
+  // ADR-0051); it says nothing about whether the bytes match the claim. So the
+  // honest status here is `unchecked`.
   const info: FileInfo = {
     exists: true,
     ref,
     resolvedBy,
-    verified: 'matches-author',
+    verified: 'unchecked',
     sourceUIDs,
     ...(contentType !== undefined ? { contentType } : {}),
     ...(size !== undefined ? { size } : {}),

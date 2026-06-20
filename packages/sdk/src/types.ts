@@ -82,12 +82,19 @@ export type ListOptions = ReadOptions & {
    * SDK resolves to its `/tags/<name>` definition UID. Non-empty routes the
    * listing to the on-chain filtered view; empty/absent = unfiltered. Nothing is
    * excluded by default — pass `SAFETY_EXCLUDES` to opt into the common policy.
+   *
+   * @experimental — not yet implemented. The filtered-view wiring is tracked in
+   * ADR-0011; passing a non-empty `excludes` THROWS `InvalidDirectoryQuery` today
+   * (rather than silently returning an unfiltered listing, which would leak the
+   * entries you asked to hide). The typed option is present so it lands additively.
    */
   excludes?: readonly (Hex | string)[]
   /**
    * Per-exclude inclusive weight threshold (`weight >= minWeights[k]`), aligned
    * by index with `excludes`. Omitted or length-mismatched ⇒ an all-zero vector
    * (ADR-0042 default). Capped at 8 excludes on-chain.
+   *
+   * @experimental — not yet implemented (rides with `excludes`; see ADR-0011).
    */
   minWeights?: readonly bigint[]
 }
@@ -185,8 +192,18 @@ export type WriteMechanism = 'sequential' | 'eip5792' | 'erc4337' | 'gateway'
 
 /** Lifecycle status of a write/batch (review A3). Models EIP-5792 status `600`
  * (a half-written file) which a binary `done`/`ok` can't represent — without it
- * an abandoned sequential run returns a success-shaped receipt. */
-export type CallStatus = 'pending' | 'confirmed' | 'offchain-failed' | 'reverted' | 'partial'
+ * an abandoned sequential run returns a success-shaped receipt.
+ *
+ * INTENTIONALLY OPEN (`string & {}` tail, like `EfsErrorCode`/`TransportName`):
+ * EIP-5792's status wire format is still evolving (it already broke v1→v2), so a
+ * new status must not be a semver-major for an exhaustive `switch`. */
+export type CallStatus =
+  | 'pending'
+  | 'confirmed'
+  | 'offchain-failed'
+  | 'reverted'
+  | 'partial'
+  | (string & Record<never, never>)
 
 export type WriteOptions = {
   contentType?: string
@@ -280,8 +297,22 @@ export type WriteReceipt = {
 }
 
 /** The op-type a batch entry performed — partial-failure UIs need to show which
- * kind of operation failed (review A6). */
-export type OperationKind = 'write' | 'pin' | 'tag' | 'property' | 'list' | 'mirror' | 'sort'
+ * kind of operation failed (review A6).
+ *
+ * INTENTIONALLY OPEN (`string & {}` tail, like `EfsErrorCode`/`WriteMechanism`):
+ * new protocol primitives become new op-kinds over time, so adding one must not be
+ * a semver-major for an exhaustive `switch`. `'redirect'` is included — the REDIRECT
+ * schema is frozen and in the registry (ADR-0050). */
+export type OperationKind =
+  | 'write'
+  | 'pin'
+  | 'tag'
+  | 'property'
+  | 'list'
+  | 'mirror'
+  | 'sort'
+  | 'redirect'
+  | (string & Record<never, never>)
 
 /** One operation's result inside a multi-op batch. */
 export type OperationResult = {

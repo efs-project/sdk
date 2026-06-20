@@ -21,7 +21,8 @@
  *   - exists is a boolean;
  *   - list pages (.byPage) + iterates + .toArray with the opaque cursor;
  *   - attestationsFor batch-hydrates source UIDs;
- *   - LensRequired when neither a lens nor a wallet account is available.
+ *   - no-lens/no-wallet reads fall back to the deployment SystemAccount (SYSTEM_LENS);
+ *     LensRequired only when even the SystemAccount is unavailable.
  */
 
 import { type Address, type Hex, encodeAbiParameters } from 'viem'
@@ -267,8 +268,28 @@ describe('locate', () => {
     expect(res?.resolvedBy).toBe(LENS)
   })
 
-  it('throws LensRequired when neither a lens nor a wallet is available', async () => {
+  it('falls back to the deployment SystemAccount lens (no lens, no wallet)', async () => {
+    // A read-only client with no lens/wallet resolves via the SystemAccount
+    // (SYSTEM_LENS), mirroring the contracts router's `system` fallback — so a
+    // public file reads in one line with zero lens knowledge.
+    const SYSTEM = addr(0xee) // deployment().contracts.systemAccount
+    const calls: { fn: string; args: readonly unknown[] }[] = []
+    const ctx = makeCtx({
+      edges: README_EDGES,
+      files: [fileItem({ attester: SYSTEM })],
+      calls,
+    })
+    const res = await locate(ctx, '/docs/readme.md') // no opts.lens, no account
+    expect(res?.resolvedBy).toBe(SYSTEM)
+    // The attester set handed to the view IS the SystemAccount.
+    const filesCall = calls.find((c) => c.fn === 'getFilesAtPath')
+    expect(filesCall?.args[1]).toEqual([SYSTEM])
+  })
+
+  it('throws LensRequired only when even the SystemAccount is unavailable', async () => {
     const ctx = makeCtx({ edges: README_EDGES, files: [fileItem({})] })
+    // Strip the SystemAccount so there is genuinely no attester to resolve against.
+    ;(ctx.deployment.contracts as { systemAccount?: Address }).systemAccount = undefined
     await expect(locate(ctx, '/docs/readme.md')).rejects.toBeInstanceOf(LensRequired)
   })
 })
@@ -318,7 +339,10 @@ describe('info', () => {
     expect(i.contentType).toBe('text/markdown')
     expect(i.resolvedBy).toBe(LENS)
     expect(i.ref?.uid).toBe(DATA_UID)
-    expect(i.verified).toBe('matches-author')
+    // `info` never fetches/hashes the bytes, so it cannot claim matches-author —
+    // that status is reserved for the byte path (`read`). A resolved placement is
+    // `unchecked` at the metadata level.
+    expect(i.verified).toBe('unchecked')
     // Provenance: placement PIN + per-field property UIDs.
     expect(i.sourceUIDs.placement).toBe(PLACEMENT_PIN)
     expect(i.sourceUIDs.size).toBe(sizeProp)
@@ -602,8 +626,20 @@ describe('list', () => {
     expect(all[0]?.name).toBe('a.md')
   })
 
-  it('throws LensRequired (on .byPage) when no lens/wallet is available', async () => {
+  it('falls back to the SystemAccount lens on .byPage (no lens/wallet)', async () => {
+    // With no lens/wallet the listing resolves via the deployment SystemAccount
+    // (SYSTEM_LENS) rather than throwing — a public directory lists in one line.
+    const ctx = makeCtx({
+      edges: { [`${ROOT}|docs`]: DOCS_ANCHOR },
+      dirPage: { items: dirEntries, nextCursor: 0n },
+    })
+    const p = await list(() => ctx, '/docs').byPage()
+    expect(p.items).toHaveLength(2)
+  })
+
+  it('throws LensRequired (on .byPage) only when even the SystemAccount is unavailable', async () => {
     const ctx = makeCtx({ edges: { [`${ROOT}|docs`]: DOCS_ANCHOR } })
+    ;(ctx.deployment.contracts as { systemAccount?: Address }).systemAccount = undefined
     await expect(list(() => ctx, '/docs').byPage()).rejects.toBeInstanceOf(LensRequired)
   })
 

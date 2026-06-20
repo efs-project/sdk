@@ -38,7 +38,7 @@ export const TRANSPORT = {
 export const DEFAULT_IPFS_GATEWAYS: readonly string[] = [
   'https://ipfs.io',
   'https://dweb.link',
-  'https://cloudflare-ipfs.com',
+  'https://trustless-gateway.link',
 ]
 
 /** Default Arweave gateways, tried in order. Overridable via

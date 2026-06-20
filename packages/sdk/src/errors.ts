@@ -85,11 +85,22 @@ export class EfsError extends Error {
   }
 }
 
-/** A surface that is shaped but not yet implemented (scaffold/seam). */
+/** A surface that is shaped but not yet implemented (scaffold/seam). Optionally
+ * carries an `alternative` (what to do instead today) and/or a `tracking` reference
+ * (ADR/issue) so the message is a pointer, not a dead end. */
 export class NotImplemented extends EfsError {
   override name = 'NotImplemented'
-  constructor(what: string) {
-    super(`${what} is not implemented yet.`, { code: 'NotImplemented' })
+  /** A usable workaround for the missing surface, when one exists. */
+  readonly alternative?: string
+  /** Where the work is tracked (e.g. an ADR or issue id). */
+  readonly tracking?: string
+  constructor(what: string, opts: { alternative?: string; tracking?: string } = {}) {
+    const parts = [`${what} is not implemented yet.`]
+    if (opts.alternative) parts.push(opts.alternative)
+    if (opts.tracking) parts.push(`(tracked: ${opts.tracking})`)
+    super(parts.join(' '), { code: 'NotImplemented' })
+    if (opts.alternative !== undefined) this.alternative = opts.alternative
+    if (opts.tracking !== undefined) this.tracking = opts.tracking
   }
 }
 
