@@ -55,6 +55,7 @@ const tagEncoder = new SchemaEncoder(EFS_SCHEMA_FIELDS.tag)
 const anchorEncoder = new SchemaEncoder(EFS_SCHEMA_FIELDS.anchor)
 const propertyEncoder = new SchemaEncoder(EFS_SCHEMA_FIELDS.property)
 const pinEncoder = new SchemaEncoder(EFS_SCHEMA_FIELDS.pin)
+const mirrorEncoder = new SchemaEncoder(EFS_SCHEMA_FIELDS.mirror)
 const listEncoder = new SchemaEncoder(EFS_SCHEMA_FIELDS.list)
 const listEntryEncoder = new SchemaEncoder(EFS_SCHEMA_FIELDS.listEntry)
 const redirectEncoder = new SchemaEncoder(EFS_SCHEMA_FIELDS.redirect)
@@ -72,6 +73,8 @@ export const EDGE_REF = {
   LIST_ENTRY: 'listEntry',
   /** The minted REDIRECT attestation (its UID is the redirect handle / revoke target). */
   REDIRECT: 'redirect',
+  /** The minted MIRROR attestation (its UID is the mirror handle / revoke target). */
+  MIRROR: 'mirror',
 } as const
 
 /**
@@ -287,6 +290,54 @@ export function buildRedirectPlan(
     dataRefs: [], // no fresh siblings — both endpoints are concrete, encoded in data/refUID
   }
   return { hardlink: false, attestations: [redirect] }
+}
+
+/**
+ * Build the single-attestation plan for a **MIRROR** (the retrieval-method edge;
+ * MirrorResolver.sol): `MIRROR(refUID = dataUID, data = (transportDefinition, uri))`.
+ * The SAME attestation shape `writes/graph.ts` emits inline during a file write
+ * (`mirrorEncoder.encodeData([transportDefinition, uri])`, `refUID = DATA`,
+ * revocable) — re-derived here as a standalone one-attestation plan so a retrieval
+ * method can be added to an EXISTING DATA. Single-layer (the DATA + the transport
+ * anchor are both pre-existing concrete UIDs), so it submits as one `multiAttest` —
+ * one signature.
+ *
+ * Mirrors the `MirrorResolver.onAttest` shape (MirrorResolver.sol:141-197):
+ * `refUID` must resolve to a DATA attestation (:153-156), revocable MUST be `true`
+ * (`NotRevocable`, :163), expirationTime MUST be 0 (`HasExpiration`, :164), the URI
+ * must be non-empty + within `MAX_URI_LENGTH`, and `transportDefinition` MUST be an
+ * ANCHOR descending from the wired `/transports/` root (:181-188). The SDK resolves
+ * the transport anchor up front (see `writes/mirrors.ts`) so a bad/missing transport
+ * throws a typed `MissingTransport` instead of letting MirrorResolver revert; the
+ * descendancy/URI checks remain on-chain (a violation surfaces as `ContractReverted`).
+ *
+ * Cardinality: MIRROR is NOT cardinality-1 (ADR-0015 — no singleton enforcement).
+ * Multiple mirrors per DATA (and per transport) are allowed, so `add` never
+ * supersedes a prior mirror; removal is an explicit revoke of the mirror's own UID.
+ *
+ * @param schemas             The frozen schema-UID set (for the MIRROR schema UID).
+ * @param dataUID             The DATA the retrieval method is bound to (`refUID`).
+ * @param transportDefinition The `/transports/<scheme>` anchor UID for the URI's scheme.
+ * @param uri                 The retrieval URI (`ipfs://…`, `ar://…`, `web3://…`, …).
+ */
+export function buildMirrorPlan(
+  schemas: EfsSchemaUIDs,
+  dataUID: Hex,
+  transportDefinition: Hex,
+  uri: string,
+): FileWriteGraph {
+  const mirror: PlannedAttestation = {
+    ref: EDGE_REF.MIRROR,
+    layer: 1,
+    kind: 'MIRROR',
+    schema: schemas.mirror,
+    // data = (transportDefinition, uri) — the EXACT encoder shape graph.ts emits.
+    data: mirrorEncoder.encodeData([transportDefinition, uri]),
+    revocable: true, // MirrorResolver.sol:163 — MIRROR must be revocable
+    refUID: dataUID, // MirrorResolver.sol:153-156 — refUID must be a DATA attestation (concrete)
+    dataRefs: [], // no fresh siblings — DATA + transport anchor are both concrete
+  }
+  return { hardlink: false, attestations: [mirror] }
 }
 
 // ── LIST / LIST_ENTRY (curated collections — ADR-0044/0046/0047) ──────────────────

@@ -105,6 +105,7 @@ import { type DetectClient, detectAccount, toCapabilities } from './writes/detec
 import type { EdgeSubmitContext } from './writes/edge-submit.js'
 import { type FileWriteContext, writeFileTier1 } from './writes/file.js'
 import { type ListsWriteNs, makeListsWriteNs } from './writes/lists.js'
+import { type MirrorsNs, makeMirrorsNs } from './writes/mirrors.js'
 import { setOverview as setOverviewWrite } from './writes/overview.js'
 import { type PinsNs, makePinsNs } from './writes/pins.js'
 import { type PropsNs, makePropsNs } from './writes/props.js'
@@ -407,6 +408,10 @@ export type EfsClient = EfsReadClient & {
   graph: EfsGraphNs
   /** Standalone PROPERTY value writes: `props.{set,get,list}`. */
   props: PropsNs
+  /** Standalone MIRROR (retrieval-method) writes: `mirrors.{add,remove,list}` — add a
+   * retrieval URI to an existing DATA (file-write publishes mirrors inline; this is the
+   * after-the-fact verb). */
+  mirrors: MirrorsNs
   /** REDIRECT (alias) primitive (ADR-0050): `redirects.{set,remove,get}` — the
    * trust-scoped "this points at that" edge (canonical/dedup, version supersession,
    * symlinks). Read-time *following* of an alias chain is on `efs.fs.locate`/`read`
@@ -532,6 +537,17 @@ export function createEfsClient(config: EfsClientConfig): EfsClient {
     readContext,
     submitContext: edgeSubmitContext,
     attester: () => account,
+  })
+  // The `efs.mirrors.*` write verbs (add/remove) + the lens-scoped list read. Same
+  // wiring as graph/props: built once, gated at the type level, revokes through the
+  // `efs.eas.revoke` funnel; the transport anchor is resolved on `add` via the
+  // public client (deployment map → /transports/<scheme> path fallback).
+  const mirrorsNs = makeMirrorsNs({
+    getDeployment,
+    publicClient: publicClient as unknown as ReadContext['publicClient'],
+    submitContext: edgeSubmitContext,
+    attester: () => account,
+    revoke: (schema, uid) => easVerbs.revoke({ schema, uid }),
   })
   // The `efs.redirects.*` write verbs (set/remove) + the literal active-record read
   // (get). Like graph/props, merged unconditionally and gated at the type level; a
@@ -764,6 +780,7 @@ export function createEfsClient(config: EfsClientConfig): EfsClient {
     // through the wallet-bound submit/revoke (so a no-wallet runtime call throws).
     graph: { tags: tagsNs, pins: pinsNs },
     props: propsNs,
+    mirrors: mirrorsNs,
     redirects: redirectsNs,
     batch: () => {
       requireWallet()

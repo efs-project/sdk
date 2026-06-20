@@ -40,6 +40,7 @@ export {
   buildPropertyPlan,
   buildPlacementPinPlan,
   buildRedirectPlan,
+  buildMirrorPlan,
   buildCreateListPlan,
   buildAddEntryPlan,
   validateListConfig,
@@ -82,6 +83,15 @@ export {
   type PropertyEntry,
 } from './props.js'
 export { makePinsNs, type PinsNs, type PinsNsDeps } from './pins.js'
+export {
+  makeMirrorsNs,
+  resolveMirrorTransport,
+  type MirrorsNs,
+  type MirrorsNsDeps,
+  type MirrorAddOptions,
+  type MirrorListOptions,
+  type MirrorRecord,
+} from './mirrors.js'
 
 export { writeFileTier1, resolveMirrors, type FileWriteContext } from './file.js'
 
