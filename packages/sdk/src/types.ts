@@ -353,7 +353,11 @@ export type PreviewOptions = ReadOptions
 /** A durable, serializable write session. `steps` are idempotent per
  * (path-qualified) id so a resume skips only mined work and never double-mints. */
 export type WriteReceipt = {
-  contentHash: ContentHash
+  /** The file's content-identity hash — present on a file write (`fs.write`).
+   * ABSENT on the standalone edge/value writes (`graph.tags`/`props`/`graph.pins`),
+   * which place/bind no content (additive — these primitives reuse the same receipt
+   * shape but have no bytes to hash). */
+  contentHash?: ContentHash
   data?: DataRef
   steps: Array<{ id: string; uid?: DataUID; done: boolean }>
   signatureCount: number

@@ -21,14 +21,46 @@ export {
 
 export {
   submitWriteTier1,
+  submitLayeredTier1,
   WriteRevertedError,
   type SubmitContext,
   type SubmitWalletClient,
   type SubmitPublicClient,
   type Tier1WriteResult,
+  type LayeredWriteResult,
   type LayerResult,
   type RefMap,
 } from './submit.js'
+
+// Standalone edge/value write primitives (TAG / PROPERTY-triple / PIN) — pure plan
+// builders reusing the file-write attestation shapes, the shared edge submit, and
+// the per-primitive namespaces (graph.tags / props / graph.pins).
+export {
+  buildTagPlan,
+  buildPropertyPlan,
+  buildPlacementPinPlan,
+  EDGE_REF,
+  DEFAULT_TAG_WEIGHT,
+} from './edge.js'
+export { submitEdgePlan, type EdgeSubmitContext } from './edge-submit.js'
+export {
+  makeTagsNs,
+  resolveTagDefinition,
+  type TagsNs,
+  type TagsNsDeps,
+  type TagAddOptions,
+  type TagListOptions,
+  type ActiveTag,
+} from './tags.js'
+export {
+  makePropsNs,
+  type PropsNs,
+  type PropsNsDeps,
+  type PropReadOptions,
+  type PropSetOptions,
+  type PropertyEntry,
+} from './props.js'
+export { makePinsNs, type PinsNs, type PinsNsDeps } from './pins.js'
 
 export { writeFileTier1, resolveMirrors, type FileWriteContext } from './file.js'
 

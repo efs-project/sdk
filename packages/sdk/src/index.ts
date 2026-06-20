@@ -84,7 +84,11 @@ import type {
   WriteReceipt,
 } from './types.js'
 import { type DetectClient, detectAccount, toCapabilities } from './writes/detect.js'
+import type { EdgeSubmitContext } from './writes/edge-submit.js'
 import { type FileWriteContext, writeFileTier1 } from './writes/file.js'
+import { type PinsNs, makePinsNs } from './writes/pins.js'
+import { type PropsNs, makePropsNs } from './writes/props.js'
+import { type TagsNs, makeTagsNs } from './writes/tags.js'
 
 /**
  * The SDK's boundary is the **standard** (EIP-1193 provider + EIP-155 chain), not
@@ -299,6 +303,18 @@ export type EfsReadClient = {
   decode: EfsDecodeNs
 }
 
+/**
+ * The `efs.graph.*` namespace — the standalone graph-edge write primitives that sit
+ * alongside `fs.write` (completeness P1-1). Present only on a write-capable client
+ * (they author attestations as the connected wallet). `tags` is the TAG edge
+ * (add/remove + reads); `pins` is the cardinality-1 placement PIN (place/unplace +
+ * the active read). Both route through the same Submitter seam as `fs.write`.
+ */
+export type EfsGraphNs = {
+  tags: TagsNs
+  pins: PinsNs
+}
+
 /** Full client (a `walletClient` was supplied): reads + writes + batching. The
  * `eas` namespace gains the raw write verbs; `raw` instances gain `.write.*`. */
 export type EfsClient = EfsReadClient & {
@@ -307,6 +323,10 @@ export type EfsClient = EfsReadClient & {
   raw: EfsRawNs
   /** Account introspection over the execution seam (read-by-default). */
   account: EfsAccountNs
+  /** Standalone graph-edge writes: `graph.tags.*` (TAG) + `graph.pins.*` (PIN). */
+  graph: EfsGraphNs
+  /** Standalone PROPERTY value writes: `props.{set,get,list}`. */
+  props: PropsNs
   /** Compose a multi-operation write delivered with one signature where possible. */
   batch(): { execute(): Promise<BatchReceipt> }
 }
@@ -369,6 +389,60 @@ export function createEfsClient(config: EfsClientConfig): EfsClient {
     requireWallet,
     ...(walletClient?.account !== undefined ? { account: walletClient.account } : {}),
     ...(walletClient?.chain !== undefined ? { chain: walletClient.chain } : {}),
+  })
+
+  // Build the edge/value submit context (TAG / PROPERTY / PIN writes) — the file
+  // write's chain/wallet plumbing plus the attester the receipt records. Built per
+  // call so a deployment override / account change is reflected. Only ever invoked
+  // on a write-capable client (the namespaces are wallet-gated below).
+  const edgeSubmitContext = (): EdgeSubmitContext => {
+    const wallet = walletClient as WalletClient
+    const dep = getDeployment()
+    const attester = wallet.account?.address
+    if (attester === undefined) {
+      throw new EfsError(
+        'efs.graph/props write: the wallet client has no bound account — cannot author as an attester.',
+        { code: 'WalletRequired' },
+      )
+    }
+    return {
+      // The submit path uses `writeContract` (wallet) + `waitForTransactionReceipt`
+      // (public); supply each from its client. viem's broadly-generic method
+      // signatures don't structurally unify with the narrow submit surfaces at the
+      // type level, so cast through them at this boundary (same as `fs.write`).
+      walletClient: wallet as unknown as EdgeSubmitContext['walletClient'],
+      publicClient: publicClient as unknown as EdgeSubmitContext['publicClient'],
+      easAddress: dep.contracts.eas,
+      chainId: dep.chainId,
+      attester,
+      ...(wallet.account !== undefined ? { account: wallet.account } : {}),
+      ...(wallet.chain !== undefined ? { chain: wallet.chain } : {}),
+    }
+  }
+
+  // The standalone graph-edge / value namespaces (completeness P1-1). Built once,
+  // bound to the lazy deployment + the clients; the deps re-resolve on each call.
+  // Revokes go through the `efs.eas.revoke` verb (the same typed funnel).
+  const tagsNs = makeTagsNs({
+    getDeployment,
+    publicClient: publicClient as unknown as ReadContext['publicClient'],
+    submitContext: edgeSubmitContext,
+    attester: () => account,
+    revoke: (schema, uid) => easVerbs.revoke({ schema, uid }),
+  })
+  const pinsNs = makePinsNs({
+    getDeployment,
+    publicClient: publicClient as unknown as ReadContext['publicClient'],
+    submitContext: edgeSubmitContext,
+    attester: () => account,
+    revoke: (schema, uid) => easVerbs.revoke({ schema, uid }),
+  })
+  const propsNs = makePropsNs({
+    getDeployment,
+    publicClient: publicClient as unknown as ReadContext['publicClient'],
+    readContext,
+    submitContext: edgeSubmitContext,
+    attester: () => account,
   })
 
   // `efs.decode` (P1-4): raw Attestation → typed view (sync, pure), or a UID →
@@ -535,6 +609,12 @@ export function createEfsClient(config: EfsClientConfig): EfsClient {
         return toCapabilities(profile)
       },
     },
+    // Standalone graph-edge / value write namespaces (completeness P1-1). Present on
+    // the returned object unconditionally; the type-level write gate (`EfsClient` vs
+    // `EfsReadClient`) hides them on a read-only client, and each write verb authors
+    // through the wallet-bound submit/revoke (so a no-wallet runtime call throws).
+    graph: { tags: tagsNs, pins: pinsNs },
+    props: propsNs,
     batch: () => {
       requireWallet()
       throw new NotImplemented('efs.batch()', {

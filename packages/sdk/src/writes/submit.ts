@@ -368,20 +368,39 @@ function extractMintedUIDs(
 }
 
 /**
- * Execute a {@link FileWriteGraph} write plan as one `multiAttest` per dependency
- * layer (Tier-1, any-wallet). See the module doc for the full model.
- *
- * @param plan The ordered write plan from `buildFileWriteGraph`.
- * @param ctx  Wallet + public clients, the EAS address, and optional account/chain.
- * @returns A {@link Tier1WriteResult}: all created UIDs keyed by ref, the per-layer
- *   tx hashes, and the file's DATA + placement-PIN UIDs.
- * @throws {WriteRevertedError} on a layer revert — the partial-write boundary,
- *   carrying which layer failed and what landed before it.
+ * The mechanism-neutral result of running a layered `multiAttest` plan: every
+ * created `ref → real UID`, the per-layer tx hashes, and the per-layer breakdown.
+ * {@link submitWriteTier1} adds the file-write-specific `dataUID`/`placementPinUID`
+ * projection on top; the edge/value writes ({@link submitLayeredTier1}) consume this
+ * directly (they have no placement PIN).
  */
-export async function submitWriteTier1(
+export interface LayeredWriteResult {
+  /** Every created `ref → real UID`, across all layers. */
+  readonly uids: RefMap
+  /** Each layer's tx hash, in execution order. */
+  readonly layerTxHashes: readonly Hex[]
+  /** Per-layer breakdown (hash + minted refs), in execution order. */
+  readonly layers: readonly LayerResult[]
+}
+
+/**
+ * Execute ANY {@link FileWriteGraph}-shaped plan as one `multiAttest` per
+ * dependency layer (Tier-1, any-wallet) — the mechanism-neutral core shared by the
+ * file write ({@link submitWriteTier1}) and the standalone edge/value writes
+ * (`writes/edge.ts`: TAG / PROPERTY-triple / PIN). See the module doc for the
+ * layer/UID-threading model. Performs NO file-specific interpretation of the result
+ * (no placement-PIN/DATA extraction) — it just runs the plan and returns the raw
+ * `ref → UID` map.
+ *
+ * @param plan A layered write plan (every attestation carries its `layer`).
+ * @param ctx  Wallet + public clients, the EAS address, and optional account/chain.
+ * @returns A {@link LayeredWriteResult}: all created UIDs keyed by ref + per-layer hashes.
+ * @throws {WriteRevertedError} on a layer revert — the partial-write boundary.
+ */
+export async function submitLayeredTier1(
   plan: FileWriteGraph,
   ctx: SubmitContext,
-): Promise<Tier1WriteResult> {
+): Promise<LayeredWriteResult> {
   const resolved = new Map<string, Hex>()
   const layerTxHashes: Hex[] = []
   const layers: LayerResult[] = []
@@ -449,6 +468,27 @@ export async function submitWriteTier1(
     layers.push(result)
     ctx.onLayer?.(result)
   }
+
+  return { uids: resolved, layerTxHashes, layers }
+}
+
+/**
+ * Execute a {@link FileWriteGraph} **file-write** plan as one `multiAttest` per
+ * dependency layer (Tier-1, any-wallet) and project the file-specific result
+ * (DATA + placement-PIN UIDs). Thin wrapper over {@link submitLayeredTier1}.
+ *
+ * @param plan The ordered file-write plan from `buildFileWriteGraph`.
+ * @param ctx  Wallet + public clients, the EAS address, and optional account/chain.
+ * @returns A {@link Tier1WriteResult}: all created UIDs keyed by ref, the per-layer
+ *   tx hashes, and the file's DATA + placement-PIN UIDs.
+ * @throws {WriteRevertedError} on a layer revert — the partial-write boundary,
+ *   carrying which layer failed and what landed before it.
+ */
+export async function submitWriteTier1(
+  plan: FileWriteGraph,
+  ctx: SubmitContext,
+): Promise<Tier1WriteResult> {
+  const { uids: resolved, layerTxHashes, layers } = await submitLayeredTier1(plan, ctx)
 
   const placementPinUID = resolved.get(REF.PLACEMENT_PIN)
   if (placementPinUID === undefined) {
