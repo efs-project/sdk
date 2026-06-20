@@ -216,9 +216,16 @@ function sameUid(a: Hex, b: Hex): boolean {
  * schema UIDs, read the value its **authoritative** on-chain getter reports and
  * assert it equals what `deployment.schemas` claims. A wrong/hostile
  * `deployments` override fails here even when every address is a real contract
- * (which {@link assertDeploymentIntegrity} alone can't catch) — the frozen UIDs
- * hash in the deploying Safe + each resolver's own address, so they can't be
- * forged.
+ * (which {@link assertDeploymentIntegrity} alone can't catch). Trust-resistance
+ * is NOT uniform across the nine, though (review, 2026-06-20): the three
+ * resolver-owned UIDs (list/listEntry/redirect) are read from getters that
+ * **self-derive** the UID from the resolver's own (proxy) address, so they are
+ * genuinely unforgeable — a wrong contract cannot return them. The six kernel
+ * UIDs (anchor/property/data/pin/tag/mirror) are plain storage getters on the
+ * Indexer, so this gate proves only that the Indexer **agrees with itself**; for
+ * those six, the anchor of trust remains `contracts.indexer` being the right
+ * address (taken on faith from the registry / override). So: strong proof for the
+ * three self-derived resolvers, indexer-relative proof for the kernel six.
  *
  * The reads are batched via `Promise.all` (one `eth_call` per UID; viem will
  * fold them into a multicall when the chain supports it and the client has
