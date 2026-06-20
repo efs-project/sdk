@@ -133,21 +133,18 @@ export type ListOptions = ReadOptions & {
    * Tag-exclusion filter (contracts ADR-0048 / SDK ADR-0011). Each entry is a
    * TAG definition UID (`Hex`) or a human label (e.g. `'system'`/`'nsfw'`) the
    * SDK resolves to its `/tags/<name>` definition UID. Non-empty routes the
-   * listing to the on-chain filtered view; empty/absent = unfiltered. Nothing is
-   * excluded by default — pass `SAFETY_EXCLUDES` to opt into the common policy.
-   *
-   * @experimental — not yet implemented. The filtered-view wiring is tracked in
-   * ADR-0011; passing a non-empty `excludes` THROWS `InvalidDirectoryQuery` today
-   * (rather than silently returning an unfiltered listing, which would leak the
-   * entries you asked to hide). The typed option is present so it lands additively.
+   * listing to the on-chain filtered view (`getDirectoryPageFiltered`), lens-scoped
+   * via the same attesters as the unfiltered read; empty/absent = unfiltered.
+   * Nothing is excluded by default — pass `SAFETY_EXCLUDES` to opt into the common
+   * policy. Capped at 8 excludes on-chain ({@link InvalidDirectoryQuery} above that).
+   * An unresolvable label fails closed with {@link InvalidDirectoryQuery} (it is
+   * never silently dropped, which would leak the entries you asked to hide).
    */
   excludes?: readonly (Hex | string)[]
   /**
    * Per-exclude inclusive weight threshold (`weight >= minWeights[k]`), aligned
    * by index with `excludes`. Omitted or length-mismatched ⇒ an all-zero vector
    * (ADR-0042 default). Capped at 8 excludes on-chain.
-   *
-   * @experimental — not yet implemented (rides with `excludes`; see ADR-0011).
    */
   minWeights?: readonly bigint[]
 }

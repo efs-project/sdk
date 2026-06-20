@@ -76,8 +76,8 @@ import {
   read,
   resolveAttesters,
 } from './context.js'
-import { reconcileMinWeights, validateDirectoryQuery } from './directory.js'
-import { type ResolvePublicClient, resolvePathToAnchor } from './resolve.js'
+import { InvalidDirectoryQuery, reconcileMinWeights, validateDirectoryQuery } from './directory.js'
+import { ParentNotFoundError, type ResolvePublicClient, resolvePathToAnchor } from './resolve.js'
 
 /** Default per-page window when the caller passes no `limit`. */
 export const DEFAULT_PAGE_SIZE = 50
@@ -98,9 +98,15 @@ function isUID(s: string): s is Hex {
  * `/tags/<name>`/`tags/<name>` form) is resolved to its `/tags/<name>` anchor UID via
  * the indexer path walk — the SAME resolution `efs.graph.tags` uses, so a label means
  * the same def everywhere. Done ONCE before the first filtered read so the read never
- * issues the unfiltered branch first (no leak window). A label that resolves to no
- * anchor yields the zero UID; the on-chain filter simply never matches it (a non-
- * existent exclude-def excludes nothing), which is the safe, non-throwing degrade.
+ * issues the unfiltered branch first (no leak window).
+ *
+ * Fails CLOSED on an unresolvable label: if `/tags/<name>` has no anchor on this
+ * deployment, we throw {@link InvalidDirectoryQuery} naming the label rather than
+ * degrade to a zero UID. A zero exclude-def matches nothing on-chain, so degrading
+ * would silently return an UNFILTERED listing for a predicate the caller asked to
+ * exclude — a leak for a safety filter. Explicit error > silent leak. (Callers who
+ * want "exclude if it exists, else ignore" can resolve the def themselves and pass
+ * the UID form.)
  */
 async function resolveExcludeDefs(
   publicClient: ResolvePublicClient,
@@ -115,7 +121,16 @@ async function resolveExcludeDefs(
         : e.startsWith('tags/')
           ? `/${e}`
           : `/tags/${e.replace(/^\/+/, '')}`
-      return resolvePathToAnchor(publicClient, indexer, label)
+      try {
+        return await resolvePathToAnchor(publicClient, indexer, label)
+      } catch (err) {
+        if (err instanceof ParentNotFoundError) {
+          throw new InvalidDirectoryQuery(
+            `Unknown exclude tag "${e}": no anchor at "${label}" on this deployment. Pass an existing /tags/<name> label or a 32-byte tag-definition UID.`,
+          )
+        }
+        throw err
+      }
     }),
   )
 }

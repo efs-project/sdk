@@ -889,4 +889,19 @@ describe('list({ excludes }) — on-chain tag-exclusion filter (ADR-0011)', () =
       InvalidDirectoryQuery,
     )
   })
+
+  it('fails closed on an unresolvable exclude label (no silent unfiltered leak)', async () => {
+    // /tags/nsfw does NOT exist here (only /docs is wired), so resolvePath returns ZERO
+    // and the real path walk throws ParentNotFound. The filter must surface a clear
+    // InvalidDirectoryQuery naming the label — never degrade to a zero def (which the
+    // on-chain filter would treat as "exclude nothing", leaking the entries to hide).
+    const calls: { fn: string; args: readonly unknown[] }[] = []
+    const ctx = makeCtx({ edges: { [`${ROOT}|docs`]: DOCS_ANCHOR }, calls })
+    await expect(
+      list(() => ctx, '/docs', { lens: LENS, excludes: ['nsfw'] }).byPage(),
+    ).rejects.toThrow(InvalidDirectoryQuery)
+    // It fails before ever issuing a directory read (filtered OR unfiltered) — no leak.
+    expect(calls.some((c) => c.fn === 'getDirectoryPageFiltered')).toBe(false)
+    expect(calls.some((c) => c.fn === 'getDirectoryPageByAddressList')).toBe(false)
+  })
 })
