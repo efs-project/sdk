@@ -52,6 +52,12 @@ for await (const entry of efs.fs.list('/docs', { lens: identity('jamescarnley.et
 
 // Write a file (Tier-1 multi-attestation under the hood; needs an `account`).
 await efs.fs.write('/notes/hello.txt', new TextEncoder().encode('gm'))
+
+// EFS results carry bigints (file `size`, tag weights, list `maxEntries`, …), and
+// bare `JSON.stringify` THROWS on a bigint. Use `efs.toJSON` (or the exported
+// `jsonReplacer`) to serialize a result — bigints render as decimal strings. Note:
+// they come back as strings on `JSON.parse`, not bigints (a lossy round-trip).
+const json = efs.toJSON(meta) // == JSON.stringify(meta, jsonReplacer)
 ```
 
 > **Implemented:** `efs.fs.read`/`readText`/`readBytes`/`readJson`, `locate`, `info`, `exists`, `list`, `write`; `efs.lenses`, `efs.eas`, `efs.raw`, the off-chain fetch/mirror engine, content hashing, and the deployments registry.

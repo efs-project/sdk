@@ -12,6 +12,15 @@ import type { Lens } from './lenses/resolve.js'
 
 export type DataUID = Hex & { readonly __kind: 'DataUID' }
 
+/** A folder ANCHOR's UID — the content-neutral path node a directory is, distinct
+ * from the {@link DataUID} that identifies a file's bytes/version (review P3 / A11).
+ * Branded apart because the two are NOT interchangeable: an anchor UID resolves a
+ * folder (children, sub-anchors); a DATA UID resolves bytes — passing one where the
+ * other is expected is the wrong-UID-kind integration bug the brands exist to catch.
+ * A {@link DirEntry} carries a `DataUID` on its file variant and an `AnchorUID` on its
+ * dir variant. Both are `Hex` at runtime (zero cost); the distinction is type-only. */
+export type AnchorUID = Hex & { readonly __kind: 'AnchorUID' }
+
 /** Static reference — these exact bytes / this version. Carries the chain it lives
  * on (review A1: a ref without its chain can't be resolved cross-chain) and the
  * attester that resolved it (review A2: `fetch(ref)` needs the author to verify
@@ -230,8 +239,9 @@ export type DirEntry = {
   kind: 'file' | 'dir'
   /** The static ref to the file's bytes (present for `kind: 'file'`). */
   dataUID?: DataUID
-  /** The anchor UID for a subdirectory (present for `kind: 'dir'`). */
-  anchorUID?: DataUID
+  /** The anchor UID for a subdirectory (present for `kind: 'dir'`). Branded
+   * {@link AnchorUID} — a folder path node, distinct from a file's `dataUID`. */
+  anchorUID?: AnchorUID
 }
 
 // ── Writes ─────────────────────────────────────────────────────────────────────

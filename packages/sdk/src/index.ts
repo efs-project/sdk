@@ -43,6 +43,7 @@ import {
 } from './eas/index.js'
 import { type EasVerbs, type RevocationRequest, makeEasVerbs } from './eas/verbs.js'
 import { EfsError, NotImplemented, WalletRequired } from './errors.js'
+import { toJSON } from './json.js'
 import { type Lens, identity, lens, resolveLens } from './lenses/resolve.js'
 import { type EfsRawContracts, buildRawContracts } from './raw/contracts.js'
 import {
@@ -382,6 +383,14 @@ export type EfsReadClient = {
   raw: EfsRawReadNs
   /** Round-trip bridge: raw {@link Attestation} (or a UID) → the typed view. */
   decode: EfsDecodeNs
+  /**
+   * Serialize an EFS result to a JSON string with `bigint`s (file `size`, tag
+   * weights, list `maxEntries`, estimate `gas`, …) rendered as decimal strings —
+   * bare `JSON.stringify` THROWS on a bigint. Convenience over the exported
+   * {@link jsonReplacer}; see its note on the lossy round-trip (bigints come back as
+   * strings, not bigints). Pure + stateless; present on read-only clients too.
+   */
+  toJSON(value: unknown, space?: number | string): string
 }
 
 /**
@@ -746,6 +755,7 @@ export function createEfsClient(config: EfsClientConfig): EfsClient {
       },
     },
     decode,
+    toJSON,
     account: {
       capabilities: async () => {
         requireWallet()
@@ -844,6 +854,8 @@ export {
   type ContentHash,
   type VerificationStatus,
 } from './content/hash.js'
+// Bigint-safe JSON serialization for EFS result DTOs (`efs.toJSON`) — review P3 DX.
+export { toJSON, jsonReplacer } from './json.js'
 // Off-chain fetch/verify/mirror engine (freeze-independent; see future-proofing.md §2).
 export * from './mirror/index.js'
 // Write path: pure graph builder + Tier-1 submitter (writes/index barrels both).
@@ -865,6 +877,7 @@ export * from './errors.js'
 export type {
   AccountProfile,
   AccountCapabilities,
+  AnchorUID,
   DataRef,
   DataUID,
   DirEntry,

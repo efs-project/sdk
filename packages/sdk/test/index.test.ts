@@ -77,6 +77,12 @@ describe('namespaced client (Decision F)', () => {
     expect(typeof efs.lenses.identity).toBe('function')
   })
 
+  it('exposes a bigint-safe efs.toJSON on a read-only client (review P3 DX)', () => {
+    const efs = createEfsClient({ publicClient })
+    expect(typeof efs.toJSON).toBe('function')
+    expect(efs.toJSON({ size: 1024n })).toBe('{"size":"1024"}')
+  })
+
   it('accepts the EIP-1193 provider form (standard boundary), wallet-gated by `account`', async () => {
     // A minimal EIP-1193 provider — the durable, library-neutral input.
     const provider = {

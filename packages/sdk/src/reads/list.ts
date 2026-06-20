@@ -68,7 +68,7 @@
 import type { Address, Hex } from 'viem'
 import { fileViewAbi } from '../chain/abi/fileView.js'
 import { CursorInvalid } from '../errors.js'
-import type { DataUID, DirEntry, EfsList, ListOptions, Page } from '../types.js'
+import type { AnchorUID, DataUID, DirEntry, EfsList, ListOptions, Page } from '../types.js'
 import {
   type FileSystemItem,
   type ReadContext,
@@ -138,7 +138,7 @@ async function resolveExcludeDefs(
 /** Map one on-chain `FileSystemItem` to a public {@link DirEntry}. */
 function toDirEntry(item: FileSystemItem): DirEntry {
   if (item.isFolder) {
-    return { name: item.name, kind: 'dir', anchorUID: item.uid as DataUID }
+    return { name: item.name, kind: 'dir', anchorUID: item.uid as AnchorUID }
   }
   return { name: item.name, kind: 'file', dataUID: item.uid as DataUID }
 }
