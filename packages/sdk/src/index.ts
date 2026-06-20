@@ -61,6 +61,7 @@ import {
 import { exists as existsRead, info as infoRead, locate as locateRead } from './reads/file.js'
 import { list as listRead } from './reads/list.js'
 import type {
+  AccountCapabilities,
   Attestation,
   BatchReceipt,
   DataRef,
@@ -82,6 +83,7 @@ import type {
   WriteOptions,
   WriteReceipt,
 } from './types.js'
+import { type DetectClient, detectAccount, toCapabilities } from './writes/detect.js'
 import { type FileWriteContext, writeFileTier1 } from './writes/file.js'
 
 /**
@@ -209,6 +211,24 @@ export type EfsLensesNs = {
   identity: typeof identity
 }
 
+/**
+ * The `efs.account.*` namespace (sdk-wallet-architecture §Public surface) —
+ * read-by-default account introspection over the execution seam. Present only on a
+ * write-capable client (it answers questions about the SIGNING account). Today just
+ * the curated capability read; `foreignDelegation()`/`revokeDelegation()` land with
+ * the deferred AA slice.
+ */
+export type EfsAccountNs = {
+  /**
+   * The curated {@link AccountCapabilities} for the connected signing account
+   * (`canOneSig`/`gasless`/`sponsored`/`kind`). Runs `detectAccount` lazily
+   * (`getCode` + the wallet's `getCapabilities` when supported) and caches the
+   * profile per `(address, chainId)`, so this is NOT on the write hot path — a
+   * `fs.write` never triggers it. Tolerant of a wallet without `getCapabilities`.
+   */
+  capabilities(): Promise<AccountCapabilities>
+}
+
 /** Read-capable EAS namespace: the pure tools + raw `getAttestation` (no wallet). */
 export type EfsEasReadNs = {
   encoder(schema: string): SchemaEncoder
@@ -285,6 +305,8 @@ export type EfsClient = EfsReadClient & {
   fs: EfsFsWrite
   eas: EfsEasNs
   raw: EfsRawNs
+  /** Account introspection over the execution seam (read-by-default). */
+  account: EfsAccountNs
   /** Compose a multi-operation write delivered with one signature where possible. */
   batch(): { execute(): Promise<BatchReceipt> }
 }
@@ -485,6 +507,34 @@ export function createEfsClient(config: EfsClientConfig): EfsClient {
       },
     },
     decode,
+    account: {
+      capabilities: async () => {
+        requireWallet()
+        const wallet = walletClient as WalletClient
+        const address = wallet.account?.address
+        if (address === undefined) {
+          throw new EfsError(
+            'efs.account.capabilities(): the wallet client has no bound account — cannot profile the signing account.',
+            { code: 'WalletRequired' },
+          )
+        }
+        // Compose the narrow DetectClient: `getCode` from the public client, the
+        // optional EIP-5792 `getCapabilities` from the wallet (absent on wallets
+        // that don't implement it — detection tolerates that). Lazy + cached per
+        // (address, chainId); never on the write hot path.
+        const detectClient: DetectClient = {
+          getCode: (args) => (publicClient as unknown as DetectClient).getCode(args),
+          ...(typeof (wallet as unknown as DetectClient).getCapabilities === 'function'
+            ? {
+                getCapabilities: (args) =>
+                  (wallet as unknown as Required<DetectClient>).getCapabilities(args),
+              }
+            : {}),
+        }
+        const profile = await detectAccount(detectClient, address, chainIdOf(publicClient))
+        return toCapabilities(profile)
+      },
+    },
     batch: () => {
       requireWallet()
       throw new NotImplemented('efs.batch()', {
@@ -566,6 +616,8 @@ export {
 } from './chain/deployments.js'
 export * from './errors.js'
 export type {
+  AccountProfile,
+  AccountCapabilities,
   DataRef,
   DataUID,
   DirEntry,

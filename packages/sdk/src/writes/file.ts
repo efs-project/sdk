@@ -21,7 +21,7 @@
 
 import type { Account, Address, Chain, Hex } from 'viem'
 import type { EfsDeployment } from '../chain/deployments.js'
-import { type ContentHash, hashContent } from '../content/hash.js'
+import { hashContent } from '../content/hash.js'
 import { EfsError } from '../errors.js'
 import { TRANSPORT } from '../mirror/transport.js'
 import {
@@ -32,7 +32,7 @@ import {
   resolveOrPlanParents,
   splitPath,
 } from '../reads/resolve.js'
-import type { DataRef, DataUID, WriteOptions, WriteReceipt } from '../types.js'
+import type { AccountProfile, WriteOptions, WriteReceipt } from '../types.js'
 import { buildFileWriteGraph } from './graph.js'
 import {
   DEFAULT_ONCHAIN_AUTO_LIMIT,
@@ -41,12 +41,9 @@ import {
   PayloadTooLarge,
   storeOnchain,
 } from './onchain.js'
-import {
-  type SubmitPublicClient,
-  type SubmitWalletClient,
-  type Tier1WriteResult,
-  submitWriteTier1,
-} from './submit.js'
+import { selectSingle } from './select.js'
+import type { SubmitPublicClient, SubmitWalletClient } from './submit.js'
+import type { SubmitterContext } from './submitter.js'
 
 /** Extract the URI scheme (`ipfs` from `ipfs://Qm…`, `web3` from `web3://0x…`). */
 function schemeOf(uri: string): string {
@@ -151,45 +148,6 @@ export interface FileWriteContext {
 }
 
 /**
- * Map a {@link Tier1WriteResult} to the public {@link WriteReceipt}. The receipt's
- * `data` ref points at the file's content-identity DATA UID, resolved by the
- * attester; `steps` records every minted attestation (ref → UID, all `done`).
- */
-function toReceipt(
-  result: Tier1WriteResult,
-  contentHash: ContentHash,
-  chainId: number,
-  attester: Address,
-): WriteReceipt {
-  // DATA is the static content ref; for a hardlink it pre-existed and the
-  // submitter returns `dataUID: undefined`, so there is no fresh DATA to ref.
-  const data: DataRef | undefined =
-    result.dataUID !== undefined
-      ? {
-          __brand: 'DataRef',
-          uid: result.dataUID as DataUID,
-          chainId,
-          resolvedBy: attester,
-        }
-      : undefined
-
-  const steps = [...result.uids.entries()].map(([id, uid]) => ({
-    id,
-    uid: uid as DataUID,
-    done: true,
-  }))
-
-  return {
-    contentHash,
-    ...(data !== undefined ? { data } : {}),
-    steps,
-    signatureCount: result.layerTxHashes.length,
-    mechanism: 'sequential',
-    status: 'confirmed',
-  }
-}
-
-/**
  * Execute a Tier-1 file write end to end. See the module doc for the pipeline.
  *
  * @throws {ParentNotFoundError} the parent folder does not exist and
@@ -287,19 +245,38 @@ export async function writeFileTier1(
     fileName,
   })
 
-  // 5. Submit Tier-1: one multiAttest per DAG layer, threading mined UIDs.
-  const result = await submitWriteTier1(plan, {
+  // 5. Select the submitter through the execution seam (writes/select.ts) and run
+  // it. Today this is always `Tier1Submitter` (the only live strategy) — the
+  // selector is the single chokepoint the deferred AA submitters (5792/7702/4337)
+  // plug into without touching this orchestrator. Behavior is unchanged: Tier-1
+  // sends one `multiAttest` per DAG layer and throws `WriteRevertedError` at the
+  // partial-write boundary, exactly as before.
+  //
+  // The profile is constructed WITHOUT a `getCapabilities`/`getCode` round-trip:
+  // Tier-1 needs no profile to run, so the write hot path stays as fast as before
+  // (detection is lazy, behind `efs.account.capabilities()`). `canRunInAccountRoutine`
+  // is `false` (no in-account adapter exists), so the ladder resolves to Tier-1.
+  const profile: AccountProfile = {
+    address: attester,
+    kind: 'unknown-counterfactual',
+    sponsorable: false,
+    canRunInAccountRoutine: false,
+  }
+  const submitter = selectSingle(profile, plan)
+
+  // 6. Submit via the seam. The attester is the connected account (lenses key on
+  // it, computed in step 3a); `opts.lens` is reserved but not yet honored on Tier-1.
+  const submitterCtx: SubmitterContext = {
     walletClient: ctx.walletClient,
     publicClient: ctx.publicClient,
     easAddress: deployment.contracts.eas,
+    contentHash,
+    chainId: deployment.chainId,
+    attester,
     ...(ctx.account !== undefined ? { account: ctx.account } : {}),
     ...(ctx.chain !== undefined ? { chain: ctx.chain } : {}),
-  })
-
-  // 6. Map to the public receipt. The attester is the connected account (lenses
-  // key on it, computed in step 3a); `opts.lens` is reserved but not yet honored on
-  // Tier-1.
-  return toReceipt(result, contentHash, deployment.chainId, attester)
+  }
+  return submitter.submit(plan, submitterCtx)
 }
 
 /** The address of a viem account-or-address (the attester the receipt records). */

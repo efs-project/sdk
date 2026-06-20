@@ -199,6 +199,63 @@ export type WriteMechanism =
   | 'gateway'
   | (string & Record<never, never>)
 
+/**
+ * INTERNAL rich account profile — the input to the selector
+ * (sdk-wallet-architecture §Core abstractions). Capability-shaped, NOT
+ * EIP-5792 vocabulary on the public surface: the raw 5792 blob lives in `raw`,
+ * so a future batch standard maps in without a break. Produced by
+ * `detectAccount` (writes/detect.ts); never exposed directly — the curated
+ * {@link AccountCapabilities} is the public view.
+ */
+export type AccountProfile = {
+  /** The account that will actually sign (the attester the profile keys on). */
+  address: Address
+  /**
+   * `eoa` (`getCode` = `0x`) — necessary-not-sufficient (an undeployed
+   * counterfactual 4337 account is also `0x`); `eoa-7702-delegated`
+   * (`0xef0100‖impl`); `smart-account` (any other code);
+   * `unknown-counterfactual` reserved for an adapter that recognizes its own
+   * pre-deploy account. Open union so a new kind is additive. */
+  kind:
+    | 'eoa'
+    | 'eoa-7702-delegated'
+    | 'smart-account'
+    | 'unknown-counterfactual'
+    | (string & Record<never, never>)
+  /**
+   * Capability-shaped batch support, normalized from the nested EIP-5792
+   * `getCapabilities` shape (`caps[chainId].atomic.status`). Absent when the
+   * wallet does not support `getCapabilities`. */
+  batchExecution?: {
+    atomic: 'supported' | 'ready' | 'unsupported' | (string & Record<never, never>)
+  }
+  /** Whether a paymaster/sponsorship is available (5792 `paymasterService`). */
+  sponsorable: boolean
+  /**
+   * Can an adapter run the EFS routine IN this account's context (one-sig single
+   * file)? A capability, not a vendor. `false` until in-account adapters land
+   * (the deferred AA work). */
+  canRunInAccountRoutine: boolean
+  /** The raw `getCapabilities` blob, quarantined so the curated view never leaks
+   * 5792 vocabulary and a future standard maps without a break. */
+  raw?: unknown
+}
+
+/**
+ * PUBLIC curated capability view — what `efs.account.capabilities()` returns
+ * (sdk-wallet-architecture §Public surface). Answers the dev's actual question
+ * (can this sign once? is it gasless?) with no internals: never `atomic:'ready'`
+ * or an adapter id. */
+export type AccountCapabilities = {
+  kind: AccountProfile['kind']
+  /** Can a single-file write land in ONE signature (an in-account routine)? */
+  canOneSig: boolean
+  /** Can a write run without the user paying gas (a relayer/paymaster)? */
+  gasless: boolean
+  /** Is a sponsor (paymaster/relayer) available for this account? */
+  sponsored: boolean
+}
+
 /** Lifecycle status of a write/batch (review A3). Models EIP-5792 status `600`
  * (a half-written file) which a binary `done`/`ok` can't represent — without it
  * an abandoned sequential run returns a success-shaped receipt.
@@ -303,6 +360,22 @@ export type WriteReceipt = {
   mechanism: WriteMechanism
   /** Lifecycle status; `'partial'`/`'reverted'` flag a half-written file. */
   status?: CallStatus
+  /** Whether the write ran without the user paying gas (a relayer/paymaster).
+   * Always `false` on the Tier-1 path (the user pays). */
+  gasless?: boolean
+  /**
+   * Honest + actionable provenance (sdk-wallet-architecture §Principles #6): the
+   * mechanism the selector picked and WHY, so a UI can explain why it signed N
+   * times. `selected` mirrors {@link WriteReceipt.mechanism}; `why` is a closed-ish
+   * discriminant of the selection paths in the priority ladder. */
+  reason?: {
+    selected: WriteMechanism
+    why:
+      | 'in-account-routine'
+      | 'no-in-account-adapter'
+      | 'dependent-dag-needs-sequential'
+      | 'fell-back-from-5792'
+  }
 }
 
 /** The op-type a batch entry performed — partial-failure UIs need to show which
