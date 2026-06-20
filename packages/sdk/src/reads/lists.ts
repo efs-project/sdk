@@ -303,11 +303,14 @@ function identityKeyFor(kind: ListTargetType, target: Address | Hex): Hex {
  *
  * Throws {@link ListNotFound} (on first read) when no LIST exists at `listUID`.
  *
- * NB on `.byPage()` dedupe: a page is deduped WITHIN its own window (a page-local
- * view). Cross-page dedupe is only well-defined over the full set, so `.toArray()`
- * and `for await` dedupe globally; `.byPage()` is a windowed read for callers who
- * page manually (documented; matches the on-chain page semantics, which are not
- * snapshot-isolated either).
+ * NB on dedupe: it is DEFENSIVE today. On-chain `ListEntryResolver` rejects a duplicate
+ * identity key per attester at write time, and these reads resolve a single attester, so a
+ * real `allowsDuplicates=false` list cannot contain duplicates — the dedupe is a guard for a
+ * future multi-attester merge. Given that, the page-local-vs-global split below is currently
+ * unobservable; it is kept correct for when merging makes duplicates possible: a page is
+ * deduped WITHIN its window, while `.toArray()`/`for await` dedupe globally (`.byPage()` is a
+ * windowed read for manual pagers; it also matches the on-chain pages, which are not
+ * snapshot-isolated).
  */
 export function listEntries(
   ctxThunk: () => ReadContext,

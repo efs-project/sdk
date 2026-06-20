@@ -274,6 +274,11 @@ describe('lists.entries dedupe honors allowsDuplicates', () => {
     ],
   }
 
+  // NB: this exercises the SDK's DEFENSIVE dedupe path. On-chain, ListEntryResolver
+  // rejects a duplicate identity key per attester at write time (DuplicateIdentity), and
+  // entries() reads a single resolved attester — so a real allowsDuplicates=false list
+  // can never contain duplicates. The dedupe is kept as defense for a future multi-attester
+  // merge; this test asserts it behaves, not that the on-chain state is reachable.
   it('collapses duplicate targets to first-occurrence when allowsDuplicates=false', async () => {
     const { ctx } = makeCtx({
       [LIST_UID.toLowerCase()]: {
@@ -297,6 +302,9 @@ describe('lists.entries dedupe honors allowsDuplicates', () => {
     expect(got.map((e) => e.entryUID)).toEqual([uid(0xe1), uid(0xe2), uid(0xe3)])
   })
 
+  // Also a defensive-path test (see note above): a real allowsDuplicates=false list can't
+  // hold the cross-page duplicate this constructs — it proves global dedupe would collapse
+  // one if a future multi-attester merge ever produced it.
   it('async iteration dedupes globally across pages', async () => {
     // 3 entries, page size 2 → two pages; the duplicate a1 spans pages.
     const { ctx } = makeCtx({
