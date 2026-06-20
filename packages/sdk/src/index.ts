@@ -102,6 +102,7 @@ import type {
 import { type DetectClient, detectAccount, toCapabilities } from './writes/detect.js'
 import type { EdgeSubmitContext } from './writes/edge-submit.js'
 import { type FileWriteContext, writeFileTier1 } from './writes/file.js'
+import { type ListsWriteNs, makeListsWriteNs } from './writes/lists.js'
 import { type PinsNs, makePinsNs } from './writes/pins.js'
 import { type PropsNs, makePropsNs } from './writes/props.js'
 import { type TagsNs, makeTagsNs } from './writes/tags.js'
@@ -254,6 +255,22 @@ export type EfsListsNs = {
 }
 
 /**
+ * The write-capable `efs.lists.*` namespace — the read verbs plus the LIST write
+ * primitives (`create`/`add`/`remove`), present only on a write-capable client (they
+ * author attestations as the connected wallet). Mirrors the Solidity `EFSLib`
+ * wrappers' encodings and routes through the same Submitter seam as `fs.write`.
+ *
+ *   - `create(config)` → `WriteReceipt & { listUID }` — mint a LIST (one signature);
+ *     validates the resolver invariants client-side BEFORE submit.
+ *   - `add(listUID, target, { targetType? })` → `WriteReceipt` — add a LIST_ENTRY,
+ *     routed by the list's targetType (read once, or hinted to skip the read).
+ *   - `remove(entryUID, { listUID? })` → `Hex` — revoke a LIST_ENTRY; rejects an
+ *     append-only list up front (typed error, no chain round-trip) when `listUID` is
+ *     supplied.
+ */
+export type EfsListsWriteNs = EfsListsNs & ListsWriteNs
+
+/**
  * The `efs.sorts.*` namespace — read surface for SORT overlays (sorted views over
  * kernel child arrays).
  *
@@ -386,6 +403,9 @@ export type EfsClient = EfsReadClient & {
   graph: EfsGraphNs
   /** Standalone PROPERTY value writes: `props.{set,get,list}`. */
   props: PropsNs
+  /** Curated-collection reads + writes (`efs.lists.*`): the read verbs plus
+   * `create`/`add`/`remove` (LIST / LIST_ENTRY). */
+  lists: EfsListsWriteNs
   /** Compose a multi-operation write delivered with one signature where possible. */
   batch(): { execute(): Promise<BatchReceipt> }
 }
@@ -503,6 +523,17 @@ export function createEfsClient(config: EfsClientConfig): EfsClient {
     submitContext: edgeSubmitContext,
     attester: () => account,
   })
+  // The `efs.lists.*` write verbs (create/add/remove). Merged onto the read verbs
+  // below; the type-level write gate hides them on a read-only client, and each
+  // verb authors through the wallet-bound submit/revoke (a no-wallet runtime call
+  // throws). `add`/`remove` reuse the read engine's `getList` (config routing).
+  const listsWriteNs = makeListsWriteNs({
+    getDeployment,
+    publicClient: publicClient as unknown as ReadContext['publicClient'],
+    readContext,
+    submitContext: edgeSubmitContext,
+    revoke: (schema, uid) => easVerbs.revoke({ schema, uid }),
+  })
 
   // `efs.decode` (P1-4): raw Attestation → typed view (sync, pure), or a UID →
   // read-then-decode (async; `null` when the UID is absent). One overloaded fn.
@@ -599,11 +630,18 @@ export function createEfsClient(config: EfsClientConfig): EfsClient {
     // Curated-collection reads (`efs.lists.*`). `get`/`length`/`has` are async over
     // the read context; `entries` is synchronous (a lazy EfsList) — defer the context
     // into a thunk so the synchronous call never throws (mirrors `fs.list`).
+    // Read verbs always; the write verbs (create/add/remove) are merged on
+    // unconditionally and gated at the type level (EfsListsWriteNs on EfsClient vs
+    // EfsListsNs on EfsReadClient), like graph/props — a no-wallet runtime call to a
+    // write verb throws via the wallet-bound submit/revoke.
     lists: {
       get: (listUID, opts) => getListRead(readContext(), listUID, opts),
       entries: (listUID, opts) => listEntriesRead(readContext, listUID, opts),
       length: (listUID, opts) => listLengthRead(readContext(), listUID, opts),
       has: (listUID, target, opts) => listHasRead(readContext(), listUID, target, opts),
+      create: (config) => listsWriteNs.create(config),
+      add: (listUID, target, opts) => listsWriteNs.add(listUID, target, opts),
+      remove: (entryUID, opts) => listsWriteNs.remove(entryUID, opts),
     },
     // SORT overlay reads (`efs.sorts.*`). @experimental — every verb throws
     // NotImplemented until SORT_INFO is frozen + deployed (see reads/sorts.ts).

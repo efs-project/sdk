@@ -40,11 +40,13 @@
  * does for the file graph.
  */
 
-import type { Hex } from 'viem'
+import type { Address, Hex } from 'viem'
 import type { EfsSchemaUIDs } from '../chain/deployments.js'
 import { SchemaEncoder } from '../eas/schema-encoder.js'
 import { EFS_SCHEMA_FIELDS } from '../eas/schemas.js'
-import { type FileWriteGraph, type PlannedAttestation, ZERO_UID } from './graph.js'
+import { InvalidListConfig } from '../errors.js'
+import type { ListTargetType } from '../types.js'
+import { type FileWriteGraph, type PlannedAttestation, ZERO_ADDRESS, ZERO_UID } from './graph.js'
 
 // Encoders for the frozen field strings (constructed once; SchemaEncoder caches its
 // parsed params). Same field strings `graph.ts` encodes against — re-derived here so
@@ -53,6 +55,8 @@ const tagEncoder = new SchemaEncoder(EFS_SCHEMA_FIELDS.tag)
 const anchorEncoder = new SchemaEncoder(EFS_SCHEMA_FIELDS.anchor)
 const propertyEncoder = new SchemaEncoder(EFS_SCHEMA_FIELDS.property)
 const pinEncoder = new SchemaEncoder(EFS_SCHEMA_FIELDS.pin)
+const listEncoder = new SchemaEncoder(EFS_SCHEMA_FIELDS.list)
+const listEntryEncoder = new SchemaEncoder(EFS_SCHEMA_FIELDS.listEntry)
 
 /** Stable local ref ids for the edge/value plans (the seam resolves symbols by name). */
 export const EDGE_REF = {
@@ -61,6 +65,18 @@ export const EDGE_REF = {
   KEY_ANCHOR: 'keyAnchor',
   PROPERTY: 'property',
   BINDING_PIN: 'bindingPin',
+  /** The minted LIST attestation (its UID is the new `listUID`). */
+  LIST: 'list',
+  /** The minted LIST_ENTRY attestation (its UID is the entry handle / revoke target). */
+  LIST_ENTRY: 'listEntry',
+} as const
+
+/** Map the `'any' | 'addr' | 'schema'` literal union to the on-chain `uint8`
+ * `targetType` (0 = ANY, 1 = ADDR, 2 = SCHEMA — IListReader/ListResolver). */
+export const TARGET_TYPE_CODE: Record<ListTargetType, number> = {
+  any: 0,
+  addr: 1,
+  schema: 2,
 } as const
 
 /** The default TAG weight when the caller passes none (ADR-0041 §4: weight is
@@ -195,4 +211,203 @@ export function buildPlacementPinPlan(
     dataRefs: [], // no fresh siblings — the anchor is concrete, encoded in `data`
   }
   return { hardlink: false, attestations: [pin] }
+}
+
+// ── LIST / LIST_ENTRY (curated collections — ADR-0044/0046/0047) ──────────────────
+
+/** The decoded LIST configuration a `lists.create` mints (mirrors {@link ListConfig}
+ * minus the read-only echoed/identity fields). Validated by {@link validateListConfig}
+ * before {@link buildCreateListPlan} encodes it. */
+export interface ListCreateConfig {
+  /** Whether the same target may appear more than once. */
+  allowsDuplicates: boolean
+  /** Whether entries can never be revoked (append-only) vs revocable. */
+  appendOnly: boolean
+  /** `'any'` (0) opaque keys · `'addr'` (1) addresses · `'schema'` (2) UIDs of one schema. */
+  targetType: ListTargetType
+  /** For `'schema'`: the required entry schema (nonzero); `ZERO_UID` otherwise. */
+  targetSchema?: Hex
+  /** Entry cap (`0n` = uncapped; required nonzero when appendOnly && allowsDuplicates). */
+  maxEntries?: bigint
+}
+
+/**
+ * Validate a {@link ListCreateConfig} against the ListResolver `onAttest` invariants
+ * BEFORE submit (EFSLib.createList / ListResolver.sol), throwing {@link
+ * InvalidListConfig} rather than letting the chain revert the tx:
+ *
+ *  - `targetType` ≤ 2 (the literal union already constrains this; guarded for the
+ *    JS-caller-with-`as` case).
+ *  - SCHEMA mode requires a nonzero `targetSchema`; ANY/ADDR require it zero/omitted.
+ *  - `appendOnly && allowsDuplicates ⇒ maxEntries != 0` (the resolver requires a cap,
+ *    else an append-only dup list could grow unbounded with no dedupe).
+ *
+ * @returns the normalized `{ targetSchema, maxEntries }` (zeros filled in).
+ */
+export function validateListConfig(config: ListCreateConfig): {
+  targetSchema: Hex
+  maxEntries: bigint
+} {
+  const code = TARGET_TYPE_CODE[config.targetType]
+  if (code === undefined || code > 2) {
+    throw new InvalidListConfig(
+      `targetType must be 'any' (0), 'addr' (1), or 'schema' (2); got '${String(config.targetType)}'.`,
+    )
+  }
+  const targetSchema = config.targetSchema ?? ZERO_UID
+  const isSchemaMode = config.targetType === 'schema'
+  const hasSchema = targetSchema !== ZERO_UID
+  if (isSchemaMode && !hasSchema) {
+    throw new InvalidListConfig(
+      "a 'schema'-mode list requires a nonzero targetSchema (the single schema every entry must be).",
+    )
+  }
+  if (!isSchemaMode && hasSchema) {
+    throw new InvalidListConfig(
+      `a '${config.targetType}'-mode list must have a zero targetSchema (only 'schema' mode pins entries to a schema).`,
+    )
+  }
+  const maxEntries = config.maxEntries ?? 0n
+  if (config.appendOnly && config.allowsDuplicates && maxEntries === 0n) {
+    throw new InvalidListConfig(
+      'an append-only list that allows duplicates requires a nonzero maxEntries (the resolver caps it — an uncapped append-only dup list could grow without bound).',
+    )
+  }
+  return { targetSchema, maxEntries }
+}
+
+/**
+ * Build the single-attestation plan for a **LIST** (mirrors `EFSLib.createList`):
+ * `data = abi.encode(allowsDuplicates, appendOnly, targetType, targetSchema,
+ * maxEntries)`, `recipient` 0, `refUID` 0, **non-revocable**, expirationTime 0. The
+ * caller is the curator (the attester). Single-layer → one `multiAttest` (one popup).
+ * The minted attestation's UID is the new `listUID`.
+ *
+ * Validates the resolver invariants up front ({@link validateListConfig}) so a bad
+ * config throws {@link InvalidListConfig} rather than reverting on-chain.
+ */
+export function buildCreateListPlan(
+  schemas: EfsSchemaUIDs,
+  config: ListCreateConfig,
+): FileWriteGraph {
+  const { targetSchema, maxEntries } = validateListConfig(config)
+  const list: PlannedAttestation = {
+    ref: EDGE_REF.LIST,
+    layer: 1,
+    kind: 'LIST',
+    schema: schemas.list,
+    data: listEncoder.encodeData([
+      config.allowsDuplicates,
+      config.appendOnly,
+      TARGET_TYPE_CODE[config.targetType],
+      targetSchema,
+      maxEntries,
+    ]),
+    revocable: false, // ListResolver — LIST must be non-revocable
+    refUID: ZERO_UID, // ListResolver — LIST must be free-floating
+    dataRefs: [],
+  }
+  return { hardlink: false, attestations: [list] }
+}
+
+/**
+ * Build the single-attestation plan for a **LIST_ENTRY**, routed by the list's
+ * `targetType` (mirrors `EFSLib.addEntry` / `addAddressEntry`):
+ *
+ *  - **ANY / SCHEMA** → `data = abi.encode(listUID, target)` with a nonzero `target`
+ *    member key (ANY: opaque key; SCHEMA: the target attestation UID), `recipient` 0,
+ *    `refUID` 0, revocable.
+ *  - **ADDR** → the member address rides in `recipient`; `data = abi.encode(listUID,
+ *    bytes32(0))` (payload target MUST be zero — ListEntryResolver `BadAddrMode`).
+ *    `address(0)` is an explicitly-valid ADDR member.
+ *
+ * Single-layer → one `multiAttest` (one popup). Both modes: `refUID` MUST be 0 (the
+ * LIST is referenced via the payload `listUID`, not `refUID` — `UsesRefUID`).
+ *
+ * @param target For ANY/SCHEMA: a nonzero `bytes32` member key/UID. For ADDR: the
+ *   member `Address` (incl. `address(0)`). Validate shape vs mode before calling, or
+ *   use the `lists.add` verb which validates {@link validateAddTarget}.
+ */
+export function buildAddEntryPlan(
+  schemas: EfsSchemaUIDs,
+  listUID: Hex,
+  targetType: ListTargetType,
+  target: Address | Hex,
+): FileWriteGraph {
+  if (targetType === 'addr') {
+    const member = target as Address
+    const entry: PlannedAttestation = {
+      ref: EDGE_REF.LIST_ENTRY,
+      layer: 1,
+      kind: 'LIST_ENTRY',
+      schema: schemas.listEntry,
+      // ADDR mode — payload target MUST be zero; the member rides in recipient.
+      data: listEntryEncoder.encodeData([listUID, ZERO_UID]),
+      revocable: true, // ListEntryResolver — must be revocable
+      refUID: ZERO_UID, // refUID MUST be 0 (UsesRefUID)
+      recipient: member, // ADDR mode — the member address (address(0) is valid)
+      dataRefs: [],
+    }
+    return { hardlink: false, attestations: [entry] }
+  }
+  // ANY / SCHEMA — the member key/UID rides in the payload `target`, recipient 0.
+  const entry: PlannedAttestation = {
+    ref: EDGE_REF.LIST_ENTRY,
+    layer: 1,
+    kind: 'LIST_ENTRY',
+    schema: schemas.listEntry,
+    data: listEntryEncoder.encodeData([listUID, target as Hex]),
+    revocable: true, // ListEntryResolver — must be revocable
+    refUID: ZERO_UID, // refUID MUST be 0 (UsesRefUID)
+    recipient: ZERO_ADDRESS, // ANY/SCHEMA require recipient 0
+    dataRefs: [],
+  }
+  return { hardlink: false, attestations: [entry] }
+}
+
+/** A 32-byte hex word (`0x` + 64 hex). */
+function isBytes32(s: string): s is Hex {
+  return /^0x[0-9a-fA-F]{64}$/.test(s)
+}
+
+/** A 20-byte hex address (`0x` + 40 hex). */
+function isAddress(s: string): s is Address {
+  return /^0x[0-9a-fA-F]{40}$/.test(s)
+}
+
+/**
+ * Validate an `add` target against the list's mode, throwing {@link InvalidListConfig}
+ * before submit (the resolver would revert otherwise):
+ *
+ *  - **ADDR** → `target` must be an `Address` (20-byte hex). `address(0)` IS allowed
+ *    (an explicitly-valid ADDR member — the resolver derives the key from the nonzero
+ *    `recipient` slot, and zero is a legal recipient there).
+ *  - **ANY / SCHEMA** → `target` must be a nonzero `bytes32` UID/member key (a zero
+ *    key is rejected on-chain).
+ *
+ * Returns the target unchanged (typed) on success.
+ */
+export function validateAddTarget(
+  targetType: ListTargetType,
+  target: Address | Hex,
+): Address | Hex {
+  if (targetType === 'addr') {
+    if (!isAddress(target)) {
+      throw new InvalidListConfig(
+        `an 'addr'-mode list needs a 20-byte address target; got '${target}'. (address(0) is allowed.)`,
+      )
+    }
+    return target
+  }
+  if (!isBytes32(target)) {
+    throw new InvalidListConfig(
+      `a '${targetType}'-mode list needs a 32-byte ${targetType === 'schema' ? 'attestation UID' : 'member key'} target; got '${target}'.`,
+    )
+  }
+  if (target === ZERO_UID) {
+    throw new InvalidListConfig(
+      `a '${targetType}'-mode list needs a NONZERO target ${targetType === 'schema' ? 'UID' : 'key'} (the zero word is rejected on-chain).`,
+    )
+  }
+  return target
 }

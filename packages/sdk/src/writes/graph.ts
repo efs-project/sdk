@@ -74,7 +74,7 @@
  * Pass `content: { kind: 'hardlink', dataUID }`.
  */
 
-import type { Hex } from 'viem'
+import type { Address, Hex } from 'viem'
 import type { EfsSchemaUIDs } from '../chain/deployments.js'
 import { SchemaEncoder } from '../eas/schema-encoder.js'
 import { EFS_SCHEMA_FIELDS } from '../eas/schemas.js'
@@ -128,7 +128,7 @@ export interface PlannedAttestation {
   /** The DAG layer (1 | 2 | 3) — the submit ordering unit. */
   readonly layer: WriteLayer
   /** Human label for the kind of node, for diagnostics/progress. */
-  readonly kind: 'DATA' | 'MIRROR' | 'PROPERTY' | 'ANCHOR' | 'PIN' | 'TAG'
+  readonly kind: 'DATA' | 'MIRROR' | 'PROPERTY' | 'ANCHOR' | 'PIN' | 'TAG' | 'LIST' | 'LIST_ENTRY'
   /** The frozen schema UID to attest against. */
   readonly schema: Hex
   /** ABI-encoded attestation `data` (via {@link SchemaEncoder} + {@link EFS_SCHEMA_FIELDS}). */
@@ -137,6 +137,13 @@ export interface PlannedAttestation {
   readonly revocable: boolean
   /** The EAS-native `refUID`: a concrete pre-existing UID, `ZERO_UID`, or symbolic. */
   readonly refUID: RefOrUID
+  /**
+   * The EAS-native `recipient`. `0x0` for every EFS write EXCEPT an ADDR-mode
+   * LIST_ENTRY, whose member address rides in `recipient` (the one EFS attestation
+   * whose recipient is intentionally nonzero — ListEntryResolver derives the
+   * identity key from it; EFSLib.addAddressEntry). Omitted ⇒ `ZERO_ADDRESS`.
+   */
+  readonly recipient?: Address
   /** In-`data` symbolic references that the submitter must resolve before encoding
    * is final — currently only a PIN's `definition` field. `[]` when the encoded
    * `data` is already concrete. Each entry names the data field and the symbol it

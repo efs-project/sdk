@@ -302,7 +302,14 @@ function buildLayerRequests(
       order.push(att.schema)
     }
     bucket.refs.push(att.ref)
-    bucket.data.push(materializedEntry({ revocable: att.revocable, refUID, data }))
+    bucket.data.push(
+      materializedEntry({
+        revocable: att.revocable,
+        refUID,
+        data,
+        ...(att.recipient !== undefined ? { recipient: att.recipient } : {}),
+      }),
+    )
   }
 
   const requests = order.map((schema) => {
@@ -319,11 +326,18 @@ function buildLayerRequests(
   return { requests, flatRefs }
 }
 
-/** Build one normalized `AttestationRequestData` entry (recipient/value/expiry
- * fixed per the EFS write invariants — `0x0`/`0n`/`0n`). */
-function materializedEntry(input: { revocable: boolean; refUID: Hex; data: Hex }) {
+/** Build one normalized `AttestationRequestData` entry (value/expiry fixed per the
+ * EFS write invariants — `0n`/`0n`). `recipient` is `0x0` for every EFS write EXCEPT
+ * an ADDR-mode LIST_ENTRY (whose member address rides in `recipient`); the plan
+ * carries it explicitly there, and it defaults to {@link ZERO_ADDRESS} otherwise. */
+function materializedEntry(input: {
+  revocable: boolean
+  refUID: Hex
+  data: Hex
+  recipient?: Address
+}) {
   return {
-    recipient: ZERO_ADDRESS as Address,
+    recipient: input.recipient ?? (ZERO_ADDRESS as Address),
     expirationTime: 0n,
     revocable: input.revocable,
     refUID: input.refUID,

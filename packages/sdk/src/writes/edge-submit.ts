@@ -16,7 +16,8 @@
  * seam without a change here.
  */
 
-import type { Address } from 'viem'
+import type { Address, Hex } from 'viem'
+import { EfsError } from '../errors.js'
 import type { DataUID, WriteReceipt } from '../types.js'
 import type { FileWriteGraph } from './graph.js'
 import { type LayeredWriteResult, type SubmitContext, submitLayeredTier1 } from './submit.js'
@@ -44,6 +45,30 @@ export async function submitEdgePlan(
 ): Promise<WriteReceipt> {
   const result: LayeredWriteResult = await submitLayeredTier1(plan, ctx)
   return toEdgeReceipt(result)
+}
+
+/**
+ * Submit a built edge/value plan and return the normalized {@link WriteReceipt}
+ * together with the minted UID of a specific named ref (the `mintedRef`). Used by
+ * `lists.create`, where the LIST attestation's own UID is the new `listUID` the
+ * caller needs back. Throws if the ref was not minted (a malformed plan).
+ *
+ * @throws {WriteRevertedError} on a layer revert (the partial-write boundary).
+ */
+export async function submitEdgePlanWithUID(
+  plan: FileWriteGraph,
+  ctx: EdgeSubmitContext,
+  mintedRef: string,
+): Promise<{ receipt: WriteReceipt; uid: Hex }> {
+  const result: LayeredWriteResult = await submitLayeredTier1(plan, ctx)
+  const uid = result.uids.get(mintedRef)
+  if (uid === undefined) {
+    throw new EfsError(
+      `Edge submit: ref '${mintedRef}' was not minted — the plan did not produce the expected attestation.`,
+      { code: 'EfsError' },
+    )
+  }
+  return { receipt: toEdgeReceipt(result), uid }
 }
 
 /** Map a {@link LayeredWriteResult} to the public {@link WriteReceipt} (no content

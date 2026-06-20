@@ -39,10 +39,28 @@ export {
   buildTagPlan,
   buildPropertyPlan,
   buildPlacementPinPlan,
+  buildCreateListPlan,
+  buildAddEntryPlan,
+  validateListConfig,
+  validateAddTarget,
+  TARGET_TYPE_CODE,
   EDGE_REF,
   DEFAULT_TAG_WEIGHT,
+  type ListCreateConfig,
 } from './edge.js'
-export { submitEdgePlan, type EdgeSubmitContext } from './edge-submit.js'
+export {
+  submitEdgePlan,
+  submitEdgePlanWithUID,
+  type EdgeSubmitContext,
+} from './edge-submit.js'
+// Curated-collection (LIST) write primitives — `efs.lists.{create,add,remove}`.
+export {
+  makeListsWriteNs,
+  type ListsWriteNs,
+  type ListsWriteNsDeps,
+  type ListAddOptions,
+  type ListRemoveOptions,
+} from './lists.js'
 export {
   makeTagsNs,
   resolveTagDefinition,

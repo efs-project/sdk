@@ -31,6 +31,14 @@ export type EfsErrorCode =
   /** A typed list-entry accessor was called for the wrong `targetType` (e.g.
    * `targetAsAddress` on a SCHEMA-typed list). Mirrors the ListReader revert. */
   | 'WrongListTargetType'
+  /** A LIST create/add config violates a ListResolver/ListEntryResolver invariant —
+   * caught client-side BEFORE submit so the caller gets a typed error, not a chain
+   * revert (targetType bound, SCHEMA-mode targetSchema rule, appendOnly+duplicates cap,
+   * ADDR/UID target shape). */
+  | 'InvalidListConfig'
+  /** A `lists.remove` was attempted on an append-only list (entries can never be
+   * revoked). Rejected up front — no chain round-trip. */
+  | 'ListAppendOnly'
   /** The winning attestation is revoked — distinct from absent (sdk-read-surface
    * error matrix). A byte read throws this; metadata surfaces `verified:'revoked'`. */
   | 'Revoked'
@@ -230,6 +238,36 @@ export class WrongListTargetType extends EfsError {
     this.listUID = listUID
     this.actual = actual
     this.requested = requested
+  }
+}
+
+/**
+ * A LIST create/add config violates a frozen-resolver invariant, caught client-side
+ * BEFORE submit (the resolver would `revert` the whole tx; the SDK refuses up front
+ * with an actionable message instead). Covers: `targetType` out of range (>2);
+ * SCHEMA-mode requires a nonzero `targetSchema` and non-SCHEMA requires zero;
+ * `appendOnly && allowsDuplicates ⇒ maxEntries != 0`; and an `add` target whose shape
+ * is wrong for the list's mode (ADDR needs an address, ANY/SCHEMA need a nonzero UID).
+ */
+export class InvalidListConfig extends EfsError {
+  override name = 'InvalidListConfig'
+  constructor(message: string) {
+    super(`EFS lists: ${message}`, { code: 'InvalidListConfig' })
+  }
+}
+
+/** A `lists.remove` was attempted on an append-only list — its entries can never be
+ * revoked (ListEntryResolver rejects the revocation). Rejected up front with no chain
+ * round-trip; the list's {@link ListConfig.appendOnly} flag is the authoritative gate. */
+export class ListAppendOnly extends EfsError {
+  override name = 'ListAppendOnly'
+  readonly listUID: Hex
+  constructor(listUID: Hex) {
+    super(
+      `EFS lists: list '${listUID}' is append-only — its entries can never be removed (revoked).`,
+      { code: 'ListAppendOnly' },
+    )
+    this.listUID = listUID
   }
 }
 
