@@ -229,14 +229,18 @@ export type WriteOptions = {
   lens?: Address
   /**
    * `mkdir -p` for the write: when the target's ancestor folders don't yet exist,
-   * create them in the SAME write instead of throwing. Each missing folder becomes
-   * one non-revocable ANCHOR (a permanent folder), chained under the deepest
-   * existing ancestor, mined before the file is placed under it.
+   * create them in the SAME write. Each missing folder becomes one non-revocable
+   * ANCHOR (a permanent folder), chained under the deepest existing ancestor, mined
+   * before the file is placed under it.
    *
-   * Default **`false`** — the safe, today's behavior: a missing parent throws
-   * `ParentNotFoundError`. Opt in (`true`) for "just works" nested writes. Left off
-   * by default deliberately: folder anchors are PERMANENT, so a typo in a path
-   * (`/photos/2026/...` vs `/photo/2026/...`) would mint a permanent stray folder.
+   * Default **`true`** — nested writes "just work". This is safe in EFS: anchors are
+   * shared, content-neutral path nodes (an existing one is reused, only genuinely
+   * missing segments are minted), and folder visibility is lens-scoped, so a folder
+   * never appears in anyone's listing unless an attester in their lens has content
+   * under it — a stray/typo'd folder pollutes no one else's view. Set **`false`** to
+   * require the parents to already exist (a missing one throws `ParentNotFoundError`)
+   * — useful as a typo guard, since a wrong path otherwise writes successfully to the
+   * wrong place.
    */
   createParents?: boolean
 }

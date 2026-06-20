@@ -58,10 +58,11 @@ export interface ResolvePublicClient {
 
 /**
  * Raised when a path prefix (a folder on the way to the target) does not exist
- * on-chain and the write did NOT opt into creating it. By default the write path
- * requires the parent folder to already exist; pass `createParents: true`
- * ({@link WriteOptions}) to fold the missing ancestor folders into the same write
- * (`mkdir -p`). Carries the full path requested and the exact segment prefix that
+ * on-chain and the write opted OUT of creating it (`createParents: false`). By
+ * default the write folds the missing ancestor folders into the same write
+ * (`mkdir -p`, {@link WriteOptions}); pass `createParents: false` to require the
+ * parents to already exist (a typo guard). Carries the full path requested and the
+ * exact segment prefix that
  * resolved to `ZERO_UID`, so a caller can mkdir-p the gap or surface a precise
  * "folder X is missing" message.
  */
@@ -76,7 +77,7 @@ export class ParentNotFoundError extends EfsError {
   constructor(path: string, resolvedSegments: readonly string[], missingSegment: string) {
     const at = resolvedSegments.length > 0 ? `/${resolvedSegments.join('/')}` : '(root)'
     super(
-      `EFS path resolution failed: the folder segment '${missingSegment}' does not exist under ${at} (resolving '${path}'). Its parent folder must exist before writing into it — pass \`createParents: true\` to create the missing folders in the same write (mkdir -p).`,
+      `EFS path resolution failed: the folder segment '${missingSegment}' does not exist under ${at} (resolving '${path}'). You passed \`createParents: false\`, which requires the parents to already exist — omit it (the default) to create the missing folders in the same write (mkdir -p).`,
       { code: 'ParentNotFound' },
     )
     this.path = path

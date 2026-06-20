@@ -188,8 +188,8 @@ function toReceipt(
  * Execute a Tier-1 file write end to end. See the module doc for the pipeline.
  *
  * @throws {ParentNotFoundError} the parent folder does not exist and
- *   `opts.createParents` is not set (the default). With `createParents: true` the
- *   missing ancestor folders are created in the same write instead (mkdir -p).
+ *   `opts.createParents` is explicitly `false`. By default (`createParents` unset or
+ *   `true`) the missing ancestor folders are created in the same write (mkdir -p).
  * @throws {EfsError} `MissingTransport` / `InvalidArgument` from mirror resolution.
  * @throws {WriteRevertedError} a layer's multiAttest reverted (partial-write
  *   boundary) — surfaced verbatim to the caller.
@@ -209,8 +209,8 @@ export async function writeFileTier1(
   // 2. Plan the parent folder chain (resolve as deep as it exists) + the file name.
   // Done BEFORE storage so a missing-parent write fails fast — never deploying
   // on-chain chunks for a path that can't be placed. When parents are missing the
-  // behavior splits on `createParents`: opt in to fold the missing folders into the
-  // same write (mkdir -p), else throw `ParentNotFoundError` (the safe default).
+  // behavior splits on `createParents`: by default fold the missing folders into the
+  // same write (mkdir -p); only `createParents: false` throws `ParentNotFoundError`.
   const parentPlan = await resolveOrPlanParents(
     ctx.publicClient,
     deployment.contracts.indexer,
@@ -223,7 +223,7 @@ export async function writeFileTier1(
   let missingParents: readonly string[] = []
   if ('parentAnchorUID' in parentPlan) {
     parentAnchorUID = parentPlan.parentAnchorUID
-  } else if (opts?.createParents === true) {
+  } else if (opts?.createParents !== false) {
     parentAnchorUID = parentPlan.deepestExistingAnchorUID
     missingParents = parentPlan.missingSegments
   } else {

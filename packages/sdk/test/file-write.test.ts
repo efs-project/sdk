@@ -410,11 +410,23 @@ describe('writeFileTier1 — createParents (mkdir -p)', () => {
     expect(receipt.steps.find((s) => s.uid === y2026UID)?.done).toBe(true)
   })
 
-  it('createParents:false (default) throws ParentNotFoundError on a missing parent', async () => {
+  it('createParents:false throws ParentNotFoundError on a missing parent', async () => {
     const { ctx } = makeCtx({ edges: {} })
-    const err = await writeFileTier1('/photos/2026/trip.jpg', CONTENT, ctx).catch((e) => e)
+    const err = await writeFileTier1('/photos/2026/trip.jpg', CONTENT, ctx, {
+      createParents: false,
+    }).catch((e) => e)
     expect(err).toBeInstanceOf(ParentNotFoundError)
     expect((err as ParentNotFoundError).missingSegment).toBe('photos')
+  })
+
+  it('default (createParents unset) creates the missing folders — does not throw', async () => {
+    const { ctx, sent } = makeCtx({ edges: {} })
+    await writeFileTier1('/photos/2026/trip.jpg', CONTENT, ctx)
+    const anchors = await anchorEntries(sent)
+    expect(anchors.filter((a) => a.name === 'photos' || a.name === '2026').map((a) => a.name)).toEqual([
+      'photos',
+      '2026',
+    ])
   })
 
   it('only the leaf folder missing: creates ONLY that segment, reusing the deepest existing ancestor', async () => {
@@ -455,9 +467,11 @@ describe('writeFileTier1 — createParents (mkdir -p)', () => {
 })
 
 describe('writeFileTier1 — error paths', () => {
-  it('throws ParentNotFoundError when the parent folder is missing', async () => {
+  it('throws ParentNotFoundError when the parent folder is missing and createParents:false', async () => {
     const { ctx } = makeCtx({ edges: {} }) // nothing under root
-    const err = await writeFileTier1('/docs/readme.md', CONTENT, ctx).catch((e) => e)
+    const err = await writeFileTier1('/docs/readme.md', CONTENT, ctx, {
+      createParents: false,
+    }).catch((e) => e)
     expect(err).toBeInstanceOf(ParentNotFoundError)
     expect((err as ParentNotFoundError).missingSegment).toBe('docs')
   })
