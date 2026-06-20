@@ -228,6 +228,18 @@ export interface FileWriteGraphInput {
   readonly existingAncestorTagUIDs?: readonly Hex[]
   /** The file's anchor name (canonical encoding; the file-ANCHOR's `name`). */
   readonly fileName: string
+  /**
+   * Folder-Overview marker (ADR-0011): when set, emit a `system` TAG on the file's
+   * OWN anchor — `TAG(definition = overviewSystemTagDef, refUID = file-ANCHOR,
+   * weight = 1)` — in the layer STRICTLY BEFORE the placement PIN, so the file is
+   * already `system`-tagged the moment it becomes visible (it never flashes as a
+   * visible untagged sibling). `overviewSystemTagDef` is the resolved `/tags/system`
+   * definition anchor UID — the SAME def the directory filter excludes on (so a
+   * `SAFETY_EXCLUDES` listing hides the README from its own folder). Omitted ⇒ a
+   * normal file write (no marker, placement PIN at the base L3). This is the
+   * `setOverview` path's ONLY graph difference from `write`.
+   */
+  readonly overviewSystemTagDef?: Hex
 }
 
 /** The ordered write plan returned by {@link buildFileWriteGraph}. */
@@ -254,6 +266,8 @@ export const REF = {
   createdFolderTag: (i: number) => `visTag:created:${i}`,
   /** Visibility TAG for a pre-EXISTING ancestor folder (refs its concrete UID). */
   existingFolderTag: (i: number) => `visTag:existing:${i}`,
+  /** The folder-Overview `system` TAG on the file's OWN anchor (ADR-0011). */
+  OVERVIEW_SYSTEM_TAG: 'overviewSystemTag',
 } as const
 
 // Encoders for the frozen field strings (constructed once; SchemaEncoder caches
@@ -304,6 +318,9 @@ export function buildFileWriteGraph(input: FileWriteGraphInput): FileWriteGraph 
   // (concrete) parent — see `parentRefFor`.
   const missingParents = input.missingParents ?? []
   const m = missingParents.length
+  // Overview marker (ADR-0011): when set, a `system` TAG occupies the layer before
+  // the placement PIN, shifting the PIN layers (+1). `ov` is that shift (0 or 1).
+  const ov = input.overviewSystemTagDef !== undefined ? 1 : 0
   const folderAttestations = buildParentFolderChain(input)
 
   // ── Hardlink / dedup short-circuit ──────────────────────────────────────────
@@ -410,20 +427,44 @@ export function buildFileWriteGraph(input: FileWriteGraphInput): FileWriteGraph 
       dataRefs: [],
     })
 
-    // binding-PIN (base L3): definition = key-ANCHOR (fresh), refUID = PROPERTY
-    // (fresh) — the deepest edge, referencing two fresh L2 siblings. PIN onAttest
-    // requires revocable=true (EdgeResolver.sol:336) and expirationTime 0 (:337).
-    attestations.push(buildBindingPin(schemas, key, m + 3))
+    // binding-PIN: definition = key-ANCHOR (fresh), refUID = PROPERTY (fresh) — the
+    // deepest edge, referencing two fresh L2 siblings. PIN onAttest requires
+    // revocable=true (EdgeResolver.sol:336) and expirationTime 0 (:337). Sits at the
+    // PIN layer (base L3, +1 when an Overview `system` TAG is inserted before it).
+    attestations.push(buildBindingPin(schemas, key, m + 3 + ov))
   }
 
-  // ── placement-PIN (base L3) — definition = file-ANCHOR, refUID = DATA (fresh) ──
-  attestations.push(buildPlacementPin(schemas, { ref: REF.DATA }, m + 3))
+  // ── Overview `system` TAG (base L3, BEFORE the placement PIN) ─────────────────
+  // ADR-0011: tag the file's OWN anchor `system` in the layer STRICTLY BEFORE the
+  // placement PIN, so the README is already hidden the instant it becomes visible
+  // (no untagged flash). `refUID` is the freshly-minted file-ANCHOR (symbolic);
+  // `definition` = the resolved `/tags/system` def. When this is emitted (`ov === 1`)
+  // the placement + binding PINs shift to base L4 (`m + 4`) — guaranteeing the TAG
+  // mines in an earlier `multiAttest` than the placement. Absent ⇒ `ov === 0`,
+  // nothing emitted, layers unchanged from a normal write.
+  if (input.overviewSystemTagDef !== undefined) {
+    attestations.push({
+      ref: REF.OVERVIEW_SYSTEM_TAG,
+      layer: m + 3, // strictly before the placement PIN (now at m + 4)
+      kind: 'TAG',
+      schema: schemas.tag,
+      data: tagEncoder.encodeData([input.overviewSystemTagDef, VISIBILITY_TAG_WEIGHT]),
+      revocable: true, // EdgeResolver.sol — TAG must be revocable
+      refUID: { ref: REF.FILE_ANCHOR }, // the file's own anchor (fresh L2 sibling)
+      dataRefs: [],
+    })
+  }
 
-  // ── visibility TAGs (base L4) — one per uncovered ancestor folder ────────────
+  // ── placement-PIN — definition = file-ANCHOR, refUID = DATA (fresh) ──────────
+  // Base L3, shifted to L4 when the Overview `system` TAG occupies L3 (so the TAG
+  // mines first — the README is never placed before it is tagged).
+  attestations.push(buildPlacementPin(schemas, { ref: REF.DATA }, m + 3 + ov))
+
+  // ── visibility TAGs — one per uncovered ancestor folder ──────────────────────
   // Emitted AFTER every folder ANCHOR + PIN so a `createParents`-minted folder is
   // already on-chain when its TAG references it (the TAG's refUID is that fresh
-  // folder, symbolic). See `buildVisibilityTags` for the semantics.
-  attestations.push(...buildVisibilityTags(input, m + 4))
+  // folder, symbolic). One layer below the placement PIN. See `buildVisibilityTags`.
+  attestations.push(...buildVisibilityTags(input, m + 4 + ov))
 
   // Emit grouped by dependency layer (created folders → DATA → L2 → PINs). The
   // triplets are built key-contiguously above (anchor/property/pin interleave a

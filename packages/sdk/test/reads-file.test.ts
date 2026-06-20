@@ -31,12 +31,14 @@ import type { EfsDeployment } from '../src/chain/deployments.js'
 import { hashContent } from '../src/content/hash.js'
 import {
   ContentHashMismatch,
+  CursorInvalid,
   FileNotFoundError,
   LensRequired,
   MalformedClaim,
 } from '../src/errors.js'
 import { attestationsFor } from '../src/reads/attestations.js'
 import type { ReadContext } from '../src/reads/context.js'
+import { InvalidDirectoryQuery } from '../src/reads/directory.js'
 import { read, readBytes, readJson, readText } from '../src/reads/fetch.js'
 import { exists, info, locate } from '../src/reads/file.js'
 import { list } from '../src/reads/list.js'
@@ -162,6 +164,11 @@ function makeCtx(opts: {
   attestations?: Record<string, Hex> // propertyUID -> data blob (getAttestation)
   mirrors?: readonly { uri: string; attester: Address }[]
   dirPage?: { items: readonly Item[]; nextCursor: bigint }
+  // Filtered directory pages (ADR-0011 getDirectoryPageFiltered): ordered pages with
+  // opaque `bytes` cursors. The mock walks them in order, keying the next page on the
+  // cursor the previous one emitted (`'0x'` ⇒ exhausted). The first read uses cursor
+  // `'0x'`. Captures the args so a test can assert the resolved excludeTagDefs/weights.
+  filteredPages?: readonly { items: readonly Item[]; nextCursor: Hex }[]
   // REDIRECT (ADR-0050): `${source}|${attester}` -> the active redirect from that
   // source under that attester. Backs getReferencingBySchemaAndAttester (returns the
   // redirectUID) + getAttestation (returns the encoded `(target, kind)` blob).
@@ -177,9 +184,14 @@ function makeCtx(opts: {
     attestations = {},
     mirrors = [],
     dirPage = { items: [], nextCursor: 0n },
+    filteredPages = [],
     redirects = {},
     calls = [],
   } = opts
+  // Filtered-page walker: serve `filteredPages` in order. The mock returns page i and
+  // sets its cursor to a synthetic `0x..0i+1` (or `'0x'` to end); the next call's
+  // cursor selects page i+1. Keyed by the cursor the test sees (opaque, passed back).
+  let filteredIdx = 0
   // Index redirectUID -> encoded redirect data, for the getAttestation branch.
   const redirectByUID = new Map<Hex, Hex>()
   for (const r of Object.values(redirects)) {
@@ -246,6 +258,12 @@ function makeCtx(opts: {
         }
         case 'getDirectoryPageByAddressList':
           return dirPage
+        case 'getDirectoryPageFiltered': {
+          // args: [parentAnchor, anchorSchema, attesters, excludeTagDefs, minWeights, cursor, maxItems]
+          const page = filteredPages[filteredIdx] ?? { items: [], nextCursor: '0x' as Hex }
+          filteredIdx += 1
+          return page
+        }
         default:
           throw new Error(`unexpected functionName ${args.functionName}`)
       }
@@ -731,9 +749,144 @@ describe('list', () => {
     ;(ctx.deployment.contracts as { systemAccount?: Address }).systemAccount = undefined
     await expect(list(() => ctx, '/docs').byPage()).rejects.toBeInstanceOf(LensRequired)
   })
+})
 
-  it('refuses the filtered (excludes) path until it is wired', () => {
-    const ctx = makeCtx({ edges: { [`${ROOT}|docs`]: DOCS_ANCHOR } })
-    expect(() => list(() => ctx, '/docs', { lens: LENS, excludes: ['nsfw'] })).toThrow(/excludes/)
+// ── list with excludes (ADR-0011 tag-exclusion filter) ──────────────────────────
+
+describe('list({ excludes }) — on-chain tag-exclusion filter (ADR-0011)', () => {
+  const TAGS_ANCHOR = uid(0x7a65) // /tags anchor
+  const NSFW_DEF = uid(0x5f0) // /tags/nsfw definition anchor
+  const visibleA = (over: Partial<Item>): Item =>
+    fileItem({ name: 'a.md', isFolder: false, ...over })
+  const visibleB = (over: Partial<Item>): Item =>
+    fileItem({ name: 'b.md', isFolder: false, ...over })
+
+  /** Edges placing /docs + the /tags/nsfw label so the SDK can resolve it. */
+  const FILTER_EDGES = {
+    [`${ROOT}|docs`]: DOCS_ANCHOR,
+    [`${ROOT}|tags`]: TAGS_ANCHOR,
+    [`${TAGS_ANCHOR}|nsfw`]: NSFW_DEF,
+  }
+
+  it('routes to getDirectoryPageFiltered with the resolved def + reconciled weights', async () => {
+    const calls: { fn: string; args: readonly unknown[] }[] = []
+    const ctx = makeCtx({
+      edges: FILTER_EDGES,
+      filteredPages: [{ items: [visibleA({ uid: uid(0xa1) })], nextCursor: '0x' as Hex }],
+      calls,
+    })
+    const page = await list(() => ctx, '/docs', { lens: LENS, excludes: ['nsfw'] }).byPage()
+    // The single (non-excluded) entry survives.
+    expect(page.items.map((e) => e.name)).toEqual(['a.md'])
+    // The label resolved to the /tags/nsfw def, weights reconciled to all-zero, and
+    // the filtered view was called (NOT the unfiltered sibling).
+    const filtered = calls.find((c) => c.fn === 'getDirectoryPageFiltered')
+    expect(filtered).toBeDefined()
+    const [, anchorSchema, attesters, excludeTagDefs, minWeights] = filtered?.args as [
+      Hex,
+      Hex,
+      readonly Address[],
+      readonly Hex[],
+      readonly bigint[],
+    ]
+    expect(anchorSchema).toBe(SCHEMAS.anchor)
+    expect(attesters).toEqual([LENS]) // lens-scoped
+    expect(excludeTagDefs).toEqual([NSFW_DEF])
+    expect(minWeights).toEqual([0n]) // omitted ⇒ all-zero (ADR-0042 default)
+    // The unfiltered sibling was never called.
+    expect(calls.some((c) => c.fn === 'getDirectoryPageByAddressList')).toBe(false)
+  })
+
+  it('passes a def-UID exclude through verbatim (no label resolution)', async () => {
+    const calls: { fn: string; args: readonly unknown[] }[] = []
+    const ctx = makeCtx({
+      edges: { [`${ROOT}|docs`]: DOCS_ANCHOR },
+      filteredPages: [{ items: [], nextCursor: '0x' as Hex }],
+      calls,
+    })
+    await list(() => ctx, '/docs', {
+      lens: LENS,
+      excludes: [NSFW_DEF],
+      minWeights: [5n],
+    }).byPage()
+    const filtered = calls.find((c) => c.fn === 'getDirectoryPageFiltered')
+    const [, , , excludeTagDefs, minWeights] = filtered?.args as [
+      Hex,
+      Hex,
+      readonly Address[],
+      readonly Hex[],
+      readonly bigint[],
+    ]
+    expect(excludeTagDefs).toEqual([NSFW_DEF]) // passed through, no /tags walk
+    expect(minWeights).toEqual([5n]) // explicit weight honored 1:1
+    // No /tags resolution happened (a UID needs none).
+    expect(calls.filter((c) => c.fn === 'resolvePath').some((c) => c.args[1] === 'nsfw')).toBe(
+      false,
+    )
+  })
+
+  it('drops excluded entries: the filtered view omits them (the non-excluded stay)', async () => {
+    // The on-chain filter does the omission; the SDK just maps what the view returns.
+    // Here the view returns only b.md (a.md was excluded by the nsfw TAG on-chain).
+    const ctx = makeCtx({
+      edges: FILTER_EDGES,
+      filteredPages: [{ items: [visibleB({ uid: uid(0xb1) })], nextCursor: '0x' as Hex }],
+    })
+    const items = await list(() => ctx, '/docs', { lens: LENS, excludes: ['nsfw'] }).toArray({
+      limit: 50,
+    })
+    expect(items.map((e) => e.name)).toEqual(['b.md'])
+  })
+
+  it('keeps paging on an EMPTY page with a non-empty cursor (phase-1 budget) — empty != end', async () => {
+    // First filtered page: EMPTY items but a NON-EMPTY cursor → must NOT stop. Second
+    // page yields the entry and the empty `0x` cursor → end.
+    const ctx = makeCtx({
+      edges: FILTER_EDGES,
+      filteredPages: [
+        { items: [], nextCursor: `0x${'11'.repeat(48)}` as Hex }, // empty, but more to come
+        { items: [visibleA({ uid: uid(0xa1) })], nextCursor: '0x' as Hex },
+      ],
+    })
+    const all = await list(() => ctx, '/docs', { lens: LENS, excludes: ['nsfw'] }).toArray({
+      limit: 50,
+    })
+    expect(all.map((e) => e.name)).toEqual(['a.md'])
+  })
+
+  it('byPage surfaces the opaque bytes cursor + feeds it back', async () => {
+    const NEXT = `0x${'22'.repeat(48)}` as Hex
+    const ctx = makeCtx({
+      edges: FILTER_EDGES,
+      filteredPages: [
+        { items: [visibleA({ uid: uid(0xa1) })], nextCursor: NEXT },
+        { items: [visibleB({ uid: uid(0xb1) })], nextCursor: '0x' as Hex },
+      ],
+    })
+    const efsList = list(() => ctx, '/docs', { lens: LENS, excludes: ['nsfw'] })
+    const p1 = await efsList.byPage()
+    expect(p1.items.map((e) => e.name)).toEqual(['a.md'])
+    expect(p1.cursor).toBe(NEXT) // opaque hex cursor surfaced verbatim
+    const p2 = await efsList.byPage({ cursor: p1.cursor })
+    expect(p2.items.map((e) => e.name)).toEqual(['b.md'])
+    expect(p2.cursor).toBeUndefined() // `0x` ⇒ exhausted
+  })
+
+  it('rejects a base-10 (unfiltered) cursor fed into the filtered path', async () => {
+    const ctx = makeCtx({
+      edges: FILTER_EDGES,
+      filteredPages: [{ items: [], nextCursor: '0x' as Hex }],
+    })
+    await expect(
+      list(() => ctx, '/docs', { lens: LENS, excludes: ['nsfw'] }).byPage({ cursor: '42' }),
+    ).rejects.toThrow(CursorInvalid)
+  })
+
+  it('fails fast over the 8-exclude on-chain cap (InvalidDirectoryQuery)', async () => {
+    const nine = new Array(9).fill(NSFW_DEF) as Hex[]
+    const ctx = makeCtx({ edges: FILTER_EDGES })
+    await expect(list(() => ctx, '/docs', { lens: LENS, excludes: nine }).byPage()).rejects.toThrow(
+      InvalidDirectoryQuery,
+    )
   })
 })

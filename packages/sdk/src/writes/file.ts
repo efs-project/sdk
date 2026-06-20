@@ -145,6 +145,14 @@ export interface FileWriteContext {
    * (16 KB). A per-call `{ storage: 'onchain' }` bypasses it.
    */
   readonly onchainAutoLimit?: number
+  /**
+   * INTERNAL (ADR-0011, `efs.fs.setOverview`): the resolved `/tags/system`
+   * definition anchor UID. When present, the file write tags its OWN anchor `system`
+   * in the layer before the placement PIN (no untagged flash) — see
+   * {@link buildFileWriteGraph}'s `overviewSystemTagDef`. Not on the public
+   * `WriteOptions`; only the `setOverview` orchestrator sets it.
+   */
+  readonly overviewSystemTagDef?: Hex
 }
 
 /**
@@ -243,6 +251,12 @@ export async function writeFileTier1(
     ...(missingParents.length > 0 ? { missingParents } : {}),
     ...(existingAncestorTagUIDs.length > 0 ? { existingAncestorTagUIDs } : {}),
     fileName,
+    // ADR-0011 Overview marker: tag the README's OWN anchor `system` before the
+    // placement PIN (the setOverview path sets this on the context; a normal write
+    // leaves it undefined and the graph is unchanged).
+    ...(ctx.overviewSystemTagDef !== undefined
+      ? { overviewSystemTagDef: ctx.overviewSystemTagDef }
+      : {}),
   })
 
   // 5. Select the submitter through the execution seam (writes/select.ts) and run

@@ -66,6 +66,8 @@ import {
   listHas as listHasRead,
   listLength as listLengthRead,
 } from './reads/lists.js'
+import { overview as overviewRead } from './reads/overview.js'
+import { resolvePathToAnchor } from './reads/resolve.js'
 import {
   type SortInfo,
   type SortReadOptions,
@@ -103,6 +105,7 @@ import { type DetectClient, detectAccount, toCapabilities } from './writes/detec
 import type { EdgeSubmitContext } from './writes/edge-submit.js'
 import { type FileWriteContext, writeFileTier1 } from './writes/file.js'
 import { type ListsWriteNs, makeListsWriteNs } from './writes/lists.js'
+import { setOverview as setOverviewWrite } from './writes/overview.js'
 import { type PinsNs, makePinsNs } from './writes/pins.js'
 import { type PropsNs, makePropsNs } from './writes/props.js'
 import { type RedirectsNs, makeRedirectsNs } from './writes/redirects.js'
@@ -588,13 +591,9 @@ export function createEfsClient(config: EfsClientConfig): EfsClient {
       // bad deployment surfaces on `.byPage()`/iteration (consistent with the async
       // verbs). The thunk is evaluated inside `listRead`'s lazy `prime()`.
       list: (path, opts) => listRead(readContext, path, opts),
-      overview: async (_path, _opts) => {
-        throw new NotImplemented('efs.fs.overview()', {
-          alternative:
-            "read the folder's README.md directly for now: efs.fs.readText(`${path}/README.md`).",
-          tracking: 'ADR-0011',
-        })
-      },
+      // Folder Overview (ADR-0011): the folder's README.md, resolved by EXACT path
+      // (never a directory scan) and classified into a discriminated OverviewResult.
+      overview: async (path, opts) => overviewRead(readContext(), path, opts),
       write: async (path, content, opts) => {
         requireWallet()
         // requireWallet() guarantees `walletClient` is defined here.
@@ -629,13 +628,35 @@ export function createEfsClient(config: EfsClientConfig): EfsClient {
             'call efs.fs.write() directly for now — it returns a receipt; pre-flight cost estimation is a later slice.',
         })
       },
-      setOverview: async (_container, _markdown, _opts) => {
+      // Author/replace the folder Overview (ADR-0011): the normal file-write pipeline
+      // at `${container}/README.md`, forced to `text/markdown`, with the `system` TAG
+      // applied on the README's own anchor BEFORE the placement PIN (no untagged
+      // flash). Same wallet/chain plumbing as `write`, plus an indexer-backed
+      // `resolveAnchorPath` so the orchestrator can resolve the `/tags/system` def.
+      setOverview: async (container, markdown, opts) => {
         requireWallet()
-        throw new NotImplemented('efs.fs.setOverview()', {
-          alternative:
-            "write the folder's README.md directly for now: efs.fs.write(`${container}/README.md`, bytes).",
-          tracking: 'ADR-0011',
-        })
+        const wallet = walletClient as WalletClient
+        const dep = getDeployment()
+        const baseCtx = {
+          publicClient,
+          walletClient: wallet,
+          deployment: dep,
+          account: wallet.account,
+          chain: wallet.chain,
+          ...(config.write?.onchainAutoLimit !== undefined
+            ? { onchainAutoLimit: config.write.onchainAutoLimit }
+            : {}),
+        } as unknown as FileWriteContext
+        const overviewCtx = {
+          ...baseCtx,
+          resolveAnchorPath: (path: string) =>
+            resolvePathToAnchor(
+              publicClient as unknown as Parameters<typeof resolvePathToAnchor>[0],
+              dep.contracts.indexer,
+              path,
+            ),
+        }
+        return setOverviewWrite(container, markdown, overviewCtx, opts)
       },
     },
     lenses: {
@@ -924,6 +945,15 @@ export {
   type HydratedItem,
 } from './reads/attestations.js'
 export { list, DEFAULT_PAGE_SIZE } from './reads/list.js'
+// Folder Overview read (`efs.fs.overview`) — exact-path README.md resolution (ADR-0011).
+export { overview } from './reads/overview.js'
+// Folder Overview write (`efs.fs.setOverview`) — README.md + system-TAG-before-placement (ADR-0011).
+export {
+  setOverview,
+  overviewPath,
+  SYSTEM_TAG_PATH,
+  type OverviewWriteContext,
+} from './writes/overview.js'
 // Curated-collection (LIST) reads — `efs.lists.*` internals (ADR-0044/0046).
 export {
   getList,

@@ -32,14 +32,37 @@
  * folder's own anchor) or `dataUID` for a file (its placement's DATA UID, the
  * item's `uid`).
  *
- * ## Filtered view (excludes / minWeights)
+ * ## Filtered view (excludes / minWeights) — ADR-0011 / contracts ADR-0054
  *
- * TODO(ADR-0011/0054): when `opts.excludes` is non-empty the listing must route to
- * `getDirectoryPageFiltered` (opaque `bytes` cursor, parallel `excludeTagDefs` /
- * `minWeights`, label→tag-definition resolution). That path is intentionally not
- * wired here yet; passing `excludes` throws {@link InvalidDirectoryQuery} rather
- * than silently returning an unfiltered listing (which would leak excluded
- * entries). The unfiltered path below is fully wired.
+ * When `opts.excludes` is non-empty the listing routes to the ON-CHAIN
+ * `EFSFileView.getDirectoryPageFiltered(parentAnchor, anchorSchema, attesters,
+ * excludeTagDefs, minWeights, cursor, maxItems)` — the filter is evaluated entirely
+ * on-chain (NOT a client-side overlay), so there is no per-entry tag-read fan-out
+ * and no N+1: it is the same single `readContract` per page as the unfiltered path.
+ * The contract evaluates each entry against the `(excludeTagDefs[k], minWeights[k])`
+ * pairs as a **union over the viewed lenses AND over the pairs** (a sibling is hidden
+ * if ANY viewed lens tagged it — or, for a file, tagged any DATA a lens placed there —
+ * with ANY excluded def at `weight >= minWeights[k]`), with the folder-vs-file target
+ * asymmetry baked in (folders test the ANCHOR UID; files test the PIN-resolved DATA
+ * UID). Because the filter is on-chain and lens-scoped via the same `attesters` array,
+ * the exclusion is exactly as trustworthy as the listing itself.
+ *
+ * Three differences from the unfiltered path the body handles:
+ *   1. **`excludes` resolution** — each entry is a TAG-definition UID (`0x…`, 32-byte)
+ *      passed through verbatim, or a human label (`'system'`/`'nsfw'`) resolved to its
+ *      `/tags/<name>` anchor UID via the indexer BEFORE the first filtered read, so the
+ *      read never briefly issues the unfiltered branch (no leak window).
+ *   2. **`minWeights` reconciliation** — paired 1:1 with the resolved defs; omitted or
+ *      length-mismatched ⇒ an all-zero vector ({@link reconcileMinWeights}), which is
+ *      the on-chain default ("exclude on any non-negative-weight tag") and avoids the
+ *      `excludeTagDefs/minWeights length mismatch` revert.
+ *   3. **opaque `bytes` cursor + empty-but-not-done** — the filtered view returns an
+ *      opaque `bytes` cursor (not the `uint256` of the address-list variant) and, under
+ *      its phase-1 scan budget, can return an EMPTY `items` page with a NON-EMPTY
+ *      cursor. Empty ≠ end-of-list — the iterator keeps paging until the cursor is the
+ *      empty `0x`. The SDK surfaces the opaque cursor as a hex string on {@link Page}
+ *      and feeds it back verbatim; a filtered cursor is only valid back into a filtered
+ *      list (it encodes filter state).
  */
 
 import type { Address, Hex } from 'viem'
@@ -53,11 +76,49 @@ import {
   read,
   resolveAttesters,
 } from './context.js'
-import { InvalidDirectoryQuery, validateDirectoryQuery } from './directory.js'
-import { resolvePathToAnchor } from './resolve.js'
+import { reconcileMinWeights, validateDirectoryQuery } from './directory.js'
+import { type ResolvePublicClient, resolvePathToAnchor } from './resolve.js'
 
 /** Default per-page window when the caller passes no `limit`. */
 export const DEFAULT_PAGE_SIZE = 50
+
+/** `0x` — the filtered view's "exhausted" cursor sentinel (`bytes`, ADR-0036). The
+ * address-list variant's `uint256 0` and this are distinct sentinels for distinct
+ * cursor types; both mean "no more pages." */
+const EMPTY_BYTES_CURSOR = '0x' as Hex
+
+/** A 32-byte hex UID (`0x` + 64 hex), vs. a `/tags/<name>` human label. */
+function isUID(s: string): s is Hex {
+  return /^0x[0-9a-fA-F]{64}$/.test(s)
+}
+
+/**
+ * Resolve the `excludes` predicate list to concrete TAG-definition UIDs (ADR-0011 §1):
+ * a 32-byte hex UID passes through; a human label (`'system'`, `'nsfw'`, or any
+ * `/tags/<name>`/`tags/<name>` form) is resolved to its `/tags/<name>` anchor UID via
+ * the indexer path walk — the SAME resolution `efs.graph.tags` uses, so a label means
+ * the same def everywhere. Done ONCE before the first filtered read so the read never
+ * issues the unfiltered branch first (no leak window). A label that resolves to no
+ * anchor yields the zero UID; the on-chain filter simply never matches it (a non-
+ * existent exclude-def excludes nothing), which is the safe, non-throwing degrade.
+ */
+async function resolveExcludeDefs(
+  publicClient: ResolvePublicClient,
+  indexer: Address,
+  excludes: readonly (Hex | string)[],
+): Promise<Hex[]> {
+  return Promise.all(
+    excludes.map(async (e) => {
+      if (isUID(e)) return e
+      const label = e.startsWith('/tags/')
+        ? e
+        : e.startsWith('tags/')
+          ? `/${e}`
+          : `/tags/${e.replace(/^\/+/, '')}`
+      return resolvePathToAnchor(publicClient, indexer, label)
+    }),
+  )
+}
 
 /** Map one on-chain `FileSystemItem` to a public {@link DirEntry}. */
 function toDirEntry(item: FileSystemItem): DirEntry {
@@ -67,8 +128,10 @@ function toDirEntry(item: FileSystemItem): DirEntry {
   return { name: item.name, kind: 'file', dataUID: item.uid as DataUID }
 }
 
-/** Parse an opaque string cursor into the on-chain `uint256` start index.
- * Empty/absent → 0 (fresh start). Non-numeric → {@link CursorInvalid}. */
+/** Parse an opaque string cursor into the on-chain `uint256` start index
+ * (UNFILTERED path). Empty/absent → 0 (fresh start). Non-numeric → {@link
+ * CursorInvalid} (a cursor from a different query / corrupted state — notably a
+ * `0x…` filtered cursor fed into the unfiltered path). */
 function parseCursor(cursor: string | undefined): bigint {
   if (cursor === undefined || cursor === '') return 0n
   if (!/^\d+$/.test(cursor)) throw new CursorInvalid()
@@ -79,12 +142,21 @@ function parseCursor(cursor: string | undefined): bigint {
   }
 }
 
+/** Validate + pass through the opaque `bytes` cursor (FILTERED path). Empty/absent →
+ * `0x` (a fresh walk). Must be `0x`-prefixed even-length hex — a base-10 cursor from
+ * the unfiltered path (no `0x`) is rejected with {@link CursorInvalid}, so the two
+ * cursor types never silently cross between the filtered/unfiltered calls. */
+function parseBytesCursor(cursor: string | undefined): Hex {
+  if (cursor === undefined || cursor === '') return EMPTY_BYTES_CURSOR
+  if (!/^0x([0-9a-fA-F]{2})*$/.test(cursor)) throw new CursorInvalid()
+  return cursor as Hex
+}
+
 /**
- * Read one page of a directory listing. Resolves the lens + the directory anchor,
- * then windows `getDirectoryPageByAddressList`. Exported for the client to build
- * the {@link EfsList}; not a public verb on its own.
+ * Read one UNFILTERED page (`getDirectoryPageByAddressList`): newest-first across the
+ * attester list, `uint256` cursor (0 ⇒ exhausted). Used when `excludes` is absent.
  */
-async function readPage(
+async function readUnfilteredPage(
   ctx: ReadContext,
   parentAnchor: Hex,
   attesters: readonly Address[],
@@ -107,49 +179,114 @@ async function readPage(
 }
 
 /**
+ * Read one FILTERED page (`getDirectoryPageFiltered`, ADR-0011/0054): the on-chain
+ * tag-exclusion filter, lens-scoped via `attesters`, scoped to the ANCHOR schema (a
+ * directory page enumerates anchors). The cursor is OPAQUE `bytes` (a phase/index
+ * triple, ADR-0036): `0x` ⇒ exhausted, anything else ⇒ keep paging — even when
+ * `items` is empty (the phase-1 scan budget can yield an empty page mid-walk; empty
+ * ≠ end). The opaque cursor is carried verbatim as a hex string on {@link Page}.
+ */
+async function readFilteredPage(
+  ctx: ReadContext,
+  parentAnchor: Hex,
+  attesters: readonly Address[],
+  excludeTagDefs: readonly Hex[],
+  minWeights: readonly bigint[],
+  cursor: Hex,
+  maxItems: number,
+): Promise<Page<DirEntry>> {
+  const page = await read<{ items: readonly FileSystemItem[]; nextCursor: Hex }>(ctx.publicClient, {
+    address: ctx.deployment.contracts.fileView,
+    abi: fileViewAbi,
+    functionName: 'getDirectoryPageFiltered',
+    args: [
+      parentAnchor,
+      ctx.deployment.schemas.anchor,
+      attesters,
+      excludeTagDefs,
+      minWeights,
+      cursor,
+      BigInt(maxItems),
+    ],
+  })
+  const items = page.items.filter((it) => it.uid !== ZERO_UID).map(toDirEntry)
+  // Empty bytes (`0x`) is the exhausted sentinel; any other cursor means keep paging,
+  // EVEN IF `items` is empty (phase-1 budget) — empty != end-of-list (ADR-0011).
+  const next = page.nextCursor !== EMPTY_BYTES_CURSOR ? page.nextCursor : undefined
+  return next !== undefined ? { items, cursor: next } : { items }
+}
+
+/** The primed listing state: the resolved context, anchor, lens, and — when
+ * `excludes` was given — the resolved exclude defs + reconciled weights. `filtered`
+ * is the routing discriminant (ADR-0011 §1). */
+type PrimedList = {
+  ctx: ReadContext
+  parentAnchor: Hex
+  attesters: readonly Address[]
+} & (
+  | { filtered: false }
+  | { filtered: true; excludeTagDefs: readonly Hex[]; minWeights: readonly bigint[] }
+)
+
+/**
  * `efs.fs.list(dir, opts?)` — the lens-scoped directory listing. Returns an
  * {@link EfsList} synchronously (it is lazy — no RPC until iterated or `.byPage()`d).
- * Deployment, lens, and anchor resolution are ALL deferred into the first read so
- * the synchronous client method never throws — a bad deployment / missing lens
- * surfaces on `.byPage()` / iteration, consistent with the async read verbs. The
- * context is therefore passed as a THUNK, evaluated lazily inside `prime()`.
+ * Deployment, lens, anchor resolution, AND (for the filtered path) the
+ * `excludes`-label resolution are ALL deferred into the first read so the
+ * synchronous client method never throws — a bad deployment / missing lens / cap
+ * violation surfaces on `.byPage()` / iteration, consistent with the async read
+ * verbs. The context is therefore passed as a THUNK, evaluated lazily inside
+ * `prime()`.
  *
- * @throws {InvalidDirectoryQuery} when `opts.excludes` is set (filtered view is a
- *   documented TODO — see module docs).
+ * When `opts.excludes` is non-empty the listing routes to the ON-CHAIN
+ * `getDirectoryPageFiltered` (the filter is server-side, not a client-side overlay
+ * — no per-entry tag fan-out); otherwise the unfiltered sibling is used. The two
+ * paths return DIFFERENT cursor types (opaque `bytes` vs `uint256`), so a cursor
+ * from a filtered list is only valid back into a filtered list (ADR-0011 §Decision).
+ *
+ * @throws {InvalidDirectoryQuery} (on first read) when a cap is violated (attesters
+ *   1-20, excludes ≤ 8, maxItems > 0).
  */
 export function list(
   ctxThunk: () => ReadContext,
   dir: string,
   opts?: ListOptions,
 ): EfsList<DirEntry> {
-  // Fail fast on the unsupported filtered path BEFORE any async work, so the error
-  // surfaces at call time rather than on first iteration.
-  if (opts?.excludes && opts.excludes.length > 0) {
-    throw new InvalidDirectoryQuery(
-      "directory exclude-filtering isn't implemented yet (tracked: ADR-0011) — the unfiltered listing would leak the entries you asked to hide, so it is refused rather than silently ignored. Omit `excludes`/`minWeights` for now.",
-    )
-  }
-
   const defaultLimit = opts?.limit ?? DEFAULT_PAGE_SIZE
+  const wantFiltered = (opts?.excludes?.length ?? 0) > 0
 
-  // Resolve the context + lens + directory anchor once, lazily + memoized: the
-  // first read primes it, later pages reuse it.
-  let primed:
-    | Promise<{ ctx: ReadContext; parentAnchor: Hex; attesters: readonly Address[] }>
-    | undefined
-  const prime = () => {
+  // Resolve the context + lens + directory anchor (+ exclude defs) once, lazily +
+  // memoized: the first read primes it, later pages reuse it.
+  let primed: Promise<PrimedList> | undefined
+  const prime = (): Promise<PrimedList> => {
     if (!primed) {
-      primed = (async () => {
+      primed = (async (): Promise<PrimedList> => {
         const ctx = ctxThunk()
         const attesters = await resolveAttesters(ctx, opts)
+        // Resolve the exclude labels → def UIDs BEFORE the anchor walk so a filtered
+        // read never issues the unfiltered branch first (no leak window). For the
+        // unfiltered path this is skipped.
+        const excludeTagDefs = wantFiltered
+          ? await resolveExcludeDefs(
+              ctx.publicClient as unknown as ResolvePublicClient,
+              ctx.deployment.contracts.indexer,
+              opts?.excludes ?? [],
+            )
+          : []
         const parentAnchor = await resolvePathToAnchor(
           ctx.publicClient as never,
           ctx.deployment.contracts.indexer,
           dir,
         )
-        // Guard the on-chain caps (attesters 1-20) before issuing the page read.
-        validateDirectoryQuery({ attesters, excludeTagDefs: [], maxItems: defaultLimit })
-        return { ctx, parentAnchor, attesters }
+        // Guard the on-chain caps (attesters 1-20, excludes ≤ 8, maxItems > 0)
+        // before issuing the page read.
+        validateDirectoryQuery({ attesters, excludeTagDefs, maxItems: defaultLimit })
+        if (wantFiltered) {
+          // Pair a weight threshold to each def; omitted/mismatched ⇒ all-zero.
+          const minWeights = reconcileMinWeights(excludeTagDefs, opts?.minWeights)
+          return { ctx, parentAnchor, attesters, filtered: true, excludeTagDefs, minWeights }
+        }
+        return { ctx, parentAnchor, attesters, filtered: false }
       })()
     }
     return primed
@@ -159,10 +296,24 @@ export function list(
     limit?: number
     cursor?: string
   }): Promise<Page<DirEntry>> => {
-    const { ctx, parentAnchor, attesters } = await prime()
-    const start = parseCursor(pageOpts?.cursor)
+    const p = await prime()
     const pageSize = pageOpts?.limit ?? defaultLimit
-    return readPage(ctx, parentAnchor, attesters, start, pageSize)
+    if (p.filtered) {
+      // The filtered cursor is opaque `bytes` (hex), fed back verbatim; empty/absent
+      // ⇒ a fresh `0x` walk.
+      const cursor = parseBytesCursor(pageOpts?.cursor)
+      return readFilteredPage(
+        p.ctx,
+        p.parentAnchor,
+        p.attesters,
+        p.excludeTagDefs,
+        p.minWeights,
+        cursor,
+        pageSize,
+      )
+    }
+    const start = parseCursor(pageOpts?.cursor)
+    return readUnfilteredPage(p.ctx, p.parentAnchor, p.attesters, start, pageSize)
   }
 
   async function* iterate(): AsyncGenerator<DirEntry> {

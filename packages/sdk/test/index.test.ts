@@ -11,7 +11,6 @@ import { describe, expect, it } from 'vitest'
 import {
   DeploymentNotFound,
   MaxLensesExceeded,
-  NotImplemented,
   WalletRequired,
   createEfsClient,
   identity,
@@ -40,9 +39,21 @@ describe('namespaced client (Decision F)', () => {
     ).rejects.toThrow(DeploymentNotFound)
   })
 
-  it('overview is still NotImplemented (later slice)', async () => {
+  it('overview is wired (reaches deployment resolution, no longer NotImplemented) — ADR-0011', async () => {
+    // Implemented in ADR-0011: on sepolia (no EFS deployment) the read passes the
+    // wiring and reaches deployment resolution → DeploymentNotFound, proving the verb
+    // is wired (same pattern as the read verbs above).
     const efs = createEfsClient({ publicClient })
-    await expect(efs.fs.overview('/x')).rejects.toThrow(NotImplemented)
+    await expect(efs.fs.overview('/x')).rejects.toThrow(DeploymentNotFound)
+  })
+
+  it('setOverview is wired + wallet-gated (ADR-0011)', async () => {
+    const readOnly = createEfsClient({ publicClient }) as {
+      fs: { setOverview(c: string, md: string): Promise<unknown> }
+    }
+    await expect(readOnly.fs.setOverview('/docs', '# hi')).rejects.toThrow(WalletRequired)
+    const writable = createEfsClient({ publicClient, walletClient })
+    await expect(writable.fs.setOverview('/docs', '# hi')).rejects.toThrow(DeploymentNotFound)
   })
 
   it('write methods are gated: WalletRequired without a wallet, wired with one', async () => {
