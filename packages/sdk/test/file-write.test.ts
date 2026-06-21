@@ -899,6 +899,20 @@ describe('writeFileTier1 — error paths', () => {
     expect(sent).toHaveLength(0)
   })
 
+  it('throws InvalidArgument for an empty/blank mirror URI even with an explicit transport', async () => {
+    // `mirrors: ['']` + an explicit transportDefinition bypasses the scheme check, so an
+    // empty URI would map into the MIRROR plan and revert at the L2 MIRROR batch AFTER
+    // the L1 DATA landed (orphaned partial write). Reject it before any tx.
+    const { ctx, deploys, sent } = makeCtx({ transports: { onchain: TRANSPORT_ONCHAIN } })
+    const err = await writeFileTier1('/docs/readme.md', CONTENT, ctx, {
+      mirrors: ['', 'ipfs://QmExample'],
+      transportDefinition: TRANSPORT_ONCHAIN, // explicit → would skip the scheme guard
+    }).catch((e) => e)
+    expect((err as { code?: string }).code).toBe('InvalidArgument')
+    expect(deploys).toHaveLength(0)
+    expect(sent).toHaveLength(0)
+  })
+
   it('throws MissingTransport for a schemeless caller mirror (before any on-chain resolution)', async () => {
     // A URI with no `scheme:` prefix must be rejected up front: without a scheme the
     // transport fallback would resolve `/transports/` (the transport ROOT) and bind an

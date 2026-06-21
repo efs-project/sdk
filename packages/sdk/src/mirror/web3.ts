@@ -119,8 +119,14 @@ export async function readWeb3Bytes(
       abi: chunkedSstore2Abi,
       functionName: 'chunkCount',
     })) as bigint
-  } catch (err) {
-    throw new Web3ReadError(`chunkCount() unreadable on ${manager}: ${errMsg(err)}`)
+  } catch {
+    // Not a chunk manager: a `web3://` mirror may point DIRECTLY at a single RAW SSTORE2
+    // data contract (an older on-chain store, or one written by another client). The
+    // canonical router treats a failed/short `chunkCount()` staticcall as "not chunked"
+    // and reads the TARGET's own bytecode via extcodecopy from offset 1 (EFSRouter.sol
+    // web3:// branch). Mirror that exactly (router parity — ADR-0013) instead of failing
+    // an otherwise-valid read when the raw store is the only mirror.
+    return readRawSstore2(manager, client, maxBytes)
   }
   if (count <= 0n) throw new Web3ReadError(`chunk manager ${manager} reports zero chunks`)
   if (count > BigInt(MAX_CHUNKS)) {
@@ -175,4 +181,28 @@ export async function readWeb3Bytes(
 
 function errMsg(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
+}
+
+/**
+ * Read a `web3://` target as a single RAW SSTORE2 contract — the router's fallback when
+ * `chunkCount()` is absent (the target is not a chunk manager). Reads the target's runtime
+ * code and strips the leading SSTORE2 `0x00` STOP byte (extcodecopy from offset 1),
+ * mirroring `EFSRouter.sol`'s web3:// branch exactly. A no-code target throws
+ * {@link Web3ReadError} (the router's HTTP 500); a STOP-only (1-byte) runtime is empty
+ * content (the router returns a 200 empty body).
+ */
+async function readRawSstore2(
+  addr: Address,
+  client: Web3ReadClient,
+  maxBytes?: number,
+): Promise<Uint8Array> {
+  const code = await client.getCode({ address: addr })
+  if (code === undefined || code === '0x' || code.length <= 2) {
+    throw new Web3ReadError(`web3:// target ${addr} has no code`)
+  }
+  const content = hexToBytes(code).subarray(1)
+  if (maxBytes !== undefined && content.byteLength > maxBytes) {
+    throw new Web3ReadError(`on-chain payload exceeds cap (${maxBytes} bytes)`)
+  }
+  return content
 }

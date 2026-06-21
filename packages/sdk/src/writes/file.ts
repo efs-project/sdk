@@ -160,15 +160,29 @@ export async function resolveMirrors(
     return {
       storageTxCount: 0, // caller hosts the bytes — the SDK sends no storage tx
       mirrors: await Promise.all(
-        opts.mirrors.map(async (uri) => ({
-          uri,
-          transportDefinition: await transportDefinitionFor(
-            schemeOf(uri),
-            deployment,
-            opts,
-            ctx.publicClient,
-          ),
-        })),
+        opts.mirrors.map(async (uri) => {
+          // Reject an empty/blank URI per element, NOT just an empty array: an explicit
+          // `opts.transportDefinition` makes `transportDefinitionFor` return before the
+          // scheme check, so `mirrors: ['']` would otherwise map an empty URI into the
+          // MIRROR plan — MirrorResolver requires a non-empty URI, so the L2 MIRROR batch
+          // reverts AFTER the L1 DATA has landed, orphaning a partial write. Fail closed
+          // before any tx.
+          if (uri.trim() === '') {
+            throw new EfsError(
+              'EFS write: a supplied mirror URI is empty. Every entry in `mirrors` must be a non-empty URI (e.g. `ipfs://…`, `ar://…`, `web3://…`).',
+              { code: 'InvalidArgument' },
+            )
+          }
+          return {
+            uri,
+            transportDefinition: await transportDefinitionFor(
+              schemeOf(uri),
+              deployment,
+              opts,
+              ctx.publicClient,
+            ),
+          }
+        }),
       ),
     }
   }

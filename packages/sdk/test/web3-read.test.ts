@@ -142,6 +142,40 @@ describe('readWeb3Bytes (matches EFSRouter web3:// read)', () => {
     await expect(readWeb3Bytes(`web3://${MANAGER}`, client)).rejects.toBeInstanceOf(Web3ReadError)
   })
 
+  it('falls back to a RAW SSTORE2 target when chunkCount() is absent (router parity)', async () => {
+    // A web3:// mirror may point directly at a single raw SSTORE2 contract (older store /
+    // another client) with no chunkCount(). The router treats the failed staticcall as
+    // "not chunked" and reads the target's own code; we must too, not fail the read.
+    const content = enc('raw single-contract SSTORE2 payload')
+    const client: Web3ReadClient = {
+      async readContract(args) {
+        if (args.functionName === 'chunkCount') throw new Error('execution reverted: no chunkCount')
+        throw new Error(`unexpected ${args.functionName}`)
+      },
+      async getCode(args) {
+        // The TARGET's own runtime is `0x00 || content` (raw SSTORE2), read directly.
+        return args.address.toLowerCase() === MANAGER.toLowerCase()
+          ? sstore2Code(content)
+          : undefined
+      },
+    }
+    const bytes = await readWeb3Bytes(`web3://${MANAGER}`, client)
+    expect(bytes).toEqual(content) // STOP byte stripped, content returned
+  })
+
+  it('surfaces a no-code raw target as Web3ReadError (router HTTP 500 parity)', async () => {
+    const client: Web3ReadClient = {
+      async readContract(args) {
+        if (args.functionName === 'chunkCount') throw new Error('no chunkCount')
+        throw new Error('unexpected')
+      },
+      async getCode() {
+        return '0x'
+      },
+    }
+    await expect(readWeb3Bytes(`web3://${MANAGER}`, client)).rejects.toBeInstanceOf(Web3ReadError)
+  })
+
   it('stops early when the running total exceeds maxBytes (no full-payload read)', async () => {
     const ten = enc('0123456789') // 10 content bytes per chunk
     let chunksRead = 0
