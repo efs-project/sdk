@@ -353,7 +353,8 @@ export function buildFileWriteGraph(input: FileWriteGraphInput): FileWriteGraph 
     // file-ANCHOR mint and place the PIN at the concrete existing anchor (the
     // cardinality-1 placement supersedes); else mint a fresh anchor for a new path.
     const existingFileAnchorUID = input.existingFileAnchorUID
-    const fileAnchorAtts = existingFileAnchorUID === undefined ? [buildFileAnchor(input, m + 1)] : []
+    const fileAnchorAtts =
+      existingFileAnchorUID === undefined ? [buildFileAnchor(input, m + 1)] : []
     const placementPin = buildPlacementPin(
       schemas,
       input.content.dataUID,

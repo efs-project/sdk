@@ -555,7 +555,11 @@ describe('makePropsNs', () => {
     const props = makePropsNs({
       getDeployment: () => deployment,
       publicClient: makeReadClient((fn, args) => {
-        if (fn === 'getAnchorsBySchemaAndAddressList') return [[KEY_ANCHOR], 0n]
+        // CANONICAL, attester-independent enumeration (a flat bytes32[], not a cursor
+        // tuple). The address-list variant must NOT be used (it would scope to the
+        // binding attester and drop reused anchors).
+        if (fn === 'getAnchorsBySchemaAndAddressList') throw new Error('used address-list variant')
+        if (fn === 'getAnchorsBySchema') return [KEY_ANCHOR]
         if (fn === 'getAttestation') {
           // The key-ANCHOR's attestation → decode the name.
           if (args[0] === KEY_ANCHOR) return { data: anchorEnc.encodeData([KEY, SCHEMAS.property]) }
@@ -571,22 +575,58 @@ describe('makePropsNs', () => {
     expect(out).toEqual([{ key: KEY, value: VALUE, propertyUID: PROP_UID }])
   })
 
-  it('list pages until the cursor is exhausted (does not truncate at one page)', async () => {
-    let pageCalls = 0
+  it('list includes a key whose anchor a DIFFERENT attester minted (get/list parity)', async () => {
+    // The get/list-divergence Codex flagged: `set` REUSES a canonical key-anchor, so a
+    // lens attester (BOB) can bind an active value to an anchor ALICE minted first. The
+    // enumeration is attester-independent (getAnchorsBySchema), and the value read is
+    // lens-scoped (readContext resolves BOB's binding), so `list` includes the key —
+    // matching what `get` returns. The old address-list enumeration (scoped to BOB)
+    // would have omitted ALICE's anchor entirely.
+    const BOB = '0x000000000000000000000000000000000000B0B0' as const
     const props = makePropsNs({
       getDeployment: () => deployment,
       publicClient: makeReadClient((fn, args) => {
-        if (fn === 'getAnchorsBySchemaAndAddressList') {
+        if (fn === 'getAnchorsBySchemaAndAddressList') throw new Error('used address-list variant')
+        // Canonical set under (DATA, PROPERTY) — returned regardless of which attester
+        // (ALICE) minted the anchor.
+        if (fn === 'getAnchorsBySchema') return [KEY_ANCHOR]
+        if (fn === 'getAttestation' && args[0] === KEY_ANCHOR) {
+          return { data: anchorEnc.encodeData([KEY, SCHEMAS.property]) }
+        }
+        return uid(0)
+      }) as never,
+      readContext, // resolves the lens's active binding by key (BOB's value)
+      submitContext: () => makeSubmitCtx().ctx,
+      attester: () => BOB,
+    })
+    expect(await props.get(DATA, KEY, { lens: BOB })).toBe(VALUE)
+    expect(await props.list(DATA, { lens: BOB })).toEqual([
+      { key: KEY, value: VALUE, propertyUID: PROP_UID },
+    ])
+  })
+
+  it('list pages by offset until a short page (does not truncate at one page)', async () => {
+    let pageCalls = 0
+    // A full first page (256 distinct anchors) forces a second offset read; only the
+    // KEY anchor resolves to a bound value, the filler anchors resolve to none and are
+    // dropped. The bug stopped after one page; the fix advances `start` until a short
+    // page. The KEY anchor sits at the END of page 1 to prove the whole page is read.
+    const PAGE = 256
+    const page1 = Array.from({ length: PAGE }, (_, i) =>
+      i === PAGE - 1 ? KEY_ANCHOR : uid(0x2000 + i),
+    )
+    const props = makePropsNs({
+      getDeployment: () => deployment,
+      publicClient: makeReadClient((fn, args) => {
+        if (fn === 'getAnchorsBySchema') {
           pageCalls += 1
-          const cursor = args[3] as bigint
-          // Page 1 (cursor 0) returns one anchor + a NON-zero next cursor (more to
-          // come); page 2 (cursor 256) returns empty + zero (exhausted). The bug
-          // stopped after page 1; the fix follows the cursor to page 2.
-          return cursor === 0n ? [[KEY_ANCHOR], 256n] : [[], 0n]
+          const start = args[2] as bigint
+          return start === 0n ? page1 : []
         }
         if (fn === 'getAttestation') {
           if (args[0] === KEY_ANCHOR) return { data: anchorEnc.encodeData([KEY, SCHEMAS.property]) }
-          return { data: propEnc.encodeData([VALUE]) }
+          // Filler anchors decode to distinct keys the lens never bound.
+          return { data: anchorEnc.encodeData([`k${String(args[0])}`, SCHEMAS.property]) }
         }
         return uid(0)
       }) as never,
@@ -595,7 +635,7 @@ describe('makePropsNs', () => {
       attester: () => ATTESTER,
     })
     const out = await props.list(DATA)
-    expect(pageCalls).toBe(2) // followed the non-zero cursor to the second page
+    expect(pageCalls).toBe(2) // advanced past the full first page to a short second page
     expect(out).toEqual([{ key: KEY, value: VALUE, propertyUID: PROP_UID }])
   })
 })

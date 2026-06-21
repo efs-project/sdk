@@ -330,6 +330,33 @@ export const getChildrenByAddressListAbi = [
 ] as const
 
 /**
+ * `EFSIndexer.getAnchorsBySchema(bytes32 anchorUID, bytes32 schema, uint256 start,
+ * uint256 length, bool reverseOrder, bool showRevoked) -> bytes32[]` (EFSIndexer.sol
+ * :605-614). Enumerates `_childrenBySchema[parent][schema]` with NO attester filter —
+ * the CANONICAL child-anchor set under a parent for one anchorSchema, regardless of
+ * which attester minted or contributed to each. Used by `efs.props.list` to enumerate
+ * every property key-ANCHOR under a DATA independently of the binding attester (a key
+ * anchor is "first-writer-wins" canonical; a later attester may bind a value to an
+ * anchor someone else minted), then filter to the lens-scoped active binding.
+ */
+export const getAnchorsBySchemaAbi = [
+  {
+    type: 'function',
+    name: 'getAnchorsBySchema',
+    stateMutability: 'view',
+    inputs: [
+      { name: 'anchorUID', type: 'bytes32' },
+      { name: 'schema', type: 'bytes32' },
+      { name: 'start', type: 'uint256' },
+      { name: 'length', type: 'uint256' },
+      { name: 'reverseOrder', type: 'bool' },
+      { name: 'showRevoked', type: 'bool' },
+    ],
+    outputs: [{ name: '', type: 'bytes32[]' }],
+  },
+] as const
+
+/**
  * `EFSIndexer.getAnchorsBySchemaAndAddressList(bytes32 parentUID, bytes32 anchorSchema,
  * address[] attesters, uint256 startCursor, uint256 pageSize, bool reverseOrder,
  * bool showRevoked) -> (bytes32[] results, uint256 nextCursor)` (EFSIndexer.sol
@@ -381,5 +408,6 @@ export const indexerAbi = [
   ...getChildrenAbi,
   ...getChildrenCountAbi,
   ...getChildrenByAddressListAbi,
+  ...getAnchorsBySchemaAbi,
   ...getAnchorsBySchemaAndAddressListAbi,
 ] as const

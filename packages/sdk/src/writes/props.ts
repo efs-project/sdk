@@ -138,23 +138,32 @@ export function makePropsNs(deps: PropsNsDeps): PropsNs {
       const dep = deps.getDeployment()
       const attester = lensAttester(opts?.lens)
 
-      // Enumerate the key-ANCHORs under the DATA typed as PROPERTY (each property key
-      // is a child anchor whose `forSchema = PROPERTY_SCHEMA_UID`), scoped to the lens
-      // attester, revoked excluded. Page until the cursor is exhausted — the API
-      // promises EVERY property, so a DATA with >256 keys must not be truncated.
+      // Enumerate the key-ANCHORs under the DATA typed as PROPERTY (each property key is
+      // a child anchor whose `forSchema = PROPERTY_SCHEMA_UID`) via the CANONICAL,
+      // attester-INDEPENDENT enumerator. A property key-anchor is "first-writer-wins"
+      // canonical (`set` REUSES an existing anchor — props.ts:106), so a lens attester
+      // can bind an active value to a key whose anchor another attester minted first.
+      // Filtering enumeration by `[attester]` (getAnchorsBySchemaAndAddressList) would
+      // then OMIT that key from `list` even though `get` returns its value — a get/list
+      // divergence. So enumerate every property anchor here, then filter to the lens's
+      // active binding below (readReservedProperty is lens-scoped; a key the lens has
+      // not bound resolves to no value and is dropped). Page by offset — the API
+      // promises EVERY property, so a DATA with >256 keys must not be truncated. Anchors
+      // are non-revocable (EFSIndexer.sol:376), so a full page always implies more.
       const PAGE = 256n
       const anchorUIDs: Hex[] = []
-      let cursor = 0n
-      do {
-        const [page, next] = await read<readonly [readonly Hex[], bigint]>(deps.publicClient, {
+      let start = 0n
+      for (;;) {
+        const page = await read<readonly Hex[]>(deps.publicClient, {
           address: dep.contracts.indexer,
           abi: indexerAbi,
-          functionName: 'getAnchorsBySchemaAndAddressList',
-          args: [dataUID, dep.schemas.property, [attester], cursor, PAGE, false, false],
+          functionName: 'getAnchorsBySchema',
+          args: [dataUID, dep.schemas.property, start, PAGE, false, false],
         })
         anchorUIDs.push(...page)
-        cursor = next
-      } while (cursor !== 0n)
+        if (BigInt(page.length) < PAGE) break
+        start += PAGE
+      }
 
       // Decode each anchor's `name` (the property key), then read its active value
       // under the lens. Fan both passes (independent reads → multicall coalescing).

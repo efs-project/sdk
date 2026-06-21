@@ -827,6 +827,19 @@ describe('writeFileTier1 — error paths', () => {
     expect(String((err as Error).message)).toMatch(/ipfs/)
   })
 
+  it('throws MissingTransport for a schemeless caller mirror (before any on-chain resolution)', async () => {
+    // A URI with no `scheme:` prefix must be rejected up front: without a scheme the
+    // transport fallback would resolve `/transports/` (the transport ROOT) and bind an
+    // unfetchable mirror — or revert at the MIRROR layer after earlier attestations have
+    // already landed. Mirror efs.mirrors.add's schemeless rejection.
+    const { ctx } = makeCtx({ transports: { onchain: TRANSPORT_ONCHAIN } })
+    const err = await writeFileTier1('/docs/readme.md', CONTENT, ctx, {
+      mirrors: ['not-a-uri'],
+    }).catch((e) => e)
+    expect((err as { code?: string }).code).toBe('MissingTransport')
+    expect(String((err as Error).message)).toMatch(/no 'scheme:' prefix/)
+  })
+
   it('throws PayloadTooLarge for no-mirrors content over the on-chain auto-cap', async () => {
     const { ctx, deploys } = makeCtx({ onchainAutoLimit: 2 }) // cap below CONTENT's 4 bytes
     const err = await writeFileTier1('/docs/big.bin', CONTENT, ctx).catch((e) => e)

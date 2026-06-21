@@ -75,6 +75,18 @@ async function transportDefinitionFor(
   const mapped = opts?.transportDefinition ?? deployment.transports?.[key]
   if (mapped !== undefined) return mapped
 
+  // Reject a schemeless URI (`schemeOf` returned '') BEFORE the on-chain fallback:
+  // without a scheme the path walk below would resolve `/transports/` — the transport
+  // ROOT — and bind an unfetchable mirror (or revert at the MIRROR layer after earlier
+  // attestations have already landed). An explicit `opts.transportDefinition` still
+  // wins (handled above), mirroring `efs.mirrors.add`'s schemeless rejection.
+  if (scheme === '') {
+    throw new EfsError(
+      "EFS write: a mirror URI has no 'scheme:' prefix, so its transport cannot be derived. Use a scheme-qualified URI (e.g. 'ipfs://…', 'ar://…', 'web3://…'), or pass `opts.transportDefinition` (the /transports/<scheme> anchor UID).",
+      { code: 'MissingTransport' },
+    )
+  }
+
   // On-chain fallback: resolve the `/transports/<segment>` anchor. The path SEGMENT is
   // NOT always the scheme key: `web3://` bytes are stored under the on-chain anchor named
   // `onchain` (the `transports` map key is `web3`, but the bootstrap anchor is `onchain` —
