@@ -490,6 +490,34 @@ describe('makePropsNs', () => {
     const out = await props.list(DATA)
     expect(out).toEqual([{ key: KEY, value: VALUE, propertyUID: PROP_UID }])
   })
+
+  it('list pages until the cursor is exhausted (does not truncate at one page)', async () => {
+    let pageCalls = 0
+    const props = makePropsNs({
+      getDeployment: () => deployment,
+      publicClient: makeReadClient((fn, args) => {
+        if (fn === 'getAnchorsBySchemaAndAddressList') {
+          pageCalls += 1
+          const cursor = args[3] as bigint
+          // Page 1 (cursor 0) returns one anchor + a NON-zero next cursor (more to
+          // come); page 2 (cursor 256) returns empty + zero (exhausted). The bug
+          // stopped after page 1; the fix follows the cursor to page 2.
+          return cursor === 0n ? [[KEY_ANCHOR], 256n] : [[], 0n]
+        }
+        if (fn === 'getAttestation') {
+          if (args[0] === KEY_ANCHOR) return { data: anchorEnc.encodeData([KEY, SCHEMAS.property]) }
+          return { data: propEnc.encodeData([VALUE]) }
+        }
+        return uid(0)
+      }) as never,
+      readContext,
+      submitContext: () => makeSubmitCtx().ctx,
+      attester: () => ATTESTER,
+    })
+    const out = await props.list(DATA)
+    expect(pageCalls).toBe(2) // followed the non-zero cursor to the second page
+    expect(out).toEqual([{ key: KEY, value: VALUE, propertyUID: PROP_UID }])
+  })
 })
 
 // ── pins namespace ──────────────────────────────────────────────────────────────

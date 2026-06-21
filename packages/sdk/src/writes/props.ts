@@ -121,13 +121,21 @@ export function makePropsNs(deps: PropsNsDeps): PropsNs {
 
       // Enumerate the key-ANCHORs under the DATA typed as PROPERTY (each property key
       // is a child anchor whose `forSchema = PROPERTY_SCHEMA_UID`), scoped to the lens
-      // attester, revoked excluded.
-      const [anchorUIDs] = await read<readonly [readonly Hex[], bigint]>(deps.publicClient, {
-        address: dep.contracts.indexer,
-        abi: indexerAbi,
-        functionName: 'getAnchorsBySchemaAndAddressList',
-        args: [dataUID, dep.schemas.property, [attester], 0n, 256n, false, false],
-      })
+      // attester, revoked excluded. Page until the cursor is exhausted — the API
+      // promises EVERY property, so a DATA with >256 keys must not be truncated.
+      const PAGE = 256n
+      const anchorUIDs: Hex[] = []
+      let cursor = 0n
+      do {
+        const [page, next] = await read<readonly [readonly Hex[], bigint]>(deps.publicClient, {
+          address: dep.contracts.indexer,
+          abi: indexerAbi,
+          functionName: 'getAnchorsBySchemaAndAddressList',
+          args: [dataUID, dep.schemas.property, [attester], cursor, PAGE, false, false],
+        })
+        anchorUIDs.push(...page)
+        cursor = next
+      } while (cursor !== 0n)
 
       // Decode each anchor's `name` (the property key), then read its active value
       // under the lens. Fan both passes (independent reads → multicall coalescing).

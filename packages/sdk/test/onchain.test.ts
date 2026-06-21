@@ -124,4 +124,21 @@ describe('storeOnchain', () => {
     } as unknown as OnchainStoreContext
     await expect(storeOnchain(new Uint8Array([1]), broken)).rejects.toThrow(/no contract address/)
   })
+
+  it('aborts between the chunk and manager deploys — never sends the manager tx', async () => {
+    const { ctx, calls } = makeCtx()
+    const controller = new AbortController()
+    const origSend = ctx.walletClient.sendTransaction.bind(ctx.walletClient)
+    // Abort right after the chunk deploy returns — the between-deploys signal check
+    // must stop before the (irreversible) manager deploy.
+    ;(ctx.walletClient as { sendTransaction: unknown }).sendTransaction = async (a: unknown) => {
+      const h = await (origSend as (x: unknown) => Promise<Hex>)(a)
+      controller.abort()
+      return h
+    }
+    const signalCtx = { ...ctx, signal: controller.signal } as unknown as OnchainStoreContext
+    await expect(storeOnchain(new Uint8Array([1, 2, 3]), signalCtx)).rejects.toThrow()
+    expect(calls.filter((c) => c.kind === 'chunk')).toHaveLength(1) // chunk did deploy
+    expect(calls.filter((c) => c.kind === 'manager')).toHaveLength(0) // manager never sent
+  })
 })

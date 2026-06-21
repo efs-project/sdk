@@ -104,7 +104,10 @@ library EFSLib {
     /// @dev    The reserved keys are `contentType`, `contentHash`, `size` (ADR-0049). Each yields
     ///         a key-ANCHOR(name=key, refUID=DATA) + PROPERTY(value) + binding-PIN(definition=
     ///         key-ANCHOR, refUID=PROPERTY). `value` is the already-stringified value (e.g. the
-    ///         decimal byte length for `size`, the `0x…` hex digest for `contentHash`).
+    ///         decimal byte length for `size`). For `contentHash` it MUST be the **bare** lowercase
+    ///         64-hex SHA-256 digest with NO `0x` prefix (ADR-0006, byte-identical to `sha256sum`):
+    ///         the SDK read/verify path validates the canonical bare form and treats a `0x…`-prefixed
+    ///         value as `malformed-claim`, so a prefixed digest would never verify.
     /// @param  key   The reserved key name (the key-ANCHOR's `name`).
     /// @param  value The interned PROPERTY value to bind under `key`.
     struct ReservedKey {

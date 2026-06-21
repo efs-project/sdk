@@ -499,6 +499,10 @@ export function createEfsClient(config: EfsClientConfig): EfsClient {
   // call so a deployment override / account change is reflected. Only ever invoked
   // on a write-capable client (the namespaces are wallet-gated below).
   const edgeSubmitContext = (): EdgeSubmitContext => {
+    // A read-only client (no walletClient) still carries the edge-write methods at
+    // runtime (the type hides them). Gate here — matching fs.write/eas — so they throw
+    // WalletRequired rather than a raw TypeError on `wallet.account` below.
+    if (!walletClient) throw new WalletRequired()
     const wallet = walletClient as WalletClient
     const dep = getDeployment()
     const attester = wallet.account?.address

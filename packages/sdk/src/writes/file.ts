@@ -132,6 +132,8 @@ export async function resolveMirrors(
     publicClient: ctx.publicClient,
     ...(ctx.account !== undefined ? { account: ctx.account } : {}),
     ...(ctx.chain !== undefined ? { chain: ctx.chain } : {}),
+    // So an abort between the chunk and chunk-manager deploys stops the manager tx.
+    ...(opts?.signal !== undefined ? { signal: opts.signal } : {}),
   })
   return { mirrors: [{ uri: web3Uri, transportDefinition }] }
 }

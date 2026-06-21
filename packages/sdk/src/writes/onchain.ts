@@ -145,6 +145,9 @@ export interface OnchainStoreContext {
   readonly account?: unknown
   /** Forwarded to viem's deploy/send when the wallet client isn't chain-bound. */
   readonly chain?: unknown
+  /** Optional cancellation signal, checked before each of the two irreversible
+   *  deploys (chunk, then manager) — never mid-flight (a sent tx can't be unsent). */
+  readonly signal?: AbortSignal
 }
 
 /**
@@ -209,11 +212,15 @@ export async function storeOnchain(
   }
 
   // 1. Deploy the SSTORE2 chunk (raw init-code deploy; throws on multi-chunk).
+  ctx.signal?.throwIfAborted()
   const initCode = buildSstore2InitCode(bytes)
   const chunkTx = await ctx.walletClient.sendTransaction({ data: initCode, ...fwd })
   const chunkAddress = await requireContractAddress(ctx, chunkTx, 'SSTORE2 chunk')
 
   // 2. Deploy the chunk manager wrapping the chunk address (single-element array).
+  //    Re-check the signal BETWEEN the two irreversible deploys — an abort after the
+  //    chunk landed must not still send the manager tx.
+  ctx.signal?.throwIfAborted()
   const managerTx = await ctx.walletClient.deployContract({
     abi: EFS_BYTES_STORE_ABI,
     bytecode: EFS_BYTES_STORE_BYTECODE,
