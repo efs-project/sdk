@@ -240,19 +240,16 @@ export async function writeFileTier1(
     throw new ParentNotFoundError(path, resolvedSegments, parentPlan.missingSegments[0] as string)
   }
 
-  // 3. Mirror + transport-definition. With no caller `mirrors` this STORES the
-  // bytes on-chain (SSTORE2) and yields a web3:// mirror — the zero-infra default.
-  // Check the abort signal FIRST: on-chain storage is the first irreversible step.
-  opts?.signal?.throwIfAborted()
-  const { mirrors } = await resolveMirrors(content, ctx, opts)
-
-  // 3a. Folder-visibility TAGs (overview.md "Upload flow" step 7; ADR-0038/0041).
-  // Walk the EXISTING ancestors bottom-up and find the ones the uploader hasn't
-  // tagged yet (short-circuiting at the first already-tagged ancestor). The
-  // freshly-created `missingParents` folders always need a TAG and are derived
-  // inside the graph builder, so they are NOT walked here. The attester is the
-  // connected account — its lens listing is what these TAGs make the folders visible
-  // in.
+  // 3. Folder-visibility TAGs (overview.md "Upload flow" step 7; ADR-0038/0041).
+  // Walk the EXISTING ancestors bottom-up and find the ones the uploader hasn't tagged
+  // yet (short-circuiting at the first already-tagged ancestor). The freshly-created
+  // `missingParents` folders always need a TAG and are derived inside the graph builder,
+  // so they are NOT walked here. The attester is the connected account — its lens listing
+  // is what these TAGs make the folders visible in.
+  //
+  // This is READ-ONLY planning, done BEFORE storage so a failing/reverting
+  // `getActiveTagWeight` read aborts the write BEFORE the irreversible on-chain byte
+  // deploy below (never spend gas only to fail on a subsequent read).
   const attester = accountAddress(ctx.account)
   const existingAncestorTagUIDs = await planExistingAncestorVisibilityTags(
     ctx.publicClient,
@@ -264,6 +261,12 @@ export async function writeFileTier1(
       anchorSchemaUID: deployment.schemas.anchor,
     },
   )
+
+  // 4. Mirror + transport-definition. With no caller `mirrors` this STORES the bytes
+  // on-chain (SSTORE2) and yields a web3:// mirror — the zero-infra default, and the
+  // FIRST irreversible step. Abort-check immediately before it.
+  opts?.signal?.throwIfAborted()
+  const { mirrors } = await resolveMirrors(content, ctx, opts)
 
   // 4. Build the pure write plan (the 9-schema, layered attestation DAG).
   const plan = buildFileWriteGraph({

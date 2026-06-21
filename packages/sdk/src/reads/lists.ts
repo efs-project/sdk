@@ -57,7 +57,7 @@
 import type { Address, Hex } from 'viem'
 import { getAddress } from 'viem'
 import { listReaderAbi } from '../chain/abi/listReader.js'
-import { CursorInvalid, ListNotFound } from '../errors.js'
+import { CursorInvalid, EfsError, ListNotFound } from '../errors.js'
 import type {
   EfsList,
   ListConfig,
@@ -158,11 +158,18 @@ async function resolveListAttester(
   curator: Address,
 ): Promise<Address> {
   const lens = await resolveAttesters(ctx, opts)
-  // Candidates: the lens set, then the curator (deduped, order-preserving) — the
-  // curator is the natural default for a single-curator list.
+  // The curator is a convenience fallback ONLY when the caller expressed NO lens intent
+  // (no per-call lens, no client defaultLens, no connected account) — i.e. the read fell
+  // through to the SystemAccount default. When a lens WAS requested, stay strictly scoped
+  // to it: returning curator Bob's entries to a caller who asked for lens Alice would
+  // silently break the lens model.
+  const hasLensIntent =
+    opts?.lens !== undefined || ctx.defaultLens !== undefined || ctx.account !== undefined
+  const pool = hasLensIntent ? lens : [...lens, curator]
+  // Candidates: deduped, order-preserving.
   const candidates: Address[] = []
   const seen = new Set<string>()
-  for (const a of [...lens, curator]) {
+  for (const a of pool) {
     const key = a.toLowerCase()
     if (!seen.has(key)) {
       seen.add(key)
@@ -205,6 +212,17 @@ async function readEntriesPage(
     target: decodeTarget(kind, e.identityKey),
     attester,
   }))
+}
+
+/** Reject a non-positive page limit: a `limit <= 0` makes `byPage` return an empty
+ * page with the cursor unchanged, so iteration/`toArray` never progresses (an infinite
+ * loop). Mirrors the directory-listing path's `maxItems > 0` guard. */
+function assertPositiveLimit(limit: number | undefined): void {
+  if (limit !== undefined && (!Number.isInteger(limit) || limit <= 0)) {
+    throw new EfsError(`efs.lists.entries: limit must be a positive integer (got ${limit}).`, {
+      code: 'InvalidArgument',
+    })
+  }
 }
 
 /** Parse an opaque base-10 string cursor → on-chain `uint256` start index. Empty →
@@ -317,6 +335,7 @@ export function listEntries(
   listUID: Hex,
   opts?: ListReadOptions,
 ): EfsList<ListEntry> {
+  assertPositiveLimit(opts?.limit)
   const defaultLimit = opts?.limit ?? DEFAULT_LIST_PAGE_SIZE
 
   let primed:
@@ -358,6 +377,7 @@ export function listEntries(
     limit?: number
     cursor?: string
   }): Promise<Page<ListEntry>> => {
+    assertPositiveLimit(pageOpts?.limit)
     const { ctx, attester, kind, dedupe } = await prime()
     const start = parseCursor(pageOpts?.cursor)
     const pageSize = pageOpts?.limit ?? defaultLimit

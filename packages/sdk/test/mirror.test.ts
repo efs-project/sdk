@@ -292,6 +292,30 @@ describe('fetchVerified - happy paths per transport', () => {
     expect(res.urlUsed).toBe('https://ipfs.io/ipfs/bafytest?format=raw')
   })
 
+  it('rejects an http:// gateway URL unless allowInsecureHttp (no network call)', async () => {
+    const bytes = enc('ipfs content')
+    const hash = hashContent(bytes)
+    const fetchImpl = vi.fn(async () => mockResponse(bytes)) as unknown as typeof fetch
+    // The ipfs:// mirror resolves through an http:// gateway → a plaintext concrete URL.
+    await expect(
+      fetchVerified(['ipfs://bafytest'], hash, { fetchImpl, ipfsGateways: ['http://gw.example/'] }),
+    ).rejects.toThrow()
+    expect(fetchImpl).not.toHaveBeenCalled() // downgrade blocked before the network
+  })
+
+  it('allows an http:// gateway only when allowInsecureHttp is set', async () => {
+    const bytes = enc('ipfs content')
+    const hash = hashContent(bytes)
+    const fetchImpl = vi.fn(async () => mockResponse(bytes)) as unknown as typeof fetch
+    const res = await fetchVerified(['ipfs://bafytest'], hash, {
+      fetchImpl,
+      ipfsGateways: ['http://gw.example/'],
+      allowInsecureHttp: true,
+    })
+    expect(res.verification).toBe('matches-author')
+    expect(fetchImpl).toHaveBeenCalled()
+  })
+
   it('data: URI is verified inline without any fetch call', async () => {
     const bytes = enc('hello')
     const hash = hashContent(bytes)

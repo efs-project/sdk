@@ -233,6 +233,35 @@ describe('lists.entries (target decoding, order, the three targetTypes)', () => 
     expect(got.map((e) => e.entryUID)).toEqual([uid(0xe1), uid(0xe2)])
   })
 
+  it('entries scoped to an EXPLICIT lens does NOT fall back to the curator', async () => {
+    const ALICE = addr(0xa11ce)
+    const { ctx } = makeCtx({
+      [LIST_UID.toLowerCase()]: {
+        mode: mode({ targetType: 1 }),
+        entriesByAttester: {
+          // Only the CURATOR has entries; ALICE (the requested lens) has none.
+          [CURATOR.toLowerCase()]: [
+            { entryUID: uid(0xe1), targetType: 1, identityKey: addrKey(addr(0x111)) },
+          ],
+        },
+      },
+    })
+    // Reading with explicit lens ALICE must return ALICE's (empty) view — never the
+    // curator's entries (that would silently break lens scoping).
+    const got = await listEntries(() => ctx, LIST_UID, { lens: ALICE }).toArray({ limit: 100 })
+    expect(got).toEqual([])
+  })
+
+  it('rejects a non-positive entries limit (would otherwise loop forever)', async () => {
+    const { ctx } = makeCtx({
+      [LIST_UID.toLowerCase()]: { mode: mode({ targetType: 1 }), entriesByAttester: {} },
+    })
+    expect(() => listEntries(() => ctx, LIST_UID, { limit: 0 })).toThrow(/positive integer/)
+    await expect(listEntries(() => ctx, LIST_UID).byPage({ limit: 0 })).rejects.toThrow(
+      /positive integer/,
+    )
+  })
+
   it('SCHEMA list: the target is the identityKey UID', async () => {
     const t1 = uid(0xabc)
     const { ctx } = makeCtx({

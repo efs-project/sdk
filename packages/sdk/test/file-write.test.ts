@@ -403,6 +403,24 @@ describe('writeFileTier1 — resume (not yet implemented)', () => {
   })
 })
 
+describe('writeFileTier1 — read-only planning before irreversible storage', () => {
+  it('a failing visibility-tag read aborts BEFORE deploying on-chain bytes (no gas spent)', async () => {
+    const { ctx, sent, deploys } = makeCtx()
+    const origRead = ctx.publicClient.readContract.bind(ctx.publicClient)
+    // The ancestor visibility-tag planning (getActiveTagWeight) is read-only and must run
+    // BEFORE the SSTORE2 storage deploy — so a failure here costs no gas.
+    ;(ctx.publicClient as { readContract: unknown }).readContract = async (a: {
+      functionName: string
+    }) => {
+      if (a.functionName === 'getActiveTagWeight') throw new Error('tag read failed')
+      return (origRead as (x: unknown) => Promise<unknown>)(a)
+    }
+    await expect(writeFileTier1('/docs/readme.md', CONTENT, ctx)).rejects.toThrow('tag read failed')
+    expect(deploys).toHaveLength(0) // storage never deployed
+    expect(sent).toHaveLength(0) // no attestations
+  })
+})
+
 describe('writeFileTier1 — abort signal', () => {
   it('throws before any work when the signal is already aborted', async () => {
     const { ctx, sent, deploys } = makeCtx()

@@ -420,6 +420,20 @@ export async function fetchVerified(
     }
 
     for (const url of urls) {
+      // Plaintext-HTTP guard for EVERY concrete URL — not just direct http:// mirrors
+      // and redirects. An `http://` IPFS/Arweave gateway (opts.ipfsGateways/arweaveGateways)
+      // resolves to a plaintext URL here, so enforce the same downgrade check before the
+      // network call unless explicitly opted in.
+      if (url.protocol === 'http:' && opts.allowInsecureHttp !== true) {
+        attempts.push({
+          uri: safeUri,
+          url: summarizeUri(url.href),
+          scheme: resolved.scheme,
+          reason: 'plaintext http URL (set allowInsecureHttp to permit)',
+        })
+        continue
+      }
+
       // SSRF guard before any network call.
       const ssrf = checkSsrf(url, opts)
       if (ssrf.blocked) {
