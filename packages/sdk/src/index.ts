@@ -547,6 +547,11 @@ export function createEfsClient(config: EfsClientConfig): EfsClient {
       easAddress: dep.contracts.eas,
       chainId: dep.chainId,
       attester,
+      // Same fail-closed wrong-chain guard as `fs.write`, run before any standalone-verb
+      // tx (props/tags/pins/mirrors/redirects/lists) — the wallet must be on the
+      // deployment chain (resolved from the public client), else EAS txs would land on
+      // the wallet chain at the deployment's addresses.
+      assertChain: () => assertWalletOnDeploymentChain(wallet, dep.chainId),
       ...(wallet.account !== undefined ? { account: wallet.account } : {}),
       ...(wallet.chain !== undefined ? { chain: wallet.chain } : {}),
     }

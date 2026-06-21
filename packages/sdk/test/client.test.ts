@@ -137,6 +137,24 @@ describe('createEfsClient — runtime write gate', () => {
     expect((err as Error).message).toMatch(/chain 1\b.*chain 31337|wrong chain/i)
   })
 
+  it('rejects a STANDALONE write (graph.pins.place) with WrongChain on a mismatched wallet', async () => {
+    // The wrong-chain guard must also cover the standalone verbs (props/tags/pins/
+    // mirrors/redirects/lists) that share the edge submit context — not just fs.write.
+    const make = createEfsClient as unknown as (c: unknown) => {
+      graph: { pins: { place(anchor: string, data: string): Promise<unknown> } }
+    }
+    const efs = make({
+      publicClient: { chain: { id: CHAIN_ID } },
+      walletClient: { account: { address: addr(7) }, chain: { id: 1 } },
+      deployments,
+    })
+    // place() takes bytes32 anchor + DATA UIDs; the guard fires before the tx.
+    const b32 = (h: string) => `0x${h.repeat(64).slice(0, 64)}` as `0x${string}`
+    const err = await efs.graph.pins.place(b32('a'), b32('d')).catch((e) => e)
+    expect(err).toBeInstanceOf(EfsError)
+    expect((err as EfsError).code).toBe('WrongChain')
+  })
+
   it('a write client wires write (Tier-1) and still stubs batch', async () => {
     const provider = createMockProvider({ chainId: CHAIN_ID })
     const efs = createEfsClient({ provider, chain: localChain, account: addr(1) })

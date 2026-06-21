@@ -18,7 +18,7 @@
 
 import type { Address, Hex } from 'viem'
 import { EfsError } from '../errors.js'
-import type { DataUID, WriteReceipt } from '../types.js'
+import type { WriteReceipt } from '../types.js'
 import type { FileWriteGraph } from './graph.js'
 import { type LayeredWriteResult, type SubmitContext, submitLayeredTier1 } from './submit.js'
 
@@ -29,6 +29,11 @@ export interface EdgeSubmitContext extends SubmitContext {
   readonly chainId: number
   /** The attester the write authors under (the connected wallet). */
   readonly attester: Address
+  /** Optional pre-flight assertion run BEFORE any tx (the client wires this to the
+   * wallet-vs-deployment chain guard, same as `fs.write`). Fails closed on a wrong-chain
+   * wallet so a standalone write can't send EAS txs to the deployment addresses on a
+   * different chain. Omitted ⇒ no check (e.g. unit tests with a pre-validated mock). */
+  readonly assertChain?: () => Promise<void>
 }
 
 /**
@@ -43,6 +48,8 @@ export async function submitEdgePlan(
   plan: FileWriteGraph,
   ctx: EdgeSubmitContext,
 ): Promise<WriteReceipt> {
+  // Fail closed on a wrong-chain wallet BEFORE any tx (parity with `fs.write`).
+  await ctx.assertChain?.()
   const result: LayeredWriteResult = await submitLayeredTier1(plan, ctx)
   return toEdgeReceipt(result)
 }
@@ -60,6 +67,8 @@ export async function submitEdgePlanWithUID(
   ctx: EdgeSubmitContext,
   mintedRef: string,
 ): Promise<{ receipt: WriteReceipt; uid: Hex }> {
+  // Fail closed on a wrong-chain wallet BEFORE any tx (parity with `fs.write`).
+  await ctx.assertChain?.()
   const result: LayeredWriteResult = await submitLayeredTier1(plan, ctx)
   const uid = result.uids.get(mintedRef)
   if (uid === undefined) {
