@@ -314,7 +314,10 @@ export function list(
     // Validate a per-page limit override too — the constructor only validated the
     // default. A `limit <= 0` is the contract's `maxItems` revert / a non-progressing
     // empty page; surface the SDK's typed error instead.
-    if (pageOpts?.limit !== undefined && (!Number.isInteger(pageOpts.limit) || pageOpts.limit <= 0)) {
+    if (
+      pageOpts?.limit !== undefined &&
+      (!Number.isInteger(pageOpts.limit) || pageOpts.limit <= 0)
+    ) {
       throw new InvalidDirectoryQuery(
         `maxItems must be a positive integer (got ${pageOpts.limit}).`,
       )
