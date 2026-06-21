@@ -82,9 +82,12 @@ export type ReadOpts<E extends readonly ExpandToken[] = readonly ExpandToken[]> 
    *     ADR-0050's normative resolution spec — lens precedence + cycle = lowest-UID-
    *     in-SCC — is not yet pinned. Off by default keeps reads literal and avoids the
    *     "silent teleport" footgun; opt in explicitly.)
-   *   - `true` — follow auto-followable kinds (`sameAs`/`supersededBy`/`symlink`) up
-   *     to the default hop cap (8; ADR-0050 `D_MAX`). `relatedVersion` (kind ≥ 3) is
-   *     never auto-followed.
+   *   - `true` — follow the DATA-sourced dedup/versioning kinds (`sameAs`/
+   *     `supersededBy`) from the resolved placement to their canonical terminal, up to
+   *     the default hop cap (8; ADR-0050 `D_MAX`). NOTE: `symlink` (kind=2) is
+   *     ANCHOR-sourced (a path alias), so path-level symlink resolution is NOT yet
+   *     followed — it is deferred pending the ADR-0050 resolution-spec pin.
+   *     `relatedVersion` (kind ≥ 3) is never auto-followed.
    *   - a `number` — follow with that explicit max-hop cap (≤ 32, the hard ceiling =
    *     `MAX_ANCHOR_DEPTH`). `0` is equivalent to `false`.
    *

@@ -47,7 +47,7 @@ function mirrorUri(m: Mirror): string {
  * mirror engine itself stays chain-free. Absent ⇒ `web3://` mirrors are recorded as
  * a failed attempt (the original NotImplemented seam), so a later mirror can win.
  */
-export type Web3Reader = (uri: string) => Promise<Uint8Array>
+export type Web3Reader = (uri: string, opts?: { maxBytes?: number }) => Promise<Uint8Array>
 
 /** Options for {@link fetchVerified}. */
 export type FetchVerifiedOptions = ResolveOptions &
@@ -355,8 +355,11 @@ export async function fetchVerified(
     // hash). With no reader, fall through to httpUrls() → the NotImplemented seam.
     if (resolved.scheme === TRANSPORT.web3 && opts.web3Reader) {
       try {
-        const bytes = await opts.web3Reader(uri)
         const maxBytes = opts.maxBytes ?? DEFAULT_MAX_BYTES
+        // Thread the cap INTO the reader so it stops mid-walk (the bundled
+        // readWeb3Bytes throws once the running total exceeds it) instead of
+        // accumulating every chunk first. The post-check below stays as defense.
+        const bytes = await opts.web3Reader(uri, { maxBytes })
         if (bytes.byteLength > maxBytes) {
           attempts.push({
             uri: safeUri,

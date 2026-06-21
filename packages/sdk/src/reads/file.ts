@@ -153,10 +153,13 @@ export async function resolvePlacement(
   // Read-time REDIRECT following (ADR-0050) — OPT-IN via `followRedirects`. The
   // on-chain resolver does not follow redirects, so this is SDK logic: from the
   // resolved DATA, walk the active `sameAs`/`supersededBy` alias chain (the dedup /
-  // versioning case) under the SAME lens, to its canonical terminal. `symlink`
-  // (kind=2) is followed too where a source UID is also a redirect source, but the
-  // common path here is DATA→DATA. Cycle/hop-cap fail closed (typed throws). Default
-  // (`followRedirects` unset/false) ⇒ cap 0 ⇒ no walk, literal placement preserved.
+  // versioning case) under the SAME lens, to its canonical terminal. These are the
+  // only DATA-sourced kinds. `symlink` (kind=2) is ANCHOR-sourced (a path alias on
+  // the file anchor, not on a DATA) so it is NOT reached by this DATA→DATA walk:
+  // path-level symlink resolution (following an anchor with no placement of its own to
+  // its target anchor/DATA) is DEFERRED pending the ADR-0050 resolution-spec pin
+  // (lens precedence + cycle canonicalization across anchors). Cycle/hop-cap fail
+  // closed (typed throws). Default (`followRedirects` unset/false) ⇒ cap 0 ⇒ no walk.
   const cap = resolveHopCap(opts?.followRedirects)
   let dataUID = winner.uid as DataUID
   let resolvedBy = winner.attester

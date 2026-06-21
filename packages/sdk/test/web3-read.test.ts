@@ -122,6 +122,34 @@ describe('readWeb3Bytes (matches EFSRouter web3:// read)', () => {
     const client = makeClient([])
     await expect(readWeb3Bytes(`web3://${MANAGER}`, client)).rejects.toBeInstanceOf(Web3ReadError)
   })
+
+  it('stops early when the running total exceeds maxBytes (no full-payload read)', async () => {
+    const ten = enc('0123456789') // 10 content bytes per chunk
+    let chunksRead = 0
+    const code = new Map<string, Hex>([
+      [CHUNK_0.toLowerCase(), sstore2Code(ten)],
+      [CHUNK_1.toLowerCase(), sstore2Code(ten)],
+    ])
+    const client: Web3ReadClient = {
+      async readContract(args) {
+        if (args.functionName === 'chunkCount') return 3n // claims 3 chunks
+        if (args.functionName === 'chunkAddress') {
+          const [i] = (args.args ?? []) as [bigint]
+          return [CHUNK_0, CHUNK_1, CHUNK_0][Number(i)] as Address
+        }
+        throw new Error(`unexpected ${args.functionName}`)
+      },
+      async getCode(args) {
+        chunksRead += 1
+        return code.get(args.address.toLowerCase())
+      },
+    }
+    // cap 15: chunk 0 (10, ok) → chunk 1 (total 20 > 15, trips) → throw before chunk 2.
+    await expect(readWeb3Bytes(`web3://${MANAGER}`, client, 15)).rejects.toBeInstanceOf(
+      Web3ReadError,
+    )
+    expect(chunksRead).toBe(2) // the 3rd chunk was never read/allocated
+  })
 })
 
 describe('fetchVerified web3:// transport (engine integration)', () => {

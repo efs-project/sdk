@@ -99,7 +99,11 @@ export function parseWeb3Uri(uri: string): Address {
  * @throws {Web3ReadError} on a malformed URI, an unreadable chunk count/address, or a
  *   chunk contract with no code (the router returns HTTP 500 in those cases).
  */
-export async function readWeb3Bytes(uri: string, client: Web3ReadClient): Promise<Uint8Array> {
+export async function readWeb3Bytes(
+  uri: string,
+  client: Web3ReadClient,
+  maxBytes?: number,
+): Promise<Uint8Array> {
   const manager = parseWeb3Uri(uri)
 
   // chunkCount() — the router probes this to detect EIP-7617 chunking (it
@@ -147,6 +151,14 @@ export async function readWeb3Bytes(uri: string, client: Web3ReadClient): Promis
     const content = bytes.subarray(1)
     parts.push(content)
     total += content.byteLength
+    // Stop AS SOON AS the running total exceeds the cap — don't read/allocate the
+    // remaining chunks (an attacker-controlled mirror could otherwise force up to
+    // MAX_CHUNKS of RPC + ~96 MB of allocation before the post-hoc cap check).
+    if (maxBytes !== undefined && total > maxBytes) {
+      throw new Web3ReadError(
+        `on-chain payload exceeds cap (${maxBytes} bytes) after ${(i + 1n).toString()} chunk(s)`,
+      )
+    }
   }
 
   const out = new Uint8Array(total)

@@ -27,7 +27,7 @@
 import type { Address, Hex } from 'viem'
 import { fileViewAbi } from '../chain/abi/fileView.js'
 import { classifyError } from '../errors.js'
-import { ContentHashMismatch, FileNotFoundError, MalformedClaim } from '../errors.js'
+import { ContentHashMismatch, EfsError, FileNotFoundError, MalformedClaim } from '../errors.js'
 import { type FetchVerifiedOptions, type Mirror, fetchVerified } from '../mirror/fetch.js'
 import { type Web3ReadClient, readWeb3Bytes } from '../mirror/web3.js'
 import type {
@@ -98,6 +98,16 @@ export async function fetchRef(
   ref: DataRef,
   opts?: FetchOptions,
 ): Promise<EfsFile> {
+  // Fail closed on a cross-chain ref: a DataRef carries its origin chain, but EAS UIDs
+  // and web3:// mirrors are NOT chain-qualified — using one against another chain's
+  // deployment would silently read the wrong contracts. (review A1 / cross-chain.)
+  if (ref.chainId !== ctx.deployment.chainId) {
+    throw new EfsError(
+      `EFS read: this DataRef is for chain ${ref.chainId}, but the client is connected to chain ${ctx.deployment.chainId}. EAS UIDs and web3:// mirrors are not chain-qualified, so reading it here would resolve a different deployment. Use a client connected to chain ${ref.chainId}.`,
+      { code: 'WrongChain' },
+    )
+  }
+
   const resolvedBy = ref.resolvedBy
   const verify = opts?.verify !== false
 
@@ -127,7 +137,10 @@ export async function fetchRef(
     // (`getCode`) — a real viem PublicClient always can. The engine stays chain-free;
     // the reader is the only chain-touching closure.
     ...(typeof ctx.publicClient.getCode === 'function'
-      ? { web3Reader: (uri: string) => readWeb3Bytes(uri, ctx.publicClient as Web3ReadClient) }
+      ? {
+          web3Reader: (uri: string, o?: { maxBytes?: number }) =>
+            readWeb3Bytes(uri, ctx.publicClient as Web3ReadClient, o?.maxBytes),
+        }
       : {}),
   }
   try {
