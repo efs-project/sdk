@@ -178,7 +178,13 @@ async function readUnfilteredPage(
   start: bigint,
   pageSize: number,
 ): Promise<Page<DirEntry>> {
-  const result = await read<{ items: readonly FileSystemItem[]; nextCursor: bigint }>(
+  // `getDirectoryPageByAddressList` declares TWO top-level outputs (`items`,
+  // `nextCursor`) — NOT a single `DirectoryPage` tuple — so viem decodes the return as
+  // a positional TUPLE `[items, nextCursor]`, not an object. (The filtered/by-schema
+  // siblings wrap their two values in one `DirectoryPage` struct, so THOSE decode to an
+  // object; this one does not.) Reading `.items` off the tuple is `undefined` and throws
+  // on a real chain — destructure positionally.
+  const [rawItems, nextCursor] = await read<readonly [readonly FileSystemItem[], bigint]>(
     ctx.publicClient,
     {
       address: ctx.deployment.contracts.fileView,
@@ -187,9 +193,9 @@ async function readUnfilteredPage(
       args: [parentAnchor, attesters, start, BigInt(pageSize)],
     },
   )
-  const items = result.items.filter((it) => it.uid !== ZERO_UID).map(toDirEntry)
+  const items = rawItems.filter((it) => it.uid !== ZERO_UID).map(toDirEntry)
   // The contract returns 0 for "no more entries"; surface that as no cursor.
-  const cursor = result.nextCursor > 0n ? result.nextCursor.toString() : undefined
+  const cursor = nextCursor > 0n ? nextCursor.toString() : undefined
   return cursor !== undefined ? { items, cursor } : { items }
 }
 

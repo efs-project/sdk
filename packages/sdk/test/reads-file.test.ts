@@ -258,7 +258,8 @@ function makeCtx(opts: {
             }))
         }
         case 'getDirectoryPageByAddressList':
-          return dirPage
+          // TWO top-level ABI outputs ⇒ viem returns a positional TUPLE, not an object.
+          return [dirPage.items, dirPage.nextCursor]
         case 'getDirectoryPageFiltered': {
           // args: [parentAnchor, anchorSchema, attesters, excludeTagDefs, minWeights, cursor, maxItems]
           const page = filteredPages[filteredIdx] ?? { items: [], nextCursor: '0x' as Hex }
@@ -844,9 +845,8 @@ describe('list', () => {
     ctx.publicClient.readContract = async (args) => {
       if (args.functionName === 'getDirectoryPageByAddressList') {
         call += 1
-        return call === 1
-          ? { items: [dirEntries[0]], nextCursor: 1n }
-          : { items: [dirEntries[1]], nextCursor: 0n }
+        // TWO ABI outputs ⇒ viem returns a positional [items, nextCursor] tuple.
+        return call === 1 ? [[dirEntries[0]], 1n] : [[dirEntries[1]], 0n]
       }
       return inner(args)
     }

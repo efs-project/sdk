@@ -119,6 +119,24 @@ describe('createEfsClient — runtime write gate', () => {
     await expect(efs.fs.write('/x', new Uint8Array([1]))).rejects.toThrow(WalletRequired)
   })
 
+  it('rejects fs.write with WrongChain when the wallet is on a different chain than the deployment', async () => {
+    // Public client on CHAIN_ID (deployment resolves there), but the wallet is bound to
+    // chain 1 with an account — writes would target the wrong chain's contracts. Fail
+    // closed BEFORE any tx, using the wallet's bound `chain` (no getChainId RPC needed).
+    const make = createEfsClient as unknown as (c: unknown) => {
+      fs: { write(p: string, c: Uint8Array): Promise<unknown> }
+    }
+    const efs = make({
+      publicClient: { chain: { id: CHAIN_ID } },
+      walletClient: { account: { address: addr(7) }, chain: { id: 1 } },
+      deployments,
+    })
+    const err = await efs.fs.write('/x', new Uint8Array([1])).catch((e) => e)
+    expect(err).toBeInstanceOf(EfsError)
+    expect((err as EfsError).code).toBe('WrongChain')
+    expect((err as Error).message).toMatch(/chain 1\b.*chain 31337|wrong chain/i)
+  })
+
   it('a write client wires write (Tier-1) and still stubs batch', async () => {
     const provider = createMockProvider({ chainId: CHAIN_ID })
     const efs = createEfsClient({ provider, chain: localChain, account: addr(1) })

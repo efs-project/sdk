@@ -54,6 +54,10 @@ export type EfsErrorCode =
   | 'MissingTransport'
   /** A caller argument violated a documented bound (e.g. directory-query caps). */
   | 'InvalidArgument'
+  /** A read ref / write client targets a chain other than the resolved EFS deployment's
+   * (cross-chain read of a `DataRef`, or a wallet/public-client chain mismatch on write).
+   * Fail-closed: same-named contracts on another chain would silently read/write wrong. */
+  | 'WrongChain'
   /** A REDIRECT alias chain forms a cycle under the resolving lens (ADR-0050). The
    * SDK fails closed rather than guessing a canonical node (the normative
    * lowest-UID-in-SCC rule is not yet pinned). */

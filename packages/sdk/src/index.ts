@@ -444,6 +444,31 @@ function chainIdOf(publicClient: PublicClient): number {
   return id
 }
 
+/**
+ * Fail closed when the wallet would write to a DIFFERENT chain than the EFS deployment.
+ * The deployment (contract addresses + schema UIDs) is resolved from the PUBLIC client's
+ * chain, but `writeContract` runs on the WALLET's chain. If they differ — a `ViemConfig`
+ * with a public client on one chain and a wallet bound or connected to another — the
+ * EAS/storage txs would be sent on the wallet chain to the public chain's addresses, and
+ * receipts awaited on the public chain (a silent cross-chain write). Uses the wallet's
+ * bound `chain` when present (no RPC), else queries the live connected chain once.
+ */
+async function assertWalletOnDeploymentChain(
+  wallet: WalletClient,
+  deploymentChainId: number,
+): Promise<void> {
+  // No bound account ⇒ the write fails closed with `WalletRequired` regardless of chain
+  // (the attester would be 0x0); skip the chain probe (there is nothing to send).
+  if (wallet.account === undefined) return
+  const walletChainId = wallet.chain?.id ?? (await wallet.getChainId())
+  if (walletChainId !== deploymentChainId) {
+    throw new EfsError(
+      `EFS write: the wallet is on chain ${walletChainId} but the EFS deployment (resolved from the public client) is chain ${deploymentChainId}. The write would target the wrong chain's contracts. Use a wallet and public client on the same chain.`,
+      { code: 'WrongChain' },
+    )
+  }
+}
+
 // Type-level write gate: a write-capable config (an `account` in the provider form,
 // or a `walletClient` in the viem form) widens the return to `EfsClient`; otherwise
 // you get `EfsReadClient` (no write verbs).
@@ -627,6 +652,9 @@ export function createEfsClient(config: EfsClientConfig): EfsClient {
         requireWallet()
         // requireWallet() guarantees `walletClient` is defined here.
         const wallet = walletClient as WalletClient
+        // Fail closed BEFORE any tx if the wallet is on a different chain than the
+        // deployment (resolved from the public client) — see the helper's note.
+        await assertWalletOnDeploymentChain(wallet, getDeployment().chainId)
         // Tier-1 (any-wallet, multi-signature) write: one multiAttest per DAG
         // layer. The Tier-2 one-signature path (7702/5792 via @efs/solidity) is a
         // later slice; both consume the same `buildFileWriteGraph` plan.
@@ -666,6 +694,8 @@ export function createEfsClient(config: EfsClientConfig): EfsClient {
         requireWallet()
         const wallet = walletClient as WalletClient
         const dep = getDeployment()
+        // Fail closed if the wallet is on a different chain than the deployment.
+        await assertWalletOnDeploymentChain(wallet, dep.chainId)
         const baseCtx = {
           publicClient,
           walletClient: wallet,
