@@ -38,12 +38,11 @@ describe('buildFileWriteGraph — Overview `system` TAG before placement (ADR-00
   const baseInput = {
     path: '/docs/README.md',
     content: { kind: 'bytes' as const, bytes: new Uint8Array([1, 2, 3]) },
-    mirrors: ['web3://0xabc:31337'] as const,
+    mirrors: [{ uri: 'web3://0xabc:31337', transportDefinition: uid(0x200) }] as const,
     contentType: 'text/markdown',
     contentHash: 'abcd',
     size: 3n,
     schemas: SCHEMAS,
-    transportDefinition: uid(0x200),
     parentAnchorUID: uid(0x100),
     fileName: 'README.md',
   }

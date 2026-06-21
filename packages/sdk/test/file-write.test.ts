@@ -368,6 +368,39 @@ describe('writeFileTier1 — caller-supplied mirrors', () => {
     expect(transportDef).toBe(ARWEAVE) // ar → arweave
     expect(uriValue).toBe('ar://abcdEFGHtxid')
   })
+
+  it('labels each mirror of a mixed-scheme set with its OWN transport (ipfs + ar)', async () => {
+    const ARWEAVE = uid(0x2a)
+    const { ctx, sent } = makeCtx({
+      transports: { ipfs: TRANSPORT_IPFS, arweave: ARWEAVE },
+    })
+    // A common durability pair — each MIRROR must get its own transport, not the
+    // first URI's (the mislabeling bug this guards).
+    await writeFileTier1('/docs/readme.md', CONTENT, ctx, {
+      mirrors: ['ipfs://QmExample', 'ar://txid'],
+    })
+    const { SchemaEncoder } = await import('../src/eas/schema-encoder.js')
+    const { EFS_SCHEMA_FIELDS } = await import('../src/eas/schemas.js')
+    const mirrorEnc = new SchemaEncoder(EFS_SCHEMA_FIELDS.mirror)
+    const mirrorEntries = sent[1].entries.filter((e) => e.schema === SCHEMAS.mirror)
+    expect(mirrorEntries).toHaveLength(2)
+    const decoded = mirrorEntries.map((e) => mirrorEnc.decodeData(e.data) as [Hex, string])
+    expect(decoded).toContainEqual([TRANSPORT_IPFS, 'ipfs://QmExample'])
+    expect(decoded).toContainEqual([ARWEAVE, 'ar://txid'])
+  })
+})
+
+describe('writeFileTier1 — resume (not yet implemented)', () => {
+  it('throws NotImplemented instead of silently re-sending landed layers', async () => {
+    const { ctx, sent, deploys } = makeCtx()
+    const err = await writeFileTier1('/docs/readme.md', CONTENT, ctx, {
+      resume: { opId: '0xdead' } as never, // a prior (partial) receipt
+    }).catch((e) => e)
+    expect((err as { code?: string }).code).toBe('NotImplemented')
+    // Fails closed up front — nothing deployed, nothing attested (no double-mint).
+    expect(deploys).toHaveLength(0)
+    expect(sent).toHaveLength(0)
+  })
 })
 
 describe('writeFileTier1 — abort signal', () => {

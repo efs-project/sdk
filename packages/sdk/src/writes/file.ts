@@ -97,15 +97,20 @@ export async function resolveMirrors(
   bytes: Uint8Array,
   ctx: FileWriteContext,
   opts: WriteOptions | undefined,
-): Promise<{ mirrors: string[]; transportDefinition: Hex }> {
+): Promise<{ mirrors: { uri: string; transportDefinition: Hex }[] }> {
   const { deployment } = ctx
 
   // 1. Caller supplied where the bytes live → use those mirrors (no storage).
+  //    Resolve the transport PER URI: a mixed-scheme durability set (ipfs:// + ar://)
+  //    must label each MIRROR with its own /transports/<scheme> anchor, not the first
+  //    URI's. (An explicit `opts.transportDefinition` still wins for every entry.)
   const first = opts?.mirrors?.[0]
   if (opts?.mirrors !== undefined && first !== undefined) {
     return {
-      mirrors: [...opts.mirrors],
-      transportDefinition: transportDefinitionFor(schemeOf(first), deployment, opts),
+      mirrors: opts.mirrors.map((uri) => ({
+        uri,
+        transportDefinition: transportDefinitionFor(schemeOf(uri), deployment, opts),
+      })),
     }
   }
 
@@ -128,7 +133,7 @@ export async function resolveMirrors(
     ...(ctx.account !== undefined ? { account: ctx.account } : {}),
     ...(ctx.chain !== undefined ? { chain: ctx.chain } : {}),
   })
-  return { mirrors: [web3Uri], transportDefinition }
+  return { mirrors: [{ uri: web3Uri, transportDefinition }] }
 }
 
 /** The viem clients + deployment context the file-write orchestrator needs. */
@@ -180,6 +185,17 @@ export async function writeFileTier1(
   // Cancellation: bail before any work if the caller already aborted.
   opts?.signal?.throwIfAborted()
 
+  // Resume is not yet implemented. Accepting `opts.resume` here would re-submit a
+  // FRESH plan with an empty UID map, re-sending already-landed layers and
+  // double-minting DATA/MIRROR/PROPERTY/ANCHOR records. Fail closed until resume
+  // actually seeds/skips from the receipt (it must reuse the landed UIDs).
+  if (opts?.resume !== undefined) {
+    throw new EfsError(
+      'EFS write: `resume` is not yet implemented. Retrying a partial write with `resume` would re-send already-landed layers and double-mint records. Omit `resume` (a fresh write to a new path) until resume support lands.',
+      { code: 'NotImplemented' },
+    )
+  }
+
   // 1. Content identity (ADR-0006: bare SHA-256) + size.
   const contentHash = hashContent(content)
   const size = BigInt(content.byteLength)
@@ -220,7 +236,7 @@ export async function writeFileTier1(
   // bytes on-chain (SSTORE2) and yields a web3:// mirror — the zero-infra default.
   // Check the abort signal FIRST: on-chain storage is the first irreversible step.
   opts?.signal?.throwIfAborted()
-  const { mirrors, transportDefinition } = await resolveMirrors(content, ctx, opts)
+  const { mirrors } = await resolveMirrors(content, ctx, opts)
 
   // 3a. Folder-visibility TAGs (overview.md "Upload flow" step 7; ADR-0038/0041).
   // Walk the EXISTING ancestors bottom-up and find the ones the uploader hasn't
@@ -255,7 +271,6 @@ export async function writeFileTier1(
     contentHash,
     size,
     schemas: deployment.schemas,
-    transportDefinition,
     parentAnchorUID,
     ...(missingParents.length > 0 ? { missingParents } : {}),
     ...(existingAncestorTagUIDs.length > 0 ? { existingAncestorTagUIDs } : {}),

@@ -33,12 +33,11 @@ const EXISTING_DATA = uid(0x400)
 
 const baseInput = {
   path: '/docs/readme.md',
-  mirrors: ['ipfs://QmExample'] as const,
+  mirrors: [{ uri: 'ipfs://QmExample', transportDefinition: TRANSPORT }] as const,
   contentType: 'text/markdown',
   contentHash: CONTENT_HASH,
   size: 1234n,
   schemas: SCHEMAS,
-  transportDefinition: TRANSPORT,
   parentAnchorUID: PARENT,
   fileName: 'readme.md',
 } as const
@@ -170,13 +169,21 @@ describe('MIRROR node', () => {
     expect(mirrorEnc.decodeData(m.data)).toEqual([TRANSPORT, 'ipfs://QmExample'])
   })
 
-  it('emits one MIRROR per uri', () => {
+  it('emits one MIRROR per uri, each labeled with its OWN transport (mixed-scheme)', () => {
+    const IPFS_T = `0x${'a1'.repeat(32)}` as const
+    const AR_T = `0x${'b2'.repeat(32)}` as const
     const two = buildFileWriteGraph({
       ...bytesInput,
-      mirrors: ['ipfs://A', 'ar://B'],
+      mirrors: [
+        { uri: 'ipfs://A', transportDefinition: IPFS_T },
+        { uri: 'ar://B', transportDefinition: AR_T },
+      ],
     }).attestations.filter((a) => a.kind === 'MIRROR')
     expect(two).toHaveLength(2)
-    expect(mirrorEnc.decodeData(two[1].data)).toEqual([TRANSPORT, 'ar://B'])
+    // Each MIRROR carries its own transport — the ar:// entry is NOT mislabeled
+    // with the ipfs transport (the bug this guards).
+    expect(mirrorEnc.decodeData(two[0].data)).toEqual([IPFS_T, 'ipfs://A'])
+    expect(mirrorEnc.decodeData(two[1].data)).toEqual([AR_T, 'ar://B'])
   })
 })
 

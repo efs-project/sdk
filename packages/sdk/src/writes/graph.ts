@@ -182,8 +182,11 @@ export interface FileWriteGraphInput {
   /** The file content source: fresh bytes (full graph) or a hardlink to an
    * existing on-chain DATA UID (single-PIN short-circuit). */
   readonly content: { kind: 'bytes'; bytes: Uint8Array } | { kind: 'hardlink'; dataUID: Hex }
-  /** Retrieval URIs to publish as MIRRORs (one MIRROR per entry). */
-  readonly mirrors: readonly string[]
+  /** Retrieval mirrors to publish (one MIRROR per entry). Each carries its OWN
+   * `/transports/<scheme>` anchor UID — a mixed-scheme durability set (e.g.
+   * `ipfs://…` + `ar://…`) must NOT share one transport, or later entries are
+   * mislabeled on-chain. */
+  readonly mirrors: readonly { uri: string; transportDefinition: Hex }[]
   /** Optional MIME content type; when present, emits the `contentType` reserved triplet. */
   readonly contentType?: string
   /** Bare SHA-256 content digest (ADR-0006): lowercase 64-hex with NO `0x`
@@ -195,8 +198,6 @@ export interface FileWriteGraphInput {
   readonly size: bigint
   /** The frozen schema UID set for the target deployment. */
   readonly schemas: EfsSchemaUIDs
-  /** Pre-existing `/transports/<scheme>` anchor UID for the MIRROR `transportDefinition`. */
-  readonly transportDefinition: Hex
   /**
    * The anchor UID the file-ANCHOR hangs off of. When no parents are missing this
    * is the file's immediate parent folder. When `missingParents` is non-empty it is
@@ -375,13 +376,15 @@ export function buildFileWriteGraph(input: FileWriteGraphInput): FileWriteGraph 
   // MirrorResolver.onAttest (MirrorResolver.sol:142-192): refUID must resolve to a
   // DATA attestation (:154-157), revocable=true (:164 `if (!attestation.revocable)
   // revert NotRevocable`), expirationTime 0 (:165). data = (transportDefinition, uri).
-  input.mirrors.forEach((uri, i) => {
+  // Each mirror carries its OWN transport (per-URI), so a mixed-scheme set is labeled
+  // correctly rather than all sharing the first URI's transport.
+  input.mirrors.forEach((mirror, i) => {
     attestations.push({
       ref: REF.mirror(i),
       layer: m + 2,
       kind: 'MIRROR',
       schema: schemas.mirror,
-      data: mirrorEncoder.encodeData([input.transportDefinition, uri]),
+      data: mirrorEncoder.encodeData([mirror.transportDefinition, mirror.uri]),
       revocable: true, // MirrorResolver.sol:164 — must be revocable
       refUID: { ref: REF.DATA }, // MirrorResolver.sol:154-157 — refUID must be a DATA attestation
       dataRefs: [],

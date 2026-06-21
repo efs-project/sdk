@@ -46,12 +46,11 @@ const ACCOUNT: Address = '0x00000000000000000000000000000000000acc01'
 
 const baseInput = {
   path: '/docs/readme.md',
-  mirrors: ['ipfs://QmExample'] as const,
+  mirrors: [{ uri: 'ipfs://QmExample', transportDefinition: TRANSPORT }] as const,
   contentType: 'text/markdown',
   contentHash: CONTENT_HASH,
   size: 1234n,
   schemas: SCHEMAS,
-  transportDefinition: TRANSPORT,
   parentAnchorUID: PARENT,
   fileName: 'readme.md',
 } as const
