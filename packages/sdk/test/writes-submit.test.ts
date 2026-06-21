@@ -16,6 +16,7 @@ import {
   type SubmitContext,
   type SubmitPublicClient,
   type SubmitWalletClient,
+  WriteNotSentError,
   WriteRevertedError,
   submitWriteTier1,
 } from '../src/writes/submit.js'
@@ -116,6 +117,9 @@ interface MockChainOptions {
   revertOnCall?: number
   /** Layer (1-based call index) whose receipt reports `status: 'reverted'`. */
   receiptRevertOnCall?: number
+  /** Layer (1-based call index) whose `waitForTransactionReceipt` THROWS (the tx was
+   * sent — a hash exists — but the receipt wait failed; outcome unknown). */
+  receiptThrowOnCall?: number
   /** Address the fabricated `Attested` logs are emitted from (defaults to EAS). */
   emitFrom?: Address
   /** Extra non-EAS Attested logs to splice into every receipt (noise filter test). */
@@ -191,6 +195,14 @@ function makeMockChain(opts: MockChainOptions = {}) {
 
   const publicClient: SubmitPublicClient = {
     async waitForTransactionReceipt({ hash }) {
+      // The tx hash encodes its 1-based call index (`0x..0N`); honor a configured
+      // receipt-wait throw for that layer (the tx WAS sent — a hash exists).
+      if (opts.receiptThrowOnCall !== undefined) {
+        const callOfHash = Number.parseInt(hash, 16)
+        if (callOfHash === opts.receiptThrowOnCall) {
+          throw new Error(`mock: receipt wait failed for ${hash} (timeout/RPC)`)
+        }
+      }
       const r = receipts.get(hash)
       if (!r) throw new Error(`mock: no receipt for ${hash}`)
       return r
@@ -427,37 +439,68 @@ describe('submitWriteTier1 — single-layer plan is one tx (one signature)', () 
   })
 })
 
-describe('submitWriteTier1 — partial-write boundary on a layer revert', () => {
-  it('surfaces WriteRevertedError carrying the failed layer, its refs, and what landed', async () => {
+describe('submitWriteTier1 — partial-write boundary: three distinct failure modes', () => {
+  it('writeContract throw → WriteNotSentError (no tx sent, safe retry), prior layers preserved', async () => {
     const plan = buildFileWriteGraph(bytesInput)
-    // Revert on the SECOND multiAttest (layer 2). Layer 1 (DATA) already mined.
+    // writeContract THROWS on the SECOND call (layer 2). Layer 1 (DATA) already mined.
     const { ctx, sent } = makeMockChain({ revertOnCall: 2 })
 
     const err = await submitWriteTier1(plan, ctx).catch((e) => e)
-    expect(err).toBeInstanceOf(WriteRevertedError)
-    const we = err as WriteRevertedError
+    // (a) NO-TX-SENT: the no-tx error, never WriteRevertedError.
+    expect(err).toBeInstanceOf(WriteNotSentError)
+    expect(err).not.toBeInstanceOf(WriteRevertedError)
+    const we = err as WriteNotSentError
     expect(we.layer).toBe(2)
     expect(we.code).toBe('PartialBatchFailure')
-    // Layer-1 DATA landed before the revert.
+    // No txHash field — nothing is in flight.
+    expect((we as unknown as { txHash?: unknown }).txHash).toBeUndefined()
+    // Layer-1 DATA landed before the failure (prior-layer refs preserved).
     expect(we.landed.size).toBe(1)
     expect(we.landed.get('DATA')).toBe(uid(0xd000))
     // The failed refs are the layer-2 refs (8 of them).
     expect(we.failedRefs).toHaveLength(8)
     expect(we.failedRefs).toContain('fileAnchor')
-    // Only one layer tx was sent successfully before the revert.
+    // Only one layer tx was sent successfully before the failure.
     expect(sent).toHaveLength(1)
-    // The underlying revert reason is preserved in the cause chain.
-    expect(String(we.message)).toMatch(/partially written/)
+    expect(String(we.message)).toMatch(/retry is safe/)
   })
 
-  it('treats a mined-but-reverted receipt (status: reverted) as the same boundary', async () => {
+  it('receipt-wait throw after a hash → WriteRevertedError(mined:false) carrying the in-flight txHash', async () => {
+    const plan = buildFileWriteGraph(bytesInput)
+    // The tx for layer 2 WAS sent (a hash exists), but the receipt wait throws.
+    const { ctx, sent } = makeMockChain({ receiptThrowOnCall: 2 })
+
+    const err = await submitWriteTier1(plan, ctx).catch((e) => e)
+    // (b) TX-SENT / RECEIPT-UNKNOWN.
+    expect(err).toBeInstanceOf(WriteRevertedError)
+    const we = err as WriteRevertedError
+    expect(we.layer).toBe(2)
+    // The tx may still mine — outcome unknown.
+    expect(we.mined).toBe(false)
+    // Carries the in-flight tx hash (call 2 → 0x..02).
+    expect(we.txHash).toBe(uid(2))
+    // Prior-layer (DATA) refs preserved.
+    expect(we.landed.size).toBe(1)
+    expect(we.landed.get('DATA')).toBe(uid(0xd000))
+    expect(we.failedRefs).toContain('fileAnchor')
+    // The layer-2 tx WAS broadcast before the receipt wait failed.
+    expect(sent).toHaveLength(2)
+    expect(String(we.message)).toMatch(/may still mine/)
+  })
+
+  it('receipt status:reverted → WriteRevertedError(mined:true) carrying the txHash', async () => {
     const plan = buildFileWriteGraph(bytesInput)
     const { ctx } = makeMockChain({ receiptRevertOnCall: 3 })
     const err = await submitWriteTier1(plan, ctx).catch((e) => e)
+    // (c) MINED-REVERTED.
     expect(err).toBeInstanceOf(WriteRevertedError)
     const we = err as WriteRevertedError
     expect(we.layer).toBe(3)
-    // Layers 1 + 2 landed (1 + 8 = 9 refs).
+    expect(we.mined).toBe(true)
+    // Carries the mined tx hash (call 3 → 0x..03).
+    expect(we.txHash).toBe(uid(3))
+    // Layers 1 + 2 landed (1 + 8 = 9 refs) — prior-layer refs preserved.
     expect(we.landed.size).toBe(9)
+    expect(String(we.message)).toMatch(/mined and reverted/)
   })
 })

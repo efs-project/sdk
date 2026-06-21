@@ -23,6 +23,7 @@ export {
   submitWriteTier1,
   submitLayeredTier1,
   WriteRevertedError,
+  WriteNotSentError,
   type SubmitContext,
   type SubmitWalletClient,
   type SubmitPublicClient,

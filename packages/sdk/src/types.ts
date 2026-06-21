@@ -196,6 +196,15 @@ export type FetchOptions = {
    * (exact match, lowercased). A narrower alternative to `allowPrivateHosts`. */
   allowHosts?: readonly string[]
   /**
+   * Allow plaintext `http://` mirrors (and `http://` redirect targets). Default
+   * `false`. ADR-0010 names `https://` as the web transport; an attacker-authored
+   * mirror could otherwise downgrade retrieval to cleartext (bytes stay hash-
+   * verified, but availability/privacy/provenance over HTTP are tamperable). Set
+   * `true` ONLY when the source is trusted — e.g. a local dev mirror at
+   * `http://127.0.0.1` (pair with `allowPrivateHosts`). `https://` is unaffected.
+   */
+  allowInsecureHttp?: boolean
+  /**
    * Inject a `fetch` implementation for byte retrieval (the off-chain engine
    * defaults to the global `fetch`). Escape hatch for callers that must control
    * egress at the transport level — a custom undici `Agent` (self-signed certs,

@@ -180,24 +180,90 @@ export interface Tier1WriteResult {
 }
 
 /**
- * Raised when a layer's `multiAttest` reverts. The partial-write boundary: layers
- * before {@link WriteRevertedError.layer} already mined (their UIDs are in
- * {@link WriteRevertedError.landed}); this layer and all later ones did not. The
- * file is half-written — the caller decides whether to resume or revoke.
+ * Raised when a layer's `multiAttest` was SENT (a `txHash` exists) but did not
+ * land cleanly — either the receipt wait failed ({@link WriteRevertedError.mined}
+ * `=== false`: the tx may still mine later, a duplicate risk) or the receipt came
+ * back `status: 'reverted'` ({@link WriteRevertedError.mined} `=== true`: it mined
+ * and reverted). EITHER WAY a `txHash` is in flight, so the caller must NOT blindly
+ * retry the whole write (it could double-submit the in-flight layer); the
+ * {@link WriteRevertedError.txHash} is the handle to reconcile against the chain.
+ *
+ * The partial-write boundary still holds: layers before {@link WriteRevertedError.layer}
+ * already mined (their UIDs are in {@link WriteRevertedError.landed}); this layer and
+ * all later ones did not (cleanly). The file is half-written.
+ *
+ * For a failure where NO tx was ever sent (the `writeContract` call itself threw —
+ * user rejection, wallet RPC error, preflight), see {@link WriteNotSentError}: there
+ * is no `txHash`, nothing landed in this layer, and a retry is safe.
  */
 export class WriteRevertedError extends EfsError {
   override name = 'WriteRevertedError'
-  /** The DAG layer whose `multiAttest` reverted. */
+  /** The DAG layer whose `multiAttest` was sent but did not land cleanly. */
   readonly layer: number
-  /** The refs that were in the reverted layer (none of which minted). */
+  /** The refs that were in the failed layer (none of which is known to have minted). */
   readonly failedRefs: readonly string[]
-  /** The `ref → UID` table from layers that *did* land before the revert. */
+  /** The `ref → UID` table from layers that *did* land before the failure. */
+  readonly landed: RefMap
+  /** The in-flight tx hash for the failed layer. Always present (a tx WAS sent) —
+   * the reconciliation handle. (`WriteNotSentError` is the no-tx counterpart.) */
+  readonly txHash: Hex
+  /**
+   * `true`  — the tx MINED and reverted (`receipt.status === 'reverted'`): a
+   *           deterministic on-chain failure, the layer definitively did not apply.
+   * `false` — the tx was sent but the receipt WAIT failed (timeout/RPC): the tx may
+   *           still mine later, so the layer's outcome is UNKNOWN (duplicate risk on
+   *           a naive retry). Reconcile via {@link WriteRevertedError.txHash}. */
+  readonly mined: boolean
+  constructor(
+    layer: number,
+    failedRefs: readonly string[],
+    landed: RefMap,
+    txHash: Hex,
+    mined: boolean,
+    cause: unknown,
+  ) {
+    const classified = classifyError(cause)
+    const phase = mined
+      ? `mined and reverted (tx ${txHash})`
+      : `sent but its receipt could not be confirmed (tx ${txHash} may still mine)`
+    super(
+      `EFS write failed at layer ${layer} — ${phase} (${failedRefs.length} attestation(s): ${failedRefs.join(', ')}). ` +
+        `${landed.size} attestation(s) from earlier layers already landed — the file is partially written.`,
+      { code: 'PartialBatchFailure', cause, details: classified.shortMessage },
+    )
+    this.layer = layer
+    this.failedRefs = failedRefs
+    this.landed = landed
+    this.txHash = txHash
+    this.mined = mined
+  }
+}
+
+/**
+ * Raised when a layer's `multiAttest` was NEVER SENT — the `writeContract` call
+ * itself threw (user rejection, wallet/RPC error, or a client-side preflight/
+ * simulation failure) before any transaction was broadcast. So NO tx hash exists,
+ * NO partial on-chain layer was created by this attempt, and a retry of the whole
+ * write is SAFE (there is no in-flight tx to duplicate).
+ *
+ * The partial-write boundary from PRIOR layers is still preserved: layers before
+ * {@link WriteNotSentError.layer} already mined (their UIDs are in
+ * {@link WriteNotSentError.landed}). This is the safe-to-retry counterpart to
+ * {@link WriteRevertedError} (which carries an in-flight `txHash`).
+ */
+export class WriteNotSentError extends EfsError {
+  override name = 'WriteNotSentError'
+  /** The DAG layer whose `multiAttest` was never sent. */
+  readonly layer: number
+  /** The refs that were in the un-sent layer (none of which minted). */
+  readonly failedRefs: readonly string[]
+  /** The `ref → UID` table from layers that *did* land before this attempt. */
   readonly landed: RefMap
   constructor(layer: number, failedRefs: readonly string[], landed: RefMap, cause: unknown) {
     const classified = classifyError(cause)
     super(
-      `EFS write reverted at layer ${layer} (${failedRefs.length} attestation(s): ${failedRefs.join(', ')}). ` +
-        `${landed.size} attestation(s) from earlier layers already landed — the file is partially written.`,
+      `EFS write could not be sent at layer ${layer} — the transaction was never broadcast (${failedRefs.length} attestation(s): ${failedRefs.join(', ')}). ` +
+        `No tx is in flight, so a retry is safe. ${landed.size} attestation(s) from earlier layers already landed.`,
       { code: 'PartialBatchFailure', cause, details: classified.shortMessage },
     )
     this.layer = layer
@@ -438,8 +504,18 @@ export async function submitLayeredTier1(
     const { requests, flatRefs } = buildLayerRequests(layerAtts, resolved)
     const call = buildMultiAttest(ctx.easAddress, requests)
 
-    // Send the layer's single multiAttest. A revert here (resolver `revert`/EAS
-    // error) is the partial-write boundary — wrap it with the landed UIDs.
+    // Send the layer's single multiAttest. The three failure modes are kept
+    // DISTINCT so a caller can tell safe-retry from possible-duplicate:
+    //
+    //   (a) writeContract throws → NO tx was broadcast: nothing landed in this layer,
+    //       a retry is safe → WriteNotSentError (no txHash).
+    //   (b) the receipt wait throws after a txHash exists → the tx may still mine
+    //       later: outcome UNKNOWN, naive retry risks a duplicate →
+    //       WriteRevertedError(mined:false) carrying the in-flight txHash.
+    //   (c) the receipt reports status:'reverted' → the tx mined and reverted →
+    //       WriteRevertedError(mined:true) carrying the txHash.
+    //
+    // All three preserve the prior-layer landed refs.
     let txHash: Hex
     try {
       txHash = await ctx.walletClient.writeContract({
@@ -452,23 +528,26 @@ export async function submitLayeredTier1(
         ...(ctx.chain !== undefined ? { chain: ctx.chain } : {}),
       })
     } catch (cause) {
-      throw new WriteRevertedError(layer, flatRefs, new Map(resolved), cause)
+      // (a) No tx sent — safe to retry, no in-flight hash.
+      throw new WriteNotSentError(layer, flatRefs, new Map(resolved), cause)
     }
 
     let receipt: TransactionReceipt
     try {
       receipt = await ctx.publicClient.waitForTransactionReceipt({ hash: txHash })
     } catch (cause) {
-      throw new WriteRevertedError(layer, flatRefs, new Map(resolved), cause)
+      // (b) Tx sent, receipt unknown — may still mine; carry the txHash, mined:false.
+      throw new WriteRevertedError(layer, flatRefs, new Map(resolved), txHash, false, cause)
     }
 
-    // A mined-but-reverted tx still yields a receipt with `status: 'reverted'`.
-    // Treat that as the same partial-write boundary as a thrown revert.
+    // (c) A mined-but-reverted tx yields a receipt with `status: 'reverted'`.
     if (receipt.status === 'reverted') {
       throw new WriteRevertedError(
         layer,
         flatRefs,
         new Map(resolved),
+        txHash,
+        true,
         new EfsError(`multiAttest reverted on-chain (tx ${txHash}).`, {
           code: 'ContractReverted',
         }),

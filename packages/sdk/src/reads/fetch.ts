@@ -131,6 +131,7 @@ export async function fetchRef(
     ...(opts?.arweaveGateways !== undefined ? { arweaveGateways: opts.arweaveGateways } : {}),
     ...(opts?.allowPrivateHosts !== undefined ? { allowPrivateHosts: opts.allowPrivateHosts } : {}),
     ...(opts?.allowHosts !== undefined ? { allowlist: opts.allowHosts } : {}),
+    ...(opts?.allowInsecureHttp !== undefined ? { allowInsecureHttp: opts.allowInsecureHttp } : {}),
     ...(opts?.fetchImpl !== undefined ? { fetchImpl: opts.fetchImpl } : {}),
     ...(opts?.maxBytes !== undefined ? { maxBytes: opts.maxBytes } : {}),
     // Thread the read `publicClient` into the `web3://` (SSTORE2) read transport so

@@ -60,6 +60,13 @@ export type FetchVerifiedOptions = ResolveOptions &
     signal?: AbortSignal
     /** Inject a `fetch` implementation (tests stub this). Defaults to global. */
     fetchImpl?: typeof fetch
+    /**
+     * Allow plaintext `http://` mirrors and `http://` redirect targets. Default
+     * `false` — ADR-0010 names `https://` as the web transport, and an attacker-
+     * authored mirror could otherwise downgrade retrieval to cleartext (bytes are
+     * hash-checked, but availability/privacy/provenance are not). Set `true` only
+     * when the caller trusts the source (e.g. a local dev mirror). */
+    allowInsecureHttp?: boolean
     /** Resolve a `web3://` mirror to its on-chain bytes (see {@link Web3Reader}).
      * When provided, `web3://` mirrors become a real transport; when absent they
      * stay the NotImplemented seam (recorded as a failed attempt). */
@@ -244,6 +251,13 @@ async function fetchOne(
       })
 
       if (res.type === 'opaqueredirect') {
+        // Browser path: the redirect chain is opaque, so we cannot re-check an
+        // intermediate/final http:// hop here. The browser enforces this for us —
+        // it blocks the SSRF surface (CORS) AND mixed-content (an https document
+        // following a redirect to http:// is blocked by the user agent). So the
+        // `allowInsecureHttp` http-downgrade check is authoritative only on the
+        // Node/undici manual-redirect path below; in the browser the platform owns
+        // it. The initial URL is already https (resolveTransport rejected http).
         const followed = await doFetch(current.href, {
           signal: controller.signal,
           redirect: 'follow',
@@ -265,6 +279,13 @@ async function fetchOne(
         }
         if (next.protocol !== 'http:' && next.protocol !== 'https:') {
           throw new Error(`redirect to non-http(s) scheme (${next.protocol})`)
+        }
+        // Same downgrade defense as resolveTransport: a redirect must not steer us
+        // from https onto plaintext http unless the caller opted in. (We follow
+        // redirects manually with redirect:'manual', so this hop-by-hop re-check is
+        // authoritative in Node/undici.)
+        if (next.protocol === 'http:' && opts.allowInsecureHttp !== true) {
+          throw new Error('redirect to plaintext http:// (set allowInsecureHttp to opt in)')
         }
         const ssrf = checkSsrf(next, opts)
         if (ssrf.blocked) throw new Error(`redirect to SSRF-blocked host (${ssrf.reason})`)
@@ -317,7 +338,12 @@ export async function fetchVerified(
     }
     let resolved: ResolvedTransport
     try {
-      resolved = resolveTransport(uri, { maxBytes: opts.maxBytes ?? DEFAULT_MAX_BYTES })
+      resolved = resolveTransport(uri, {
+        maxBytes: opts.maxBytes ?? DEFAULT_MAX_BYTES,
+        ...(opts.allowInsecureHttp !== undefined
+          ? { allowInsecureHttp: opts.allowInsecureHttp }
+          : {}),
+      })
     } catch (err) {
       attempts.push({ uri: safeUri, scheme: 'https', reason: errMsg(err) })
       continue

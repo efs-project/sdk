@@ -47,6 +47,23 @@ describe('resolveTransport - URI parsing (TRANSPORT allowlist)', () => {
     expect(r.httpUrls().map((u) => u.href)).toEqual(['https://example.com/file.bin'])
   })
 
+  it('rejects plaintext http:// by default (downgrade defense, ADR-0010)', () => {
+    expect(() => resolveTransport('http://example.com/file.bin')).toThrow(UnsupportedUriError)
+    // https stays unaffected even with the option absent.
+    expect(resolveTransport('https://example.com/file.bin').scheme).toBe(TRANSPORT.https)
+  })
+
+  it('allows http:// only when allowInsecureHttp is set', () => {
+    const r = resolveTransport('http://example.com/file.bin', { allowInsecureHttp: true })
+    // It is labeled the https transport (the web transport), but the URL is preserved.
+    expect(r.scheme).toBe(TRANSPORT.https)
+    expect(r.httpUrls().map((u) => u.href)).toEqual(['http://example.com/file.bin'])
+    // The opt-in flag must be exactly `true` — any other value rejects.
+    expect(() => resolveTransport('http://example.com/x', { allowInsecureHttp: false })).toThrow(
+      UnsupportedUriError,
+    )
+  })
+
   it('parses ipfs://CID to the default gateway list with ?format=raw', () => {
     const cid = 'bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi'
     const r = resolveTransport(`ipfs://${cid}`)
@@ -113,6 +130,23 @@ describe('resolveTransport - URI parsing (TRANSPORT allowlist)', () => {
     // cap it must be rejected from the raw-scan estimate, before decodeURIComponent.
     const body = '%41'.repeat(1000)
     expect(() => resolveTransport(`data:;base64,${body}`, { maxBytes: 64 })).toThrow()
+  })
+
+  it('rejects a base64 body that is mostly percent-encoded whitespace filler (raw-length cap)', () => {
+    // The bypass: `%20` (a space) is NOT a significant base64 char, so
+    // significantBase64Chars() === 0 and the sig precheck passes — but the raw
+    // percent-decoded body would still be materialized in full by decodeURIComponent.
+    // A huge filler run with a tiny real payload must be rejected by the RAW-length
+    // cap BEFORE the whole string is allocated.
+    const filler = '%20'.repeat(100_000) // 100k spaces of percent-encoded filler
+    const body = `${filler}aGVsbG8=` // + base64("hello")
+    expect(() => resolveTransport(`data:;base64,${body}`, { maxBytes: 64 })).toThrow(
+      UnsupportedUriError,
+    )
+    // A small amount of legitimate whitespace around a real payload still decodes
+    // fine (the cap allows a generous whitespace allowance over the base64 budget).
+    const ok = resolveTransport('data:;base64,%20aGVsbG8%3D%20', { maxBytes: 64 })
+    expect(new TextDecoder().decode(ok.inline!.bytes)).toBe('hello')
   })
 
   it('detects ;base64 with whitespace before the comma (trimmed media type)', () => {
@@ -562,6 +596,74 @@ describe('fetchVerified - SSRF', () => {
     expect(fetchImpl).toHaveBeenLastCalledWith('https://cdn.example/b', expect.anything())
     // urlUsed reports the FINAL fetched URL, not the original candidate.
     expect(res.urlUsed).toBe('https://cdn.example/b')
+  })
+})
+
+describe('fetchVerified - http downgrade defense (allowInsecureHttp)', () => {
+  it('rejects an http:// mirror by default (recorded as a failed attempt)', async () => {
+    const fetchImpl = vi.fn() as unknown as typeof fetch
+    await expect(
+      fetchVerified(['http://mirror.example/blob'], undefined, { fetchImpl }),
+    ).rejects.toBeInstanceOf(AllMirrorsFailedError)
+    // It was rejected at resolveTransport — no network call ever issued.
+    expect(fetchImpl).not.toHaveBeenCalled()
+    try {
+      await fetchVerified(['http://mirror.example/blob'], undefined, { fetchImpl })
+    } catch (e) {
+      expect((e as AllMirrorsFailedError).attempts[0]!.reason).toMatch(/plaintext http/i)
+    }
+  })
+
+  it('fetches an http:// mirror when allowInsecureHttp is set', async () => {
+    const bytes = enc('local plaintext')
+    const hash = hashContent(bytes)
+    const fetchImpl = vi.fn(async () => mockResponse(bytes)) as unknown as typeof fetch
+    const res = await fetchVerified(['http://127.0.0.1/x'], hash, {
+      fetchImpl,
+      allowInsecureHttp: true,
+      allowPrivateHosts: true, // a local plaintext mirror is also a private host
+    })
+    expect(res.verification).toBe('matches-author')
+    expect(fetchImpl).toHaveBeenCalledWith('http://127.0.0.1/x', expect.anything())
+  })
+
+  it('leaves https:// unaffected by the http guard', async () => {
+    const bytes = enc('secure')
+    const hash = hashContent(bytes)
+    const fetchImpl = vi.fn(async () => mockResponse(bytes)) as unknown as typeof fetch
+    const res = await fetchVerified(['https://cdn.example/a'], hash, { fetchImpl })
+    expect(res.verification).toBe('matches-author')
+  })
+
+  it('rejects an https→http redirect by default, but follows it with allowInsecureHttp', async () => {
+    const bytes = enc('after downgrade')
+    const hash = hashContent(bytes)
+    const makeFetch = () =>
+      vi.fn(async (url: string) =>
+        url === 'https://public.example/a'
+          ? mockResponse(new Uint8Array(), {
+              status: 302,
+              headers: { location: 'http://public.example/b' },
+            })
+          : mockResponse(bytes),
+      ) as unknown as typeof fetch
+
+    // Default: the http redirect target is refused — the http hop is never fetched.
+    const blocked = makeFetch()
+    await expect(
+      fetchVerified(['https://public.example/a'], hash, { fetchImpl: blocked }),
+    ).rejects.toBeInstanceOf(AllMirrorsFailedError)
+    expect(blocked).toHaveBeenCalledOnce() // only the initial https request
+    expect(blocked).toHaveBeenCalledWith('https://public.example/a', expect.anything())
+
+    // Opt in: the downgrade redirect is followed and the bytes verify.
+    const allowed = makeFetch()
+    const res = await fetchVerified(['https://public.example/a'], hash, {
+      fetchImpl: allowed,
+      allowInsecureHttp: true,
+    })
+    expect(res.verification).toBe('matches-author')
+    expect(res.urlUsed).toBe('http://public.example/b')
   })
 })
 

@@ -150,7 +150,10 @@ function buildGatewayUrl(gateway: string, nsSegments: string, subpath: string, u
  * {@link TransportNotImplementedError} for recognized-but-unresolvable ones
  * (`web3://`).
  */
-export function resolveTransport(uri: string, opts: { maxBytes?: number } = {}): ResolvedTransport {
+export function resolveTransport(
+  uri: string,
+  opts: { maxBytes?: number; allowInsecureHttp?: boolean } = {},
+): ResolvedTransport {
   const scheme = SCHEME_RE.exec(uri)?.[1]?.toLowerCase()
   if (!scheme) {
     throw new UnsupportedUriError(uri, 'no URI scheme')
@@ -159,8 +162,18 @@ export function resolveTransport(uri: string, opts: { maxBytes?: number } = {}):
   switch (scheme) {
     case 'https':
     case 'http': {
-      // `http:` is accepted as a parse target but the SSRF/security guard in the
-      // fetch engine governs whether it is actually allowed to be retrieved.
+      // ADR-0010 names `https://` as the web transport. Plaintext `http://` is
+      // rejected by DEFAULT: bytes are hash-verified, but availability, privacy,
+      // and provenance over cleartext are tamperable — an attacker-authored mirror
+      // could downgrade retrieval to HTTP. Opt back in with `allowInsecureHttp`
+      // (e.g. a trusted local mirror) — the same escape-hatch posture as the SSRF
+      // guard. `https://` is unaffected.
+      if (scheme === 'http' && opts.allowInsecureHttp !== true) {
+        throw new UnsupportedUriError(
+          uri,
+          'plaintext http:// is rejected (set allowInsecureHttp to opt in); use https://',
+        )
+      }
       let parsed: URL
       try {
         parsed = new URL(uri)
@@ -301,8 +314,25 @@ function resolveData(uri: string, maxBytes?: number): ResolvedTransport {
     // base64 text, so an oversized percent-encoded body can't force the decode-all
     // allocation the cap exists to prevent.
     if (maxBytes !== undefined) {
+      // Two bounds, BOTH checked before materializing the decoded string:
+      //  1) significant (non-whitespace, non-padding) base64 chars → decoded bytes.
+      //  2) the RAW percent-decoded length. A body that is mostly percent-encoded
+      //     filler (e.g. `%20` repeated far past the cap) has sig===0 yet would still
+      //     force `decodeURIComponent` to allocate the whole raw string. Bound the
+      //     raw length too: to decode to ≤ maxBytes bytes a body needs ≤ ceil(maxBytes/3)*4
+      //     significant chars; we allow a generous whitespace allowance on top of that,
+      //     then reject — so the giant-filler payload is rejected by the cap, not
+      //     materialized first. The scan decodes `%XX` inline (counting 1 char each)
+      //     without building the string, so it is itself O(len) time / O(1) space.
       const sig = significantBase64Chars(dataPart)
       if (Math.floor((sig * 3) / 4) > maxBytes) {
+        throw new UnsupportedUriError(uri, `inline payload exceeds maxBytes (~>${maxBytes})`)
+      }
+      // Budget: the base64 chars needed for maxBytes, plus the same again as a
+      // whitespace/filler allowance (1 byte/char min). A larger raw body can only be
+      // filler — reject it rather than percent-decode + allocate it.
+      const rawCap = Math.ceil(maxBytes / 3) * 4 + maxBytes + 64
+      if (percentDecodedLength(dataPart, rawCap + 1) > rawCap) {
         throw new UnsupportedUriError(uri, `inline payload exceeds maxBytes (~>${maxBytes})`)
       }
     }
@@ -422,6 +452,26 @@ function significantBase64Chars(s: string): number {
     pendingPad = 0
   }
   return sig
+}
+
+/**
+ * Count the length of the percent-DECODED form of `s` WITHOUT materializing it —
+ * each `%XX` escape counts as one character, every other char as itself. Used to
+ * bound the raw size of a base64 `data:` body before `decodeURIComponent` allocates
+ * it, so a payload that is mostly percent-encoded filler is rejected by the cap
+ * instead of being fully decoded first. Stops early once the running count exceeds
+ * `limit` (it never needs to look further to know the bound is breached).
+ */
+function percentDecodedLength(s: string, limit: number): number {
+  let n = 0
+  for (let i = 0; i < s.length; i += 1) {
+    if (s[i] === '%' && i + 2 < s.length && /^[0-9a-f]{2}$/i.test(s.slice(i + 1, i + 3))) {
+      i += 2
+    }
+    n += 1
+    if (n > limit) return n
+  }
+  return n
 }
 
 /** Decode a base64 string to bytes without Buffer (works in browser + node). */
