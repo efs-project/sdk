@@ -756,6 +756,20 @@ contract EFSReaderTest is Test {
         assertEq(hops, 2, "two hops followed");
     }
 
+    // resolveWithRedirects — a hostile `maxHops` is clamped to the 32-hop ceiling, so it
+    // cannot overflow `cap + 1` or force a giant `visited` allocation (Codex review).
+    function test_ResolveWithRedirects_ClampsHostileMaxHops() public view {
+        bytes32 src = keccak256("loner");
+        bytes32[] memory none = new bytes32[](0);
+        // Unclamped, `type(uint256).max + 1` would wrap to 0 → `new bytes32[](0)` → the
+        // `visited[0] = source` write would revert out-of-bounds. The clamp makes it safe.
+        (bytes32 terminal, uint256 hops) = EFSReader.resolveWithRedirects(
+            _eas(), REDIRECT_SCHEMA, src, none, ALICE, type(uint256).max
+        );
+        assertEq(terminal, src, "no redirects -> terminal is the source");
+        assertEq(hops, 0, "no hops followed");
+    }
+
     // resolveWithRedirects — no redirect (passthrough): empty chain returns source.
     function test_ResolveWithRedirects_NoRedirect_Passthrough() public view {
         bytes32 src = keccak256("loneData");

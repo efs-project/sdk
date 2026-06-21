@@ -169,6 +169,11 @@ library EFSReader {
     ///      that, but the on-chain follower never loops unbounded (see {RedirectHopLimit}).
     uint256 internal constant REDIRECT_DEFAULT_MAX_HOPS = 8;
 
+    /// @dev Hard ceiling on the redirect hop cap (MAX_ANCHOR_DEPTH, 32; ADR-0021), matching the
+    ///      TS reader. {resolveWithRedirects} CLAMPS `maxHops` to this so a hostile/huge value
+    ///      can't overflow `cap + 1` or force an enormous `visited` allocation.
+    uint256 internal constant REDIRECT_MAX_HOPS = 32;
+
     /// @notice Raised when following a redirect chain detects a cycle — the same source is visited
     ///         twice (e.g. A→B by one lens, B→A by another). The contracts cannot self-loop a
     ///         single redirect (`AliasResolver` rejects `target == refUID`), but multi-hop cycles
@@ -430,6 +435,9 @@ library EFSReader {
         uint256 maxHops
     ) internal view returns (bytes32 terminal, uint256 hops) {
         uint256 cap = maxHops == 0 ? REDIRECT_DEFAULT_MAX_HOPS : maxHops;
+        // Clamp to the hard ceiling so a hostile `maxHops` can't overflow `cap + 1` or force a
+        // huge `visited` allocation before any redirect is even inspected.
+        if (cap > REDIRECT_MAX_HOPS) cap = REDIRECT_MAX_HOPS;
 
         // Visited-source set for cycle detection AND the running cursor: `visited[hops]` is always
         // the current terminal, and `hops + 1` entries are populated. Bounded by `cap + 1` entries

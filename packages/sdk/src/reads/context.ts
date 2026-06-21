@@ -151,13 +151,16 @@ export type DirectoryPageRaw = { items: readonly FileSystemItem[]; nextCursor: H
 /**
  * Decode a reserved-key PROPERTY `string value` attestation `data` blob. PROPERTY
  * is the frozen `string value` schema (ADR-0052), so the payload is a single
- * ABI-encoded string. Empty/`0x` data → `undefined`.
+ * ABI-encoded string. Only ABSENT data (`undefined`/`0x`/empty) → `undefined`; a
+ * VALID payload decoding to the empty string returns `''` (a stored empty property
+ * value must round-trip — absence is the missing property/binding UID upstream, NOT
+ * an empty value).
  */
 export function decodePropertyValue(data: Hex): string | undefined {
   if (data === undefined || data === '0x' || data.length <= 2) return undefined
   try {
     const [value] = decodeAbiParameters([{ type: 'string' }], data) as [string]
-    return value.length > 0 ? value : undefined
+    return value // including '' — a valid stored empty value, not absence
   } catch {
     return undefined
   }

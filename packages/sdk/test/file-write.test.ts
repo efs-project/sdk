@@ -352,6 +352,29 @@ describe('writeFileTier1 — caller-supplied mirrors', () => {
     expect(deploys).toHaveLength(0)
   })
 
+  it('resolves the web3 transport ON-CHAIN when the deployment map lacks it (Sepolia case)', async () => {
+    const TRANSPORTS_ANCHOR = uid(0x77)
+    const WEB3_TRANSPORT = uid(0x78)
+    // The transports map has NO web3 entry (like the built-in Sepolia deployment), so the
+    // default on-chain write must resolve /transports/web3 on-chain rather than throwing
+    // MissingTransport.
+    const { ctx, sent } = makeCtx({
+      transports: {},
+      edges: {
+        [`${ROOT}|docs`]: DOCS_ANCHOR,
+        [`${ROOT}|transports`]: TRANSPORTS_ANCHOR,
+        [`${TRANSPORTS_ANCHOR}|web3`]: WEB3_TRANSPORT,
+      },
+    })
+    await writeFileTier1('/docs/readme.md', CONTENT, ctx) // no mirrors → on-chain storage
+    const { SchemaEncoder } = await import('../src/eas/schema-encoder.js')
+    const { EFS_SCHEMA_FIELDS } = await import('../src/eas/schemas.js')
+    const mirrorEnc = new SchemaEncoder(EFS_SCHEMA_FIELDS.mirror)
+    const mirrorEntry = sent[1].entries.find((e) => e.schema === SCHEMAS.mirror)
+    const [transportDef] = mirrorEnc.decodeData(mirrorEntry!.data) as [Hex, string]
+    expect(transportDef).toBe(WEB3_TRANSPORT) // resolved on-chain, not from the map
+  })
+
   it('normalizes an ar:// mirror to the canonical arweave transport key', async () => {
     const ARWEAVE = uid(0x2a) // /transports/arweave anchor UID
     // The map is keyed by `arweave`, but the URI scheme is `ar` — must normalize,

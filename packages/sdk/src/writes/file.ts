@@ -30,6 +30,7 @@ import {
   type TagReadPublicClient,
   planExistingAncestorVisibilityTags,
   resolveOrPlanParents,
+  resolvePathToAnchor,
   splitPath,
 } from '../reads/resolve.js'
 import type { AccountProfile, WriteOptions, WriteReceipt } from '../types.js'
@@ -52,28 +53,40 @@ function schemeOf(uri: string): string {
 }
 
 /**
- * Look up the `/transports/<scheme>` anchor UID for a mirror's scheme: an explicit
- * `opts.transportDefinition` wins, else the deployment's `transports` map.
+ * Resolve the `/transports/<scheme>` anchor UID for a mirror's scheme: an explicit
+ * `opts.transportDefinition` wins, else the deployment's `transports` map, else the
+ * `/transports/<scheme>` anchor resolved ON-CHAIN (the same chain as `efs.mirrors.add`).
+ * The on-chain fallback is what makes the default `web3://` write usable on a deployment
+ * whose `transports` map isn't seeded (e.g. the built-in Sepolia entry).
  *
- * @throws {EfsError} `MissingTransport` when neither source has one.
+ * @throws {EfsError} `MissingTransport` when none of the three sources has one.
  */
-function transportDefinitionFor(
+async function transportDefinitionFor(
   scheme: string,
   deployment: EfsDeployment,
   opts: WriteOptions | undefined,
-): Hex {
+  publicClient: FileWriteContext['publicClient'],
+): Promise<Hex> {
   // Normalize the `ar://` alias to the canonical `arweave` transport key (matching
-  // mirror/transport.ts's resolveArweave and the standalone mirrors.add path) — else a
-  // valid `ar://` write misses the map and throws MissingTransport.
+  // mirror/transport.ts's resolveArweave and the standalone mirrors.add path).
   const key = scheme === 'ar' ? 'arweave' : scheme
-  const transportDefinition = opts?.transportDefinition ?? deployment.transports?.[key]
-  if (transportDefinition === undefined) {
+  const mapped = opts?.transportDefinition ?? deployment.transports?.[key]
+  if (mapped !== undefined) return mapped
+
+  // On-chain fallback: resolve the `/transports/<key>` anchor (a missing one throws
+  // ParentNotFoundError from the path walk — re-thrown as the typed MissingTransport).
+  try {
+    return await resolvePathToAnchor(
+      publicClient as never,
+      deployment.contracts.indexer,
+      `/transports/${key}`,
+    )
+  } catch (cause) {
     throw new EfsError(
       `EFS write: no transport definition for scheme '${key}'. Pass \`opts.transportDefinition\` (the on-chain /transports/${key} anchor UID), or use a deployment whose \`transports\` map records it (the deploy seeds these).`,
-      { code: 'MissingTransport' },
+      { code: 'MissingTransport', cause },
     )
   }
-  return transportDefinition
 }
 
 /**
@@ -107,10 +120,17 @@ export async function resolveMirrors(
   const first = opts?.mirrors?.[0]
   if (opts?.mirrors !== undefined && first !== undefined) {
     return {
-      mirrors: opts.mirrors.map((uri) => ({
-        uri,
-        transportDefinition: transportDefinitionFor(schemeOf(uri), deployment, opts),
-      })),
+      mirrors: await Promise.all(
+        opts.mirrors.map(async (uri) => ({
+          uri,
+          transportDefinition: await transportDefinitionFor(
+            schemeOf(uri),
+            deployment,
+            opts,
+            ctx.publicClient,
+          ),
+        })),
+      ),
     }
   }
 
@@ -126,7 +146,12 @@ export async function resolveMirrors(
   // anchor). Resolve it first (a missing one throws MissingTransport before any
   // deploy); `storeOnchain` then deploys and throws MultiChunkUnsupported for an
   // over-one-chunk payload (only reachable via the `storage:'onchain'` cap bypass).
-  const transportDefinition = transportDefinitionFor(TRANSPORT.web3, deployment, opts)
+  const transportDefinition = await transportDefinitionFor(
+    TRANSPORT.web3,
+    deployment,
+    opts,
+    ctx.publicClient,
+  )
   const { web3Uri } = await storeOnchain(bytes, {
     walletClient: ctx.walletClient,
     publicClient: ctx.publicClient,
