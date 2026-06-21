@@ -113,13 +113,15 @@ async function transportDefinitionFor(
  *
  *  1. Caller-supplied `opts.mirrors` → used verbatim (bytes live there; no storage
  *     happens). Transport from `opts.transportDefinition`, else the deployment map
- *     keyed by the FIRST mirror's scheme.
+ *     keyed by the FIRST mirror's scheme. An explicitly EMPTY list (`mirrors: []`) is
+ *     a caller error (throws `InvalidArgument`), not a fall-through to on-chain storage.
  *  2. No mirrors, `{ storage: 'onchain' }` OR within the on-chain auto-cap →
  *     deploy the bytes on-chain (SSTORE2 chunk + manager) and publish the
  *     `web3://<manager>` URI as the mirror, with the `web3` (`/transports/onchain`)
  *     transport anchor. The cap is bypassed when `storage:'onchain'` is set.
  *  3. No mirrors, over the cap, no override → throw {@link PayloadTooLarge}.
  *
+ * @throws {EfsError} `InvalidArgument` when `opts.mirrors` is supplied but empty.
  * @throws {EfsError} `MissingTransport` when no transport-definition anchor exists.
  * @throws {PayloadTooLarge} no mirrors + over the auto-cap + no `storage` override.
  * @throws {MultiChunkUnsupported} on-chain payload exceeds one SSTORE2 chunk.
@@ -131,12 +133,23 @@ export async function resolveMirrors(
 ): Promise<{ mirrors: { uri: string; transportDefinition: Hex }[] }> {
   const { deployment } = ctx
 
+  // An explicitly-supplied `mirrors` list means "the bytes already live at these URIs;
+  // do NOT store them" — so an EMPTY explicit list is a caller error, not an omission.
+  // Falling through to the no-mirrors path would auto-store on-chain (spending gas and
+  // publishing bytes), silently contradicting the WriteOptions.mirrors contract. Reject
+  // it; the caller must pass at least one URI or omit `mirrors` to opt into storage.
+  if (opts?.mirrors !== undefined && opts.mirrors.length === 0) {
+    throw new EfsError(
+      'EFS write: `mirrors` was supplied but empty. Supplying `mirrors` means the bytes already live off-chain and the SDK will NOT store them — pass at least one URI, or omit `mirrors` to auto-store on-chain.',
+      { code: 'InvalidArgument' },
+    )
+  }
+
   // 1. Caller supplied where the bytes live → use those mirrors (no storage).
   //    Resolve the transport PER URI: a mixed-scheme durability set (ipfs:// + ar://)
   //    must label each MIRROR with its own /transports/<scheme> anchor, not the first
   //    URI's. (An explicit `opts.transportDefinition` still wins for every entry.)
-  const first = opts?.mirrors?.[0]
-  if (opts?.mirrors !== undefined && first !== undefined) {
+  if (opts?.mirrors !== undefined) {
     return {
       mirrors: await Promise.all(
         opts.mirrors.map(async (uri) => ({
