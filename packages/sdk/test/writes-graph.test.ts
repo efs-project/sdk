@@ -494,6 +494,23 @@ describe('hardlink short-circuit', () => {
     expect(pin.dataRefs).toEqual([{ field: 'definition', ref: { ref: REF.FILE_ANCHOR } }])
     expect(pin.revocable).toBe(true)
   })
+
+  it('relink to an EXISTING path reuses the file anchor (no fresh ANCHOR; PIN at the existing one)', () => {
+    const EXISTING_ANCHOR = `0x${'cc'.repeat(32)}` as Hex
+    const g = buildFileWriteGraph({
+      ...baseInput,
+      content: { kind: 'hardlink', dataUID: EXISTING_DATA },
+      existingFileAnchorUID: EXISTING_ANCHOR,
+    })
+    // No fresh file-ANCHOR minted — the permanent existing one is reused.
+    expect(g.attestations.map((a) => a.kind)).not.toContain('ANCHOR')
+    const pin = find(g.attestations, REF.PLACEMENT_PIN)
+    // PIN definition = the CONCRETE existing anchor (encoded directly, no symbolic thread).
+    expect(pin.dataRefs).toEqual([])
+    const pinEnc = new SchemaEncoder(EFS_SCHEMA_FIELDS.pin)
+    expect(pin.data).toBe(pinEnc.encodeData([EXISTING_ANCHOR]))
+    expect(pin.refUID).toBe(EXISTING_DATA)
+  })
 })
 
 describe('folder-visibility TAGs (overview.md step 7; specs/02 §4a; ADR-0038/0041)', () => {

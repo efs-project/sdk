@@ -296,7 +296,7 @@ async function hydrateByteAttestations(
  * REQUESTED (the default) and the file simply has no contentHash claim. A bare value
  * has no status field to carry that, so we throw {@link MissingContentHash} rather than
  * silently hand back unverifiable bytes. `verifyRequested` = `opts.verify !== false`. */
-function assertVerified(file: EfsFile, path: string, verifyRequested: boolean): void {
+export function assertVerified(file: EfsFile, path: string, verifyRequested: boolean): void {
   switch (file.verification) {
     case 'mismatch':
       throw new ContentHashMismatch(path)

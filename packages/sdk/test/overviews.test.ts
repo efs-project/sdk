@@ -363,7 +363,12 @@ describe('fs.overview — read (ADR-0011)', () => {
     const md = '# other'
     const ctx = makeCtx({
       winner: { attester: OTHER, dataUID: README_DATA },
-      props: { [`${OTHER}|size`]: String(md.length) },
+      props: {
+        [`${OTHER}|size`]: String(md.length),
+        // contentHash under OTHER so the OTHER-lens read verifies (the read path now
+        // fails closed on a missing claim); it is absent under LENS (the scoping point).
+        [`${OTHER}|contentHash`]: hashContent(new TextEncoder().encode(md)),
+      },
       mirrors: { [OTHER.toLowerCase()]: [dataUri(md)] },
     })
     // Reading through LENS sees nothing the winning attester (OTHER) placed only if
@@ -375,6 +380,25 @@ describe('fs.overview — read (ADR-0011)', () => {
     // succeeds, through a foreign lens the reserved props are absent.
     const viaOther = await overview(ctx, '/docs', { lens: OTHER })
     expect(viaOther.kind).toBe('markdown')
+  })
+
+  it('FAILS CLOSED on a verification mismatch (never renders tampered content)', async () => {
+    const md = '# docs'
+    const ctx = makeCtx({
+      winner: { attester: LENS, dataUID: README_DATA },
+      props: {
+        [`${LENS}|contentType`]: 'text/markdown',
+        [`${LENS}|size`]: String(new TextEncoder().encode(md).length),
+        // contentHash of DIFFERENT bytes → the fetched mirror bytes mismatch.
+        [`${LENS}|contentHash`]: hashContent(new TextEncoder().encode('tampered')),
+      },
+      mirrors: { [LENS.toLowerCase()]: [dataUri(md)] },
+    })
+    // Default (verify on) must throw rather than return the mismatched bytes.
+    await expect(overview(ctx, '/docs', { lens: LENS })).rejects.toThrow()
+    // verify:false opts out — renders the unverified content.
+    const res = await overview(ctx, '/docs', { lens: LENS, verify: false })
+    expect(res.kind).toBe('markdown')
   })
 })
 

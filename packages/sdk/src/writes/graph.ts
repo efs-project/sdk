@@ -348,8 +348,18 @@ export function buildFileWriteGraph(input: FileWriteGraphInput): FileWriteGraph 
   // anchor that names the new path is inherent to placing it anywhere. Any created
   // ancestor folders still precede the anchor, in their own earliest layers.
   if (input.content.kind === 'hardlink') {
-    const fileAnchor = buildFileAnchor(input, m + 1)
-    const placementPin = buildPlacementPin(schemas, input.content.dataUID, m + 2)
+    // Honor `existingFileAnchorUID` here too (relink/overwrite at an existing path): a
+    // file-anchor slot is permanent, so re-minting it reverts. When set, skip the
+    // file-ANCHOR mint and place the PIN at the concrete existing anchor (the
+    // cardinality-1 placement supersedes); else mint a fresh anchor for a new path.
+    const existingFileAnchorUID = input.existingFileAnchorUID
+    const fileAnchorAtts = existingFileAnchorUID === undefined ? [buildFileAnchor(input, m + 1)] : []
+    const placementPin = buildPlacementPin(
+      schemas,
+      input.content.dataUID,
+      m + 2,
+      existingFileAnchorUID,
+    )
     // Visibility TAGs still apply: placing an existing file at a new path must make
     // the uploader's ancestor folders show in their lens. The hardlink graph's PINs
     // live at m + 2 (no reserved-key triplets), so TAGs follow at m + 3.
@@ -358,7 +368,7 @@ export function buildFileWriteGraph(input: FileWriteGraphInput): FileWriteGraph 
       hardlink: true,
       attestations: stableSortByLayer([
         ...folderAttestations,
-        fileAnchor,
+        ...fileAnchorAtts,
         placementPin,
         ...visibilityTags,
       ]),

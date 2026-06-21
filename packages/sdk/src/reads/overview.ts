@@ -39,7 +39,7 @@ import { fileViewAbi } from '../chain/abi/fileView.js'
 import { MAX_RENDER_BYTES, OVERVIEW_NAME } from '../types.js'
 import type { FetchOptions, OverviewOptions, OverviewResult } from '../types.js'
 import { type ReadContext, read } from './context.js'
-import { fetchRef } from './fetch.js'
+import { assertVerified, fetchRef } from './fetch.js'
 import { readReservedProperty, resolvePlacement } from './file.js'
 
 /** Join a container path with the well-known Overview file name. Tolerant of a
@@ -135,6 +135,12 @@ export async function overview(
     { __brand: 'DataRef', uid: dataUID as never, chainId: ctx.deployment.chainId, resolvedBy },
     { ...(opts as FetchOptions | undefined), maxBytes: MAX_RENDER_BYTES },
   )
+
+  // FAIL CLOSED on verification: an Overview is rendered as a folder header, but the
+  // result carries no `verification` field — so returning tampered/unverifiable bytes
+  // would render them with no warning. Throw on mismatch / malformed / missing-claim
+  // (the same posture as the bare-value read helpers) unless `verify:false` was asked.
+  assertVerified(file, path, opts?.verify !== false)
 
   if (isMarkdownContentType(contentType)) {
     return { kind: 'markdown', text: file.text(), source }
