@@ -638,6 +638,54 @@ describe('read + read(ref)', () => {
     await expect(read(ctx, '/docs/readme.md', { lens: LENS })).rejects.toThrow()
   })
 
+  it('a HUGE declared size does NOT raise the cap above the engine default (P1)', async () => {
+    // An untrusted attester declares size = 1 GB. With default opts (no maxBytes) the cap
+    // must stay the 50 MB engine default — NOT become 1 GB. A mirror advertising a 60 MB
+    // Content-Length (over the default, under the lie) must be REJECTED before buffering.
+    const hashAnchor = uid(0x4a54)
+    const hashProp = uid(0x4a51)
+    const sizeAnchor = uid(0x5102)
+    const sizeProp = uid(0x5170)
+    const ctx = makeCtx({
+      edges: README_EDGES,
+      files: [fileItem({})],
+      placementPins: README_PLACEMENT,
+      keyAnchors: {
+        [`${DATA_UID}|contentHash`]: hashAnchor,
+        [`${DATA_UID}|size`]: sizeAnchor,
+      },
+      pinTargets: {
+        [`${hashAnchor}|${LENS.toLowerCase()}`]: hashProp,
+        [`${sizeAnchor}|${LENS.toLowerCase()}`]: sizeProp,
+      },
+      attestations: {
+        [hashProp]: propertyData(GOOD_HASH),
+        [sizeProp]: propertyData(String(1_000_000_000)), // 1 GB lie
+      },
+      mirrors: [{ uri: 'https://127.0.0.1/x', attester: LENS }],
+    })
+    // The engine trips on the 60 MB Content-Length vs the 50 MB default cap. With the bug
+    // (declared size becomes the cap), 60 MB < 1 GB would pass.
+    const fetchImpl = (async () =>
+      new Response(new Uint8Array([1, 2, 3]), {
+        headers: { 'content-length': String(60 * 1024 * 1024) },
+      })) as unknown as typeof fetch
+    await expect(
+      read(ctx, '/docs/readme.md', { lens: LENS, fetchImpl, allowPrivateHosts: true }),
+    ).rejects.toThrow(/cap/)
+  })
+
+  it('forwards an abort signal to the fetch engine (cancels the read)', async () => {
+    // A pre-aborted signal must propagate to the mirror engine and abort the read,
+    // rather than being ignored (the option previously never reached the engine).
+    await expect(
+      read(ctxWithMirror(GOOD_HASH), '/docs/readme.md', {
+        lens: LENS,
+        signal: AbortSignal.abort(),
+      }),
+    ).rejects.toThrow()
+  })
+
   it('read throws FileNotFoundError when nothing is placed at the path', async () => {
     const ctx = makeCtx({ edges: README_EDGES, files: [] })
     await expect(read(ctx, '/docs/readme.md', { lens: LENS })).rejects.toBeInstanceOf(

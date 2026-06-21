@@ -220,8 +220,13 @@ export type FetchOptions = {
   fetchImpl?: typeof fetch
   /** Hard cap (bytes) on the payload buffered per fetch attempt; default 50 MB. The
    * reader stops once the running total exceeds it (a web3:// chunk walk bails
-   * mid-stream), so an untrusted mirror can't force allocation past the cap. */
+   * mid-stream), so an untrusted mirror can't force allocation past the cap. A smaller
+   * author-declared `size` lowers this further, but a larger one NEVER raises it. */
   maxBytes?: number
+  /** Cancellation signal forwarded to the mirror fetch engine — abort a slow/in-flight
+   * byte read (e.g. an aborted server request) instead of waiting out the per-attempt
+   * timeout. Applies to the `read`/`readText`/`readBytes`/`readJson` byte path. */
+  signal?: AbortSignal
 }
 
 // ── Pagination ─────────────────────────────────────────────────────────────────

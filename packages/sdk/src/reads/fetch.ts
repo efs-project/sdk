@@ -34,7 +34,12 @@ import {
   MalformedClaim,
   MissingContentHash,
 } from '../errors.js'
-import { type FetchVerifiedOptions, type Mirror, fetchVerified } from '../mirror/fetch.js'
+import {
+  DEFAULT_MAX_BYTES,
+  type FetchVerifiedOptions,
+  type Mirror,
+  fetchVerified,
+} from '../mirror/fetch.js'
 import { type Web3ReadClient, readWeb3Bytes } from '../mirror/web3.js'
 import type {
   DataRef,
@@ -147,14 +152,16 @@ export async function fetchRef(
       : Promise.resolve(undefined),
   ])
 
-  // Cap the fetch at the author's declared `size` (when present): bytes exceeding it are
-  // rejected during the fetch, so an oversized mirror body can't slip through as
-  // `matches-author` (the content-hash spec treats over-declared-size as a failure) and
-  // can't force buffering past the declared length.
+  // Cap the fetch. The author's declared `size` may only LOWER the cap, never RAISE it:
+  // an UNTRUSTED attester could otherwise publish a huge `size` (e.g. 1 GB) and, on the
+  // default `read()`/`readText()` (no `opts.maxBytes`), turn that claim into the engine
+  // cap — bypassing the documented 50 MB default and forcing buffering before
+  // verification. So the caller cap is `opts.maxBytes` when set, else the engine default;
+  // `declaredSize` clamps DOWN from there (over-declared bytes are rejected mid-fetch, so
+  // an oversized body can't slip through as `matches-author`).
+  const callerCap = opts?.maxBytes ?? DEFAULT_MAX_BYTES
   const effectiveMaxBytes =
-    declaredSize !== undefined
-      ? Math.min(opts?.maxBytes ?? declaredSize, declaredSize)
-      : opts?.maxBytes
+    declaredSize !== undefined ? Math.min(callerCap, declaredSize) : opts?.maxBytes
 
   const mirrors: Mirror[] = uris.map((uri) => ({ uri }))
   const engineOpts: FetchVerifiedOptions = {
@@ -165,6 +172,9 @@ export async function fetchRef(
     ...(opts?.allowInsecureHttp !== undefined ? { allowInsecureHttp: opts.allowInsecureHttp } : {}),
     ...(opts?.fetchImpl !== undefined ? { fetchImpl: opts.fetchImpl } : {}),
     ...(effectiveMaxBytes !== undefined ? { maxBytes: effectiveMaxBytes } : {}),
+    // Forward the caller's cancellation signal so a slow mirror read aborts promptly
+    // (e.g. an aborted server request) instead of running to the per-attempt timeout.
+    ...(opts?.signal !== undefined ? { signal: opts.signal } : {}),
     // Thread the read `publicClient` into the `web3://` (SSTORE2) read transport so
     // on-chain-stored files read back. Enabled only when the client can read bytecode
     // (`getCode`) — a real viem PublicClient always can. The engine stays chain-free;
