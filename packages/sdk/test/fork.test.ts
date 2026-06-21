@@ -291,9 +291,9 @@ describe.skipIf(!liveEnabled)('fork write→read round-trip (live deploy)', () =
     expect(receipt.status).toBe('confirmed')
     expect(receipt.steps.every((s) => s.done)).toBe(true)
 
-    // Confirm a web3:// MIRROR landed on the DATA (read the raw mirror attestations
-    // for the file via the SDK's info+expand, scoped to the wallet lens).
-    const info = await efs.fs.info(onchainPath, { expand: ['mirrors'] as const })
+    // Confirm the file resolves under the wallet lens (the web3:// MIRROR is verified
+    // below by reading the bytes back through the router's ERC-5219 request path).
+    const info = await efs.fs.info(onchainPath)
     expect(info.exists).toBe(true)
 
     // READ via the canonical EFSRouter ERC-5219 `request(path, params)`. The router

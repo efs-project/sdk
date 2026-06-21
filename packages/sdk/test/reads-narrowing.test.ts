@@ -10,7 +10,14 @@
 import { http, type WalletClient, createPublicClient, createWalletClient } from 'viem'
 import { sepolia } from 'viem/chains'
 import { describe, expectTypeOf, it } from 'vitest'
-import type { Attestation, EfsFile, Expanded, FileAttestations, FileInfo } from '../src/index.js'
+import type {
+  Attestation,
+  DataUID,
+  EfsFile,
+  Expanded,
+  FileAttestations,
+  FileInfo,
+} from '../src/index.js'
 import { createEfsClient } from '../src/index.js'
 
 // A client value only for its TYPE — never called (sepolia has no deployment).
@@ -40,7 +47,22 @@ async function _narrowingProbe() {
   const proj = await efs.fs.info('/x', { fields: ['contentType', 'license'] })
   const _p: FileAttestations | undefined = proj.attestations
 
-  return { _a, _a2, _a3, _w, _p }
+  // `mirrors`/`redirects` are NOT in the ExpandToken union (unimplemented → not a silent
+  // no-op token). Passing them must be a type error, not a quietly-accepted expand.
+  // @ts-expect-error 'mirrors' is not an ExpandToken
+  await efs.fs.info('/x', { expand: ['mirrors'] })
+  // @ts-expect-error 'redirects' is not an ExpandToken
+  await efs.fs.info('/x', { expand: ['redirects'] })
+
+  // A receipt step `uid` is a RAW attestation UID (kind given by `id`), NOT a DataUID —
+  // it must NOT be assignable to a DataUID-typed slot (the wrong-UID-kind guard). The
+  // file's content identity is `receipt.data.uid`, which IS a DataUID.
+  const receipt = await efs.fs.write('/x', new Uint8Array())
+  // @ts-expect-error a step uid is not a DataUID
+  const _bad: DataUID | undefined = receipt.steps[0]?.uid
+  const _ok: DataUID | undefined = receipt.data?.uid
+
+  return { _a, _a2, _a3, _w, _p, _bad, _ok }
 }
 void _narrowingProbe // keep referenced
 

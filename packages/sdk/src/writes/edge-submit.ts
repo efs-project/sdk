@@ -76,7 +76,8 @@ export async function submitEdgePlanWithUID(
 function toEdgeReceipt(result: LayeredWriteResult): WriteReceipt {
   const steps = [...result.uids.entries()].map(([id, uid]) => ({
     id,
-    uid: uid as DataUID,
+    // Raw attestation UID (kind given by `id`) — NOT branded DataUID (see WriteReceipt).
+    uid,
     done: true,
   }))
   return {

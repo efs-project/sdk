@@ -45,8 +45,15 @@ export type PathRef = { readonly __brand: 'PathRef'; readonly path: string }
  * type on it (see {@link Expanded}). Max depth 2 — tighter than Stripe's 4 because
  * each level is a multicall round-trip, not a DB join. `'attestations.schema'` is
  * the only depth-2 token (the schema record behind each attestation).
+ *
+ * Only the `attestations` family is hydrated today. `mirrors`/`redirects` expansion
+ * is deliberately NOT in the union: until a verb actually hydrates them into a result
+ * field, listing them would be a silent no-op (the token would type-check but expand
+ * nothing). They are added back additively when implemented — read mirrors via
+ * `efs.mirrors.list(...)` and redirects via the `followRedirects`/`ReadResult.via`
+ * surface in the meantime.
  */
-export type ExpandToken = 'attestations' | 'mirrors' | 'redirects' | 'attestations.schema'
+export type ExpandToken = 'attestations' | 'attestations.schema'
 
 /**
  * The two orthogonal read knobs (sdk-read-surface), shared by `read`/`info`/etc.:
@@ -435,7 +442,14 @@ export type WriteReceipt = {
    * shape but have no bytes to hash). */
   contentHash?: ContentHash
   data?: DataRef
-  steps: Array<{ id: string; uid?: DataUID; done: boolean }>
+  /** Every minted attestation in the write graph, keyed by step `id`. The `uid` is a
+   * RAW attestation UID whose KIND is given by `id` (file-ANCHOR, MIRROR, PROPERTY,
+   * placement-PIN, TAG, LIST_ENTRY, REDIRECT, DATA, …) — it is deliberately NOT a
+   * {@link DataUID}: most steps are not file-content identities, so branding them
+   * `DataUID` would let a placement/property/anchor UID be passed where a DATA UID is
+   * required (the wrong-UID-kind bug the brands exist to catch). The file's content
+   * identity is {@link WriteReceipt.data} (`data.uid: DataUID`), not a step. */
+  steps: Array<{ id: string; uid?: Hex; done: boolean }>
   signatureCount: number
   mechanism: WriteMechanism
   /** Lifecycle status; `'partial'`/`'reverted'` flag a half-written file. */
