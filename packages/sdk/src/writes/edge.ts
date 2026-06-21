@@ -44,7 +44,7 @@ import type { Address, Hex } from 'viem'
 import type { EfsSchemaUIDs } from '../chain/deployments.js'
 import { SchemaEncoder } from '../eas/schema-encoder.js'
 import { EFS_SCHEMA_FIELDS } from '../eas/schemas.js'
-import { InvalidListConfig } from '../errors.js'
+import { EfsError, InvalidListConfig } from '../errors.js'
 import type { ListTargetType } from '../types.js'
 import { type FileWriteGraph, type PlannedAttestation, ZERO_ADDRESS, ZERO_UID } from './graph.js'
 
@@ -567,4 +567,34 @@ export function validateAddTarget(
     )
   }
   return target
+}
+
+/** MirrorResolver's `MAX_URI_LENGTH` (MirrorResolver.sol): the UTF-8 BYTE cap on a MIRROR
+ * URI. The resolver checks `bytes(uri).length` — UTF-8 bytes, not JS UTF-16 code units. */
+export const MAX_MIRROR_URI_BYTES = 8192
+
+/**
+ * Validate a mirror URI BEFORE it is planned/submitted, throwing a typed
+ * {@link EfsError} (`InvalidArgument`) so the caller never signs a tx that MirrorResolver
+ * can only revert. The resolver rejects an empty URI and one whose UTF-8 byte length
+ * exceeds {@link MAX_MIRROR_URI_BYTES}; in `fs.write` such a revert lands at the L2 MIRROR
+ * batch AFTER the L1 DATA attestation has mined, orphaning a partial write — so preflight.
+ *
+ * @param verb A label for the error message (e.g. `'EFS write'`, `'efs.mirrors.add'`).
+ */
+export function validateMirrorUri(uri: string, verb: string): void {
+  if (uri.trim() === '') {
+    throw new EfsError(
+      `${verb}: a mirror URI is empty. Pass a non-empty URI (e.g. \`ipfs://…\`, \`ar://…\`, \`web3://…\`).`,
+      { code: 'InvalidArgument' },
+    )
+  }
+  // UTF-8 byte length (MirrorResolver checks `bytes(uri).length`, not the JS string length).
+  const byteLength = new TextEncoder().encode(uri).length
+  if (byteLength > MAX_MIRROR_URI_BYTES) {
+    throw new EfsError(
+      `${verb}: the mirror URI is ${byteLength} bytes, over MirrorResolver's ${MAX_MIRROR_URI_BYTES}-byte limit. Use a shorter URI (e.g. a content-addressed \`ipfs://\`/\`ar://\` reference).`,
+      { code: 'InvalidArgument' },
+    )
+  }
 }

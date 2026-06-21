@@ -38,7 +38,7 @@ import type { ReadPublicClient } from '../reads/context.js'
 import { type ResolvePublicClient, resolvePathToAnchor } from '../reads/resolve.js'
 import type { WriteReceipt } from '../types.js'
 import { type EdgeSubmitContext, submitEdgePlan } from './edge-submit.js'
-import { buildMirrorPlan } from './edge.js'
+import { buildMirrorPlan, validateMirrorUri } from './edge.js'
 
 /** How many mirror rows to read per `getDataMirrors` window (matches the fetch
  * engine's page size). */
@@ -123,16 +123,11 @@ export async function resolveMirrorTransport(
   uri: string,
   transport: Hex | undefined,
 ): Promise<Hex> {
-  // 0. Reject an empty/blank URI up front — BEFORE the explicit-transport early return, so
-  // an explicit `transport` can't smuggle an empty URI into the MIRROR plan. MirrorResolver
-  // requires a non-empty URI, so encoding `''` would make the caller sign a tx that can
-  // only revert; fail closed with the same preflight `InvalidArgument` `fs.write` gives.
-  if (uri.trim() === '') {
-    throw new EfsError(
-      'efs.mirrors.add: the mirror URI is empty. Pass a non-empty URI (e.g. `ipfs://…`, `ar://…`, `web3://…`).',
-      { code: 'InvalidArgument' },
-    )
-  }
+  // 0. Validate the URI up front — BEFORE the explicit-transport early return, so an
+  // explicit `transport` can't smuggle an empty OR oversized URI into the MIRROR plan.
+  // MirrorResolver rejects both, so the caller would otherwise sign a tx that can only
+  // revert; fail closed with the same preflight `InvalidArgument` `fs.write` gives.
+  validateMirrorUri(uri, 'efs.mirrors.add')
 
   // 1. Explicit UID — unambiguous; never consult the scheme.
   if (transport !== undefined) return transport

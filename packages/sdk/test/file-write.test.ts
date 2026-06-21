@@ -913,6 +913,20 @@ describe('writeFileTier1 — error paths', () => {
     expect(sent).toHaveLength(0)
   })
 
+  it('throws InvalidArgument for a mirror URI over MirrorResolver’s 8192-byte limit', async () => {
+    // An oversized URI reverts at the L2 MIRROR batch (MAX_URI_LENGTH) — after L1 DATA has
+    // mined — orphaning a partial write. Preflight the UTF-8 byte length before any tx.
+    const huge = `ipfs://${'a'.repeat(8200)}` // > 8192 bytes (all ASCII)
+    const { ctx, deploys, sent } = makeCtx({ transports: { ipfs: TRANSPORT_IPFS } })
+    const err = await writeFileTier1('/docs/readme.md', CONTENT, ctx, {
+      mirrors: [huge],
+    }).catch((e) => e)
+    expect((err as { code?: string }).code).toBe('InvalidArgument')
+    expect(String((err as Error).message)).toMatch(/8192-byte limit/)
+    expect(deploys).toHaveLength(0)
+    expect(sent).toHaveLength(0)
+  })
+
   it('throws MissingTransport for a schemeless caller mirror (before any on-chain resolution)', async () => {
     // A URI with no `scheme:` prefix must be rejected up front: without a scheme the
     // transport fallback would resolve `/transports/` (the transport ROOT) and bind an

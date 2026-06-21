@@ -36,6 +36,7 @@ import {
   splitPath,
 } from '../reads/resolve.js'
 import type { AccountProfile, WriteOptions, WriteReceipt } from '../types.js'
+import { validateMirrorUri } from './edge.js'
 import { buildFileWriteGraph } from './graph.js'
 import {
   DEFAULT_ONCHAIN_AUTO_LIMIT,
@@ -161,18 +162,12 @@ export async function resolveMirrors(
       storageTxCount: 0, // caller hosts the bytes — the SDK sends no storage tx
       mirrors: await Promise.all(
         opts.mirrors.map(async (uri) => {
-          // Reject an empty/blank URI per element, NOT just an empty array: an explicit
+          // Validate each URI per element (not just a non-empty array): an explicit
           // `opts.transportDefinition` makes `transportDefinitionFor` return before the
-          // scheme check, so `mirrors: ['']` would otherwise map an empty URI into the
-          // MIRROR plan — MirrorResolver requires a non-empty URI, so the L2 MIRROR batch
-          // reverts AFTER the L1 DATA has landed, orphaning a partial write. Fail closed
-          // before any tx.
-          if (uri.trim() === '') {
-            throw new EfsError(
-              'EFS write: a supplied mirror URI is empty. Every entry in `mirrors` must be a non-empty URI (e.g. `ipfs://…`, `ar://…`, `web3://…`).',
-              { code: 'InvalidArgument' },
-            )
-          }
+          // scheme check, so an empty OR oversized URI would otherwise map into the MIRROR
+          // plan — MirrorResolver rejects both, and in `fs.write` that L2 revert lands
+          // AFTER the L1 DATA has mined, orphaning a partial write. Fail closed first.
+          validateMirrorUri(uri, 'EFS write')
           return {
             uri,
             transportDefinition: await transportDefinitionFor(

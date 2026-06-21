@@ -199,6 +199,20 @@ describe('resolveMirrorTransport', () => {
     expect((err as { code?: string }).code).toBe('InvalidArgument')
   })
 
+  it('rejects a URI over the 8192-byte MirrorResolver limit (even with an explicit transport)', async () => {
+    const huge = `ipfs://${'a'.repeat(8200)}` // > 8192 UTF-8 bytes
+    const err = await resolveMirrorTransport(
+      makeReadClient(() => {
+        throw new Error('should not read — rejected before any resolution')
+      }) as never,
+      deployment,
+      huge,
+      uid(0xe5b1), // explicit transport present
+    ).catch((e) => e)
+    expect((err as { code?: string }).code).toBe('InvalidArgument')
+    expect(String((err as Error).message)).toMatch(/8192-byte limit/)
+  })
+
   it('an explicit transport UID wins (scheme not consulted)', async () => {
     const out = await resolveMirrorTransport(
       makeReadClient(() => {
