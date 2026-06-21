@@ -464,6 +464,26 @@ describe('writeFileTier1 — resume (not yet implemented)', () => {
   })
 })
 
+describe('writeFileTier1 — foreign lens (not yet honored)', () => {
+  it('throws NotImplemented for a lens other than the connected account', async () => {
+    const { ctx, sent, deploys } = makeCtx()
+    const err = await writeFileTier1('/docs/readme.md', CONTENT, ctx, {
+      lens: addr(0xfeed), // != ACCOUNT (addr(0xacc01)) — Tier-1 always attests as the wallet
+    }).catch((e) => e)
+    // Fail fast rather than silently authoring under the wallet lens (the requested lens
+    // would never see the file). Nothing irreversible ran.
+    expect((err as { code?: string }).code).toBe('NotImplemented')
+    expect(deploys).toHaveLength(0)
+    expect(sent).toHaveLength(0)
+  })
+
+  it('accepts a lens EQUAL to the connected account (harmless no-op)', async () => {
+    const { ctx } = makeCtx()
+    const receipt = await writeFileTier1('/docs/readme.md', CONTENT, ctx, { lens: ACCOUNT })
+    expect(receipt.status).toBe('confirmed')
+  })
+})
+
 describe('writeFileTier1 — read-only planning before irreversible storage', () => {
   it('a failing visibility-tag read aborts BEFORE deploying on-chain bytes (no gas spent)', async () => {
     const { ctx, sent, deploys } = makeCtx()

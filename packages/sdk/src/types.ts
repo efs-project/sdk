@@ -393,9 +393,11 @@ export type WriteOptions = {
   transportDefinition?: Hex
   /**
    * The attester/lens the write authors under. Default: the connected wallet's
-   * account (lenses key on the attester — ADR-0013/0014). Reserved additively;
-   * the Tier-1 path always attests as the wallet account, so a value other than
-   * the connected account is not yet honored (a later slice).
+   * account (lenses key on the attester — ADR-0013/0014). Reserved additively; the
+   * Tier-1 path always attests as the wallet account, so a value OTHER than the
+   * connected account is not yet honored and is REJECTED (`NotImplemented`) rather than
+   * silently authored under the wallet lens — delegated/foreign-lens writes are a later
+   * slice. Passing the connected account (or omitting this) is the supported path.
    */
   lens?: Address
   /**

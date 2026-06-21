@@ -283,6 +283,22 @@ export async function writeFileTier1(
   // under 0x0.
   if (ctx.account === undefined) throw new WalletRequired()
 
+  // Foreign-lens writes are not yet implemented. The Tier-1 path ALWAYS attests as the
+  // connected wallet account (EFS lenses key on the attester), so a different `opts.lens`
+  // cannot be honored without delegated/foreign-attester signing (a later slice).
+  // Accepting it silently would author under the WALLET lens while the caller expects
+  // theirs — so reads/lists through the requested lens would never see the file, with no
+  // signal. Fail fast; a lens equal to the connected account is a harmless no-op.
+  if (opts?.lens !== undefined) {
+    const writer = accountAddress(ctx.account)
+    if (opts.lens.toLowerCase() !== writer.toLowerCase()) {
+      throw new EfsError(
+        `EFS write: writing under a lens (${opts.lens}) other than the connected account (${writer}) is not yet supported — the Tier-1 path attests as the wallet. Omit \`lens\` (or pass the connected account) until delegated/foreign-lens writes land.`,
+        { code: 'NotImplemented' },
+      )
+    }
+  }
+
   // 1. Content identity (ADR-0006: bare SHA-256) + size.
   const contentHash = hashContent(content)
   const size = BigInt(content.byteLength)
