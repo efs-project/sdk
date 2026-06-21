@@ -366,14 +366,15 @@ describe('writeFileTier1 — caller-supplied mirrors', () => {
     const TRANSPORTS_ANCHOR = uid(0x77)
     const WEB3_TRANSPORT = uid(0x78)
     // The transports map has NO web3 entry (like the built-in Sepolia deployment), so the
-    // default on-chain write must resolve /transports/web3 on-chain rather than throwing
-    // MissingTransport.
+    // default on-chain write must resolve the on-chain transport anchor. The web3:// scheme
+    // stores under the anchor named `onchain` (NOT `web3`), so the walk resolves
+    // /transports/onchain.
     const { ctx, sent } = makeCtx({
       transports: {},
       edges: {
         [`${ROOT}|docs`]: DOCS_ANCHOR,
         [`${ROOT}|transports`]: TRANSPORTS_ANCHOR,
-        [`${TRANSPORTS_ANCHOR}|web3`]: WEB3_TRANSPORT,
+        [`${TRANSPORTS_ANCHOR}|onchain`]: WEB3_TRANSPORT,
       },
     })
     await writeFileTier1('/docs/readme.md', CONTENT, ctx) // no mirrors → on-chain storage
@@ -812,9 +813,8 @@ describe('writeFileTier1 — error paths', () => {
     const err = await writeFileTier1('/docs/readme.md', CONTENT, ctx).catch((e) => e)
     expect(err).toBeInstanceOf(Error)
     expect((err as { code?: string }).code).toBe('MissingTransport')
-    expect(String((err as Error).message)).toMatch(/transports\/web3/)
-    // The transport is looked up AFTER the deploys, but a missing one still surfaces.
-    // (Deploys may have run; the point is the write fails clearly, not silently.)
+    // web3:// resolves the on-chain anchor named `onchain` (not `web3`).
+    expect(String((err as Error).message)).toMatch(/transports\/onchain/)
     void deploys
   })
 

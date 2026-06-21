@@ -122,6 +122,13 @@ library EFSLib {
     /// @param  mirrors             Retrieval methods to publish (one MIRROR each). May be empty.
     /// @param  reservedKeys        Reserved-key triplets to bind (contentType/contentHash/size).
     ///         May be empty (e.g. a minimal file with no metadata).
+    /// @param  existingFileAnchorUID OVERWRITE support: the pre-existing file-ANCHOR UID for this
+    ///         `(parentAnchorUID, fileName)` when overwriting a path; `bytes32(0)` to mint a fresh
+    ///         anchor (a new file). A file-ANCHOR is permanent/non-revocable, so re-minting the same
+    ///         `(parent, name, DATA)` slot reverts (`DuplicateFileName`) — to overwrite, resolve the
+    ///         existing anchor (`EFSReader.resolveAnchor(parent, fileName, schemas.data)`) and pass
+    ///         it here; {writeFile} then reuses it and the new placement PIN supersedes the prior
+    ///         one (cardinality-1). The DATA/MIRRORs/reserved-key PROPERTYs are always minted fresh.
     /// @dev    The file-ANCHOR's `forSchema` is ALWAYS the DATA schema UID (`schemas.data`),
     ///         never caller-supplied: the EFSIndexer keys anchors by `(parent, name, forSchema)`,
     ///         the router resolves a file's terminal segment via
@@ -134,6 +141,7 @@ library EFSLib {
         string fileName;
         Mirror[] mirrors;
         ReservedKey[] reservedKeys;
+        bytes32 existingFileAnchorUID;
     }
 
     /// @notice Compose the full file-write attestation graph in one transaction, threading the
@@ -175,8 +183,13 @@ library EFSLib {
         // resolved from refUID (:396). data = abi.encode(name, forSchema). forSchema is the
         // DATA schema UID (NOT generic) — a file slot is `(parent, name, DATA_SCHEMA_UID)`;
         // a generic file would land in the folder bucket and miss file listings.
-        fileAnchorUID =
-            _attestAnchor(eas, w.schemas.anchor, w.fileName, w.schemas.data, w.parentAnchorUID);
+        //
+        // OVERWRITE: reuse the caller-supplied existing file-ANCHOR when set (a permanent
+        // anchor slot can't be re-minted — that reverts). The placement PIN below then
+        // supersedes the prior placement (cardinality-1). Else mint a fresh anchor.
+        fileAnchorUID = w.existingFileAnchorUID != EMPTY_UID
+            ? w.existingFileAnchorUID
+            : _attestAnchor(eas, w.schemas.anchor, w.fileName, w.schemas.data, w.parentAnchorUID);
 
         // ── L2: MIRROR ×N — retrieval methods bound to DATA ───────────────────────────────────
         // MirrorResolver.onAttest: refUID must resolve to a DATA attestation (:154-157),

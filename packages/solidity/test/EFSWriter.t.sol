@@ -256,6 +256,27 @@ contract EFSWriterTest is Test {
         assertEq(c2.attester, address(consumer), "PIN attester = consumer (inlined)");
     }
 
+    /// @notice Overwrite: `existingFileAnchorUID` set ⇒ NO file-ANCHOR mint; the placement PIN
+    ///         supersedes the prior one at the reused (permanent) anchor.
+    function test_WriteFile_ReusesExistingFileAnchor() public {
+        EFSLib.FileWrite memory w = _minimalWrite();
+        bytes32 existing = keccak256("existing_file_anchor");
+        w.existingFileAnchorUID = existing;
+
+        vm.prank(ALICE);
+        (bytes32 dataUID, bytes32 fileAnchorUID, bytes32 pinUID) = consumer.writeFile(w);
+
+        // DATA + placement PIN only — the permanent file-ANCHOR is reused, not re-minted.
+        assertEq(eas.callCount(), 2, "overwrite = DATA + placement PIN (no anchor mint)");
+        assertEq(fileAnchorUID, existing, "returns the reused anchor");
+
+        MockEAS.Call memory pin = eas.callAt(1);
+        assertEq(pin.schema, schemas.pin, "call 1 = placement PIN");
+        assertEq(pin.data, abi.encode(existing), "PIN definition = the reused anchor");
+        assertEq(pin.refUID, dataUID, "PIN refUID = the fresh DATA");
+        assertEq(pinUID, _uid(1), "returned placement-PIN UID");
+    }
+
     /// @notice Full graph: DATA, file-ANCHOR, 1 MIRROR, 2 reserved-key triplets, placement-PIN.
     function test_FullWrite_OrderThreadingAndConstraints() public {
         EFSLib.FileWrite memory w = _minimalWrite();

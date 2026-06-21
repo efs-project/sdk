@@ -75,17 +75,21 @@ async function transportDefinitionFor(
   const mapped = opts?.transportDefinition ?? deployment.transports?.[key]
   if (mapped !== undefined) return mapped
 
-  // On-chain fallback: resolve the `/transports/<key>` anchor (a missing one throws
-  // ParentNotFoundError from the path walk — re-thrown as the typed MissingTransport).
+  // On-chain fallback: resolve the `/transports/<segment>` anchor. The path SEGMENT is
+  // NOT always the scheme key: `web3://` bytes are stored under the on-chain anchor named
+  // `onchain` (the `transports` map key is `web3`, but the bootstrap anchor is `onchain` —
+  // see test/fixtures/local-deployment.ts). A missing anchor throws ParentNotFoundError
+  // from the path walk — re-thrown as the typed MissingTransport.
+  const segment = key === 'web3' ? 'onchain' : key
   try {
     return await resolvePathToAnchor(
       publicClient as never,
       deployment.contracts.indexer,
-      `/transports/${key}`,
+      `/transports/${segment}`,
     )
   } catch (cause) {
     throw new EfsError(
-      `EFS write: no transport definition for scheme '${key}'. Pass \`opts.transportDefinition\` (the on-chain /transports/${key} anchor UID), or use a deployment whose \`transports\` map records it (the deploy seeds these).`,
+      `EFS write: no transport definition for scheme '${key}'. Pass \`opts.transportDefinition\` (the on-chain /transports/${segment} anchor UID), or use a deployment whose \`transports\` map records it (the deploy seeds these).`,
       { code: 'MissingTransport', cause },
     )
   }

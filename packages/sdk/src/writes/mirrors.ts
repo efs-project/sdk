@@ -139,14 +139,16 @@ export async function resolveMirrorTransport(
   const mapped = deployment.transports?.[key]
   if (mapped !== undefined) return mapped
 
-  // 3. Fall back to resolving the /transports/<scheme> anchor on-chain. A missing
-  // anchor throws `ParentNotFoundError` from the path walk — re-thrown as the typed
-  // MissingTransport so the caller gets one stable code regardless of resolution path.
+  // 3. Fall back to resolving the /transports/<segment> anchor on-chain. The path SEGMENT
+  // is not always the map key: web3:// bytes live under the anchor named `onchain` (key
+  // `web3`). A missing anchor throws `ParentNotFoundError` from the path walk — re-thrown
+  // as the typed MissingTransport so the caller gets one stable code.
+  const segment = key === 'web3' ? 'onchain' : key
   try {
     return await resolvePathToAnchor(
       publicClient,
       deployment.contracts.indexer,
-      `/transports/${key}`,
+      `/transports/${segment}`,
     )
   } catch (cause) {
     throw new EfsError(
