@@ -487,6 +487,35 @@ describe('writeFileTier1 — abort signal', () => {
   })
 })
 
+describe('writeFileTier1 — onProgress', () => {
+  it('fires opts.onProgress once per layer with a consistent step/total', async () => {
+    const { ctx } = makeCtx()
+    const events: { step: number; total: number; phase: string }[] = []
+    await writeFileTier1('/docs/readme.md', CONTENT, ctx, {
+      onProgress: (p) => events.push(p),
+    })
+    // The DAG fires onLayer after each layer mines, so onProgress must fire at least
+    // once (the documented callback was previously never wired → never invoked).
+    expect(events.length).toBeGreaterThanOrEqual(1)
+    // Every event shares the same total (the DAG's layer count) and reports an
+    // in-range, strictly increasing layer step; phase is the layer-confirmed label.
+    const total = events[0]?.total ?? 0
+    expect(total).toBeGreaterThanOrEqual(events.length)
+    events.forEach((e, i) => {
+      expect(e.total).toBe(total)
+      expect(e.step).toBe((events[i - 1]?.step ?? 0) + 1)
+      expect(e.step).toBeLessThanOrEqual(total)
+      expect(e.phase).toBe('layer-confirmed')
+    })
+  })
+
+  it('omitting onProgress is a no-op (write still succeeds)', async () => {
+    const { ctx } = makeCtx()
+    const receipt = await writeFileTier1('/docs/readme.md', CONTENT, ctx)
+    expect(receipt.status).toBe('confirmed')
+  })
+})
+
 describe('writeFileTier1 — on-chain storage overrides + caps', () => {
   it('{ storage: "onchain" } stores on-chain even with no mirrors (and over the cap)', async () => {
     // Cap set to 2 bytes; CONTENT is 4 bytes → would normally throw PayloadTooLarge.

@@ -275,12 +275,19 @@ export async function info(ctx: ReadContext, path: string, opts?: ReadOpts): Pro
   const placement = await resolvePlacement(ctx, path, opts)
   if (!placement) {
     // Absent under the lens — a normal empty, not an error. Provenance still present.
-    return {
+    const absent: FileInfo = {
       exists: false,
       resolvedBy: '0x0000000000000000000000000000000000000000' as Address,
       verified: 'unchecked',
       sourceUIDs: {},
     }
+    // `expand:['attestations']` narrows `.attestations` to a NON-optional field at the
+    // type level (see `Expanded<FileInfo, E>` / index.ts). An absent file has no source
+    // UIDs, so attach an EMPTY bag rather than omitting the field — otherwise a caller
+    // who relies on the narrowed type dereferences `info.attestations` and gets
+    // `undefined` at runtime. Empty bag keeps the runtime shape consistent with the type.
+    if (wantsAttestations(opts?.expand)) absent.attestations = {}
+    return absent
   }
 
   const { dataUID, resolvedBy, placementPinUID } = placement

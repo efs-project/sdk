@@ -45,7 +45,7 @@ import {
   storeOnchain,
 } from './onchain.js'
 import { selectSingle } from './select.js'
-import type { SubmitPublicClient, SubmitWalletClient } from './submit.js'
+import type { LayerResult, SubmitPublicClient, SubmitWalletClient } from './submit.js'
 import type { SubmitterContext } from './submitter.js'
 
 /** Extract the URI scheme (`ipfs` from `ipfs://Qm…`, `web3` from `web3://0x…`). */
@@ -379,6 +379,14 @@ export async function writeFileTier1(
 
   // 6. Submit via the seam. The attester is the connected account (lenses key on
   // it, computed in step 3a); `opts.lens` is reserved but not yet honored on Tier-1.
+  //
+  // Map the public `opts.onProgress` to the submitter's per-layer `onLayer` event so a
+  // caller driving UI from it advances as each layer's `multiAttest` lands (the layered
+  // submitter fires `onLayer` once per layer, AFTER it mines). `total` is the DAG's
+  // layer count; `step` is the layer that just confirmed. Without this wiring the
+  // documented callback never fires and progress-driven UI stalls until the receipt.
+  const onProgress = opts?.onProgress
+  const totalLayers = plan.attestations.reduce((m, a) => Math.max(m, a.layer), 0)
   const submitterCtx: SubmitterContext = {
     walletClient: ctx.walletClient,
     publicClient: ctx.publicClient,
@@ -391,6 +399,12 @@ export async function writeFileTier1(
     // Forwarded so the layered submitter bails between layers (before each
     // irreversible multiAttest) if the caller aborts mid-write.
     ...(opts?.signal !== undefined ? { signal: opts.signal } : {}),
+    ...(onProgress !== undefined
+      ? {
+          onLayer: (event: LayerResult) =>
+            onProgress({ step: event.layer, total: totalLayers, phase: 'layer-confirmed' }),
+        }
+      : {}),
   }
   return submitter.submit(plan, submitterCtx)
 }

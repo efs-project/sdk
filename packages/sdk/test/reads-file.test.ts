@@ -432,6 +432,18 @@ describe('info', () => {
     expect(i.verified).toBe('unchecked')
   })
 
+  it('absent + expand:["attestations"] returns an EMPTY attestations bag (not undefined)', async () => {
+    // The generic signature narrows `.attestations` to a non-optional field when
+    // expand opts in. On absence there are no source UIDs — but the runtime must still
+    // carry the field (an empty bag), else a caller relying on the narrowed type
+    // dereferences `undefined`. Provenance stays present; exists is still false.
+    const ctx = makeCtx({ edges: README_EDGES, files: [] })
+    const i = await info(ctx, '/docs/readme.md', { lens: LENS, expand: ['attestations'] })
+    expect(i.exists).toBe(false)
+    expect(i).toHaveProperty('attestations')
+    expect(i.attestations).toEqual({})
+  })
+
   it('reports exists:true with size + contentType from the reserved PROPERTYs (lens-scoped)', async () => {
     const sizeAnchor = uid(0x5102)
     const typeAnchor = uid(0xc19e)
