@@ -146,6 +146,12 @@ export interface SubmitContext {
   readonly chain?: unknown
   /** Optional progress hook, fired once per layer with the layer's outcome. */
   readonly onLayer?: (event: LayerResult) => void
+  /**
+   * Optional cancellation signal. Checked before each layer's irreversible
+   * `multiAttest` — never mid-flight, since a tx already sent cannot be unsent.
+   * Aborting between layers leaves a partial write (same boundary as a revert).
+   */
+  readonly signal?: AbortSignal
 }
 
 /** What one layer's `multiAttest` produced. */
@@ -422,6 +428,10 @@ export async function submitLayeredTier1(
   for (const layer of layersOf(plan)) {
     const layerAtts = plan.attestations.filter((a) => a.layer === layer)
     if (layerAtts.length === 0) continue
+
+    // Cancellation boundary: bail BEFORE sending this layer's irreversible
+    // multiAttest. Never checked mid-flight — a tx already broadcast can't be unsent.
+    ctx.signal?.throwIfAborted()
 
     // Resolve symbols against prior layers' UIDs, group by schema, capture the
     // flat ref order EAS will emit in.

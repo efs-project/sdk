@@ -21,9 +21,13 @@ compiles standalone. Add these remappings to your project:
 **Foundry** — `remappings.txt`:
 
 ```
-@efs/solidity/=node_modules/@efs/solidity/src/
+@efs/solidity/=node_modules/@efs/solidity/
 @ethereum-attestation-service/eas-contracts/=node_modules/@efs/solidity/vendor/eas-contracts/
 ```
+
+The import `@efs/solidity/src/EFSWriter.sol` then resolves to
+`node_modules/@efs/solidity/src/EFSWriter.sol` (the remapping points at the package
+root; the `src/` is part of the import path).
 
 > If your project already depends on `eas-contracts`, point the second remapping at
 > your own copy instead — the vendored sources are identical, so either resolves.

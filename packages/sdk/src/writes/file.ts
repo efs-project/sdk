@@ -62,10 +62,14 @@ function transportDefinitionFor(
   deployment: EfsDeployment,
   opts: WriteOptions | undefined,
 ): Hex {
-  const transportDefinition = opts?.transportDefinition ?? deployment.transports?.[scheme]
+  // Normalize the `ar://` alias to the canonical `arweave` transport key (matching
+  // mirror/transport.ts's resolveArweave and the standalone mirrors.add path) — else a
+  // valid `ar://` write misses the map and throws MissingTransport.
+  const key = scheme === 'ar' ? 'arweave' : scheme
+  const transportDefinition = opts?.transportDefinition ?? deployment.transports?.[key]
   if (transportDefinition === undefined) {
     throw new EfsError(
-      `EFS write: no transport definition for scheme '${scheme}'. Pass \`opts.transportDefinition\` (the on-chain /transports/${scheme} anchor UID), or use a deployment whose \`transports\` map records it (the deploy seeds these).`,
+      `EFS write: no transport definition for scheme '${key}'. Pass \`opts.transportDefinition\` (the on-chain /transports/${key} anchor UID), or use a deployment whose \`transports\` map records it (the deploy seeds these).`,
       { code: 'MissingTransport' },
     )
   }
@@ -173,6 +177,9 @@ export async function writeFileTier1(
 ): Promise<WriteReceipt> {
   const { deployment } = ctx
 
+  // Cancellation: bail before any work if the caller already aborted.
+  opts?.signal?.throwIfAborted()
+
   // 1. Content identity (ADR-0006: bare SHA-256) + size.
   const contentHash = hashContent(content)
   const size = BigInt(content.byteLength)
@@ -211,6 +218,8 @@ export async function writeFileTier1(
 
   // 3. Mirror + transport-definition. With no caller `mirrors` this STORES the
   // bytes on-chain (SSTORE2) and yields a web3:// mirror — the zero-infra default.
+  // Check the abort signal FIRST: on-chain storage is the first irreversible step.
+  opts?.signal?.throwIfAborted()
   const { mirrors, transportDefinition } = await resolveMirrors(content, ctx, opts)
 
   // 3a. Folder-visibility TAGs (overview.md "Upload flow" step 7; ADR-0038/0041).
@@ -289,6 +298,9 @@ export async function writeFileTier1(
     attester,
     ...(ctx.account !== undefined ? { account: ctx.account } : {}),
     ...(ctx.chain !== undefined ? { chain: ctx.chain } : {}),
+    // Forwarded so the layered submitter bails between layers (before each
+    // irreversible multiAttest) if the caller aborts mid-write.
+    ...(opts?.signal !== undefined ? { signal: opts.signal } : {}),
   }
   return submitter.submit(plan, submitterCtx)
 }

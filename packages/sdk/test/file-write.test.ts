@@ -351,6 +351,55 @@ describe('writeFileTier1 — caller-supplied mirrors', () => {
     })
     expect(deploys).toHaveLength(0)
   })
+
+  it('normalizes an ar:// mirror to the canonical arweave transport key', async () => {
+    const ARWEAVE = uid(0x2a) // /transports/arweave anchor UID
+    // The map is keyed by `arweave`, but the URI scheme is `ar` — must normalize,
+    // else a valid ar:// write throws MissingTransport.
+    const { ctx, sent } = makeCtx({ transports: { arweave: ARWEAVE } })
+    await writeFileTier1('/docs/readme.md', CONTENT, ctx, {
+      mirrors: ['ar://abcdEFGHtxid'],
+    })
+    const { SchemaEncoder } = await import('../src/eas/schema-encoder.js')
+    const { EFS_SCHEMA_FIELDS } = await import('../src/eas/schemas.js')
+    const mirrorEnc = new SchemaEncoder(EFS_SCHEMA_FIELDS.mirror)
+    const mirrorEntry = sent[1].entries.find((e) => e.schema === SCHEMAS.mirror)
+    const [transportDef, uriValue] = mirrorEnc.decodeData(mirrorEntry!.data) as [Hex, string]
+    expect(transportDef).toBe(ARWEAVE) // ar → arweave
+    expect(uriValue).toBe('ar://abcdEFGHtxid')
+  })
+})
+
+describe('writeFileTier1 — abort signal', () => {
+  it('throws before any work when the signal is already aborted', async () => {
+    const { ctx, sent, deploys } = makeCtx()
+    await expect(
+      writeFileTier1('/docs/readme.md', CONTENT, ctx, { signal: AbortSignal.abort() }),
+    ).rejects.toThrow()
+    // No irreversible step ran: nothing deployed, nothing attested.
+    expect(deploys).toHaveLength(0)
+    expect(sent).toHaveLength(0)
+  })
+
+  it('bails between layers when aborted mid-write (partial, not all layers sent)', async () => {
+    const { ctx, sent } = makeCtx()
+    const controller = new AbortController()
+    const orig = ctx.walletClient.writeContract.bind(ctx.walletClient)
+    let layers = 0
+    // Abort right after the first layer's multiAttest mines — the per-layer check
+    // must stop the next layer.
+    ;(ctx.walletClient as { writeContract: unknown }).writeContract = async (a: unknown) => {
+      const hash = await (orig as (x: unknown) => Promise<Hex>)(a)
+      if (++layers === 1) controller.abort()
+      return hash
+    }
+    await expect(
+      writeFileTier1('/docs/readme.md', CONTENT, ctx, { signal: controller.signal }),
+    ).rejects.toThrow()
+    // The file write is a 3-layer DAG; aborting after layer 1 must leave it short.
+    expect(sent.length).toBeGreaterThanOrEqual(1)
+    expect(sent.length).toBeLessThan(3)
+  })
 })
 
 describe('writeFileTier1 — on-chain storage overrides + caps', () => {
