@@ -169,10 +169,9 @@ contract ConsumerMock is EFSWriter {
         EFSLib.SchemaUIDs memory schemas,
         bytes32 dataUID,
         bytes32 parentAnchorUID,
-        string memory fileName,
-        bytes32 forSchema
+        string memory fileName
     ) external returns (bytes32 fileAnchorUID, bytes32 placementPinUID) {
-        return _efsPlaceExisting(schemas, dataUID, parentAnchorUID, fileName, forSchema);
+        return _efsPlaceExisting(schemas, dataUID, parentAnchorUID, fileName);
     }
 }
 
@@ -210,7 +209,6 @@ contract EFSWriterTest is Test {
         w.schemas = schemas;
         w.parentAnchorUID = PARENT;
         w.fileName = "hello.txt";
-        w.forSchema = bytes32(0);
         // empty mirrors + reservedKeys
     }
 
@@ -239,7 +237,9 @@ contract EFSWriterTest is Test {
         assertEq(c1.schema, schemas.anchor, "c1 schema = ANCHOR");
         assertEq(c1.refUID, PARENT, "file-ANCHOR refUID = parent");
         assertEq(c1.revocable, false, "ANCHOR non-revocable");
-        assertEq(c1.data, abi.encode("hello.txt", bytes32(0)), "ANCHOR data = (name, forSchema)");
+        assertEq(
+            c1.data, abi.encode("hello.txt", schemas.data), "file-ANCHOR data = (name, DATA schema)"
+        );
         assertEq(fileAnchorUID, _uid(1), "returned fileAnchorUID = call-1 UID");
 
         // Call 2: placement-PIN — definition = file-ANCHOR (threaded), refUID = DATA (threaded)
@@ -342,7 +342,7 @@ contract EFSWriterTest is Test {
 
         vm.prank(ALICE);
         (bytes32 fileAnchorUID, bytes32 pinUID) =
-            consumer.placeExisting(schemas, existingData, PARENT, "linked.txt", bytes32(0));
+            consumer.placeExisting(schemas, existingData, PARENT, "linked.txt");
 
         assertEq(eas.callCount(), 2, "hardlink = 2 attestations (anchor + pin)");
 
@@ -351,7 +351,9 @@ contract EFSWriterTest is Test {
         assertEq(anchor.schema, schemas.anchor, "hardlink anchor schema");
         assertEq(anchor.refUID, PARENT, "hardlink anchor refUID = parent");
         assertEq(anchor.revocable, false, "hardlink anchor non-revocable");
-        assertEq(anchor.data, abi.encode("linked.txt", bytes32(0)), "hardlink anchor data");
+        assertEq(
+            anchor.data, abi.encode("linked.txt", schemas.data), "hardlink anchor data (DATA-typed)"
+        );
         assertEq(fileAnchorUID, _uid(0));
 
         // 1: placement-PIN pointing at the PRE-EXISTING DATA (no fresh DATA minted)

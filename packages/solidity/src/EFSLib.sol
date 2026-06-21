@@ -119,16 +119,19 @@ library EFSLib {
     /// @param  schemas             The frozen EFS schema UID set for the target deployment.
     /// @param  parentAnchorUID     Pre-existing parent folder anchor UID (the file-ANCHOR's refUID).
     /// @param  fileName            The file's anchor name (canonical encoding; verbatim).
-    /// @param  forSchema           The file-ANCHOR's `forSchema` content-type field. Generic
-    ///         (`bytes32(0)`) for a plain file, matching graph.ts's `GENERIC_FOR_SCHEMA`.
     /// @param  mirrors             Retrieval methods to publish (one MIRROR each). May be empty.
     /// @param  reservedKeys        Reserved-key triplets to bind (contentType/contentHash/size).
     ///         May be empty (e.g. a minimal file with no metadata).
+    /// @dev    The file-ANCHOR's `forSchema` is ALWAYS the DATA schema UID (`schemas.data`),
+    ///         never caller-supplied: the EFSIndexer keys anchors by `(parent, name, forSchema)`,
+    ///         the router resolves a file's terminal segment via
+    ///         `resolveAnchor(parent, name, DATA_SCHEMA_UID)`, and directory listing enumerates
+    ///         only the DATA bucket — so a file MUST be DATA-typed or it lands in the folder
+    ///         bucket (invisible to file listings, colliding with a same-named folder).
     struct FileWrite {
         SchemaUIDs schemas;
         bytes32 parentAnchorUID;
         string fileName;
-        bytes32 forSchema;
         Mirror[] mirrors;
         ReservedKey[] reservedKeys;
     }
@@ -169,9 +172,11 @@ library EFSLib {
 
         // ── L2: file-ANCHOR — names the path under the parent folder ──────────────────────────
         // EFSIndexer ANCHOR branch: non-revocable (:376), expirationTime 0 (:380), parent
-        // resolved from refUID (:396). data = abi.encode(name, forSchema).
+        // resolved from refUID (:396). data = abi.encode(name, forSchema). forSchema is the
+        // DATA schema UID (NOT generic) — a file slot is `(parent, name, DATA_SCHEMA_UID)`;
+        // a generic file would land in the folder bucket and miss file listings.
         fileAnchorUID =
-            _attestAnchor(eas, w.schemas.anchor, w.fileName, w.forSchema, w.parentAnchorUID);
+            _attestAnchor(eas, w.schemas.anchor, w.fileName, w.schemas.data, w.parentAnchorUID);
 
         // ── L2: MIRROR ×N — retrieval methods bound to DATA ───────────────────────────────────
         // MirrorResolver.onAttest: refUID must resolve to a DATA attestation (:154-157),
@@ -231,22 +236,22 @@ library EFSLib {
     ///         minted — it names the new path — and the placement PIN points its `refUID` at the
     ///         pre-existing DATA (graph.ts hardlink branch).
     /// @param  eas             The EAS instance to attest against.
-    /// @param  schemas         The frozen schema UID set (only `anchor` and `pin` are used).
+    /// @param  schemas         The frozen schema UID set (`anchor`, `pin`, `data` are used).
     /// @param  dataUID         The pre-existing DATA UID to place.
     /// @param  parentAnchorUID Pre-existing parent folder anchor UID (the file-ANCHOR's refUID).
     /// @param  fileName        The file's anchor name (verbatim).
-    /// @param  forSchema       The file-ANCHOR's `forSchema` field (generic = bytes32(0)).
     /// @return fileAnchorUID   The created file-ANCHOR UID.
     /// @return placementPinUID The created placement-PIN UID.
+    /// @dev    The file-ANCHOR's `forSchema` is the DATA schema UID (a file slot is
+    ///         `(parent, name, DATA_SCHEMA_UID)`), NOT generic — same rule as {writeFile}.
     function placeExisting(
         IEAS eas,
         SchemaUIDs memory schemas,
         bytes32 dataUID,
         bytes32 parentAnchorUID,
-        string memory fileName,
-        bytes32 forSchema
+        string memory fileName
     ) internal returns (bytes32 fileAnchorUID, bytes32 placementPinUID) {
-        fileAnchorUID = _attestAnchor(eas, schemas.anchor, fileName, forSchema, parentAnchorUID);
+        fileAnchorUID = _attestAnchor(eas, schemas.anchor, fileName, schemas.data, parentAnchorUID);
         placementPinUID = _attestPin(eas, schemas.pin, fileAnchorUID, dataUID);
     }
 

@@ -149,9 +149,12 @@ describe('file-ANCHOR node', () => {
     expect(isSymbolicRef(a.refUID)).toBe(false)
   })
 
-  it('encodes (name=fileName, forSchema=generic) and round-trips', () => {
-    expect(a.data).toBe(anchorEnc.encodeData(['readme.md', ZERO_UID]))
-    expect(anchorEnc.decodeData(a.data)).toEqual(['readme.md', ZERO_UID])
+  it('encodes (name=fileName, forSchema=DATA schema) and round-trips', () => {
+    // A file anchor MUST be DATA-typed — the kernel keys anchors by (parent, name,
+    // forSchema); a generic file would land in the folder bucket and miss file
+    // listings (EFSFileView Phase 1 reads only the DATA bucket). Folders stay generic.
+    expect(a.data).toBe(anchorEnc.encodeData(['readme.md', SCHEMAS.data]))
+    expect(anchorEnc.decodeData(a.data)).toEqual(['readme.md', SCHEMAS.data])
   })
 })
 

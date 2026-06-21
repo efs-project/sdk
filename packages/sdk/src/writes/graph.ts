@@ -518,15 +518,23 @@ function parentRefFor(input: FileWriteGraphInput): RefOrUID {
   return missing.length > 0 ? { ref: REF.parentFolder(missing.length - 1) } : input.parentAnchorUID
 }
 
-/** Build the file-ANCHOR: name = fileName, forSchema = generic, refUID = parent.
- * `layer` is the parent's layer + 1 (base layer 2, shifted by created folders). */
+/** Build the file-ANCHOR: name = fileName, forSchema = DATA schema, refUID = parent.
+ * `layer` is the parent's layer + 1 (base layer 2, shifted by created folders).
+ *
+ * forSchema MUST be the DATA schema UID, NOT generic. The EFSIndexer keys anchors by
+ * `(parent, name, forSchema)`: the router resolves a file's terminal segment via
+ * `resolveAnchor(parent, name, DATA_SCHEMA_UID)` (EFSRouter.sol:240-245) and directory
+ * listing enumerates only `_childrenBySchema[parent][DATA_SCHEMA_UID]`
+ * (EFSFileView.sol:371). A file written generic (`bytes32(0)`) lands in the FOLDER
+ * bucket — invisible to file listings and colliding with a same-named folder. Folders
+ * stay generic (see {@link buildMissingParentAnchors}). */
 function buildFileAnchor(input: FileWriteGraphInput, layer: number): PlannedAttestation {
   return {
     ref: REF.FILE_ANCHOR,
     layer,
     kind: 'ANCHOR',
     schema: input.schemas.anchor,
-    data: anchorEncoder.encodeData([input.fileName, GENERIC_FOR_SCHEMA]),
+    data: anchorEncoder.encodeData([input.fileName, input.schemas.data]),
     revocable: false, // EFSIndexer.sol:376 — anchors are non-revocable
     // The parent is the pre-existing folder (concrete Hex) OR — when ancestors are
     // created in this write — the last created folder (symbolic). EFSIndexer

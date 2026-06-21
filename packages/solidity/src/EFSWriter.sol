@@ -50,23 +50,20 @@ abstract contract EFSWriter {
     ///         {EFSFileWritten}.
     /// @dev    Delegates to {EFSLib.placeExisting} (the dedup short-circuit). Emits the same event
     ///         as a full write so consumers index placements uniformly.
-    /// @param  schemas         The frozen schema UID set (only `anchor` and `pin` are used).
+    /// @param  schemas         The frozen schema UID set (`anchor`, `pin`, `data` are used).
     /// @param  dataUID         The pre-existing DATA UID to place.
     /// @param  parentAnchorUID Pre-existing parent folder anchor UID.
     /// @param  fileName        The file's anchor name (verbatim).
-    /// @param  forSchema       The file-ANCHOR's `forSchema` field (generic = bytes32(0)).
-    /// @return fileAnchorUID   The created file-ANCHOR UID.
+    /// @return fileAnchorUID   The created file-ANCHOR UID (DATA-typed file slot).
     /// @return placementPinUID The created placement-PIN UID.
     function _efsPlaceExisting(
         EFSLib.SchemaUIDs memory schemas,
         bytes32 dataUID,
         bytes32 parentAnchorUID,
-        string memory fileName,
-        bytes32 forSchema
+        string memory fileName
     ) internal returns (bytes32 fileAnchorUID, bytes32 placementPinUID) {
-        (fileAnchorUID, placementPinUID) = EFSLib.placeExisting(
-            EAS, schemas, dataUID, parentAnchorUID, fileName, forSchema
-        );
+        (fileAnchorUID, placementPinUID) =
+            EFSLib.placeExisting(EAS, schemas, dataUID, parentAnchorUID, fileName);
         emit EFSFileWritten(fileAnchorUID, dataUID, placementPinUID);
     }
 
