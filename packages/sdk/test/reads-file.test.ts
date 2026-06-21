@@ -295,6 +295,22 @@ describe('locate', () => {
     expect(res?.resolvedBy).toBe(LENS)
   })
 
+  it('resolves a DATA-typed file anchor that is NOT in the generic folder slot', async () => {
+    // The SDK writes file anchors at (parent, name, DATA_SCHEMA_UID). Here the leaf
+    // 'readme.md' exists ONLY in the DATA slot (via keyAnchors → resolveAnchor), NOT in
+    // the generic `edges` (resolvePath) — a generic-only walk would report it absent.
+    // This is the read-side of the file-anchor fix: SDK-written files must resolve.
+    const ctx = makeCtx({
+      edges: { [`${ROOT}|docs`]: DOCS_ANCHOR }, // parent folder only (generic)
+      keyAnchors: { [`${DOCS_ANCHOR}|readme.md`]: FILE_ANCHOR }, // DATA-typed file leaf
+      placementPins: README_PLACEMENT,
+      files: [fileItem({})],
+    })
+    const res = await locate(ctx, '/docs/readme.md', { lens: LENS })
+    expect(res).not.toBeNull()
+    expect(res?.data.uid).toBe(DATA_UID)
+  })
+
   it('returns null when the file anchor does not exist', async () => {
     const ctx = makeCtx({ edges: { [`${ROOT}|docs`]: DOCS_ANCHOR }, files: [] })
     expect(await locate(ctx, '/docs/missing.md', { lens: LENS })).toBeNull()
@@ -551,6 +567,62 @@ describe('read + read(ref)', () => {
       verify: false,
     })
     expect(file.verification).toBe('no-claim')
+  })
+
+  it('read() uses the ATTESTED contentType, never the transport/data-uri mime', async () => {
+    const hashAnchor = uid(0x4a54)
+    const hashProp = uid(0x4a51)
+    const typeAnchor = uid(0xc1de)
+    const typeProp = uid(0xc1df)
+    const ctx = makeCtx({
+      edges: README_EDGES,
+      files: [fileItem({})],
+      placementPins: README_PLACEMENT,
+      keyAnchors: {
+        [`${DATA_UID}|contentHash`]: hashAnchor,
+        [`${DATA_UID}|contentType`]: typeAnchor,
+      },
+      pinTargets: {
+        [`${hashAnchor}|${LENS.toLowerCase()}`]: hashProp,
+        [`${typeAnchor}|${LENS.toLowerCase()}`]: typeProp,
+      },
+      attestations: {
+        [hashProp]: propertyData(GOOD_HASH),
+        [typeProp]: propertyData('application/x-attested'),
+      },
+      mirrors: [{ uri: dataUri, attester: LENS }], // the data: URI mime is text/markdown
+    })
+    const file = await read(ctx, '/docs/readme.md', { lens: LENS })
+    expect(file.contentType).toBe('application/x-attested') // attested, not 'text/markdown'
+    expect(file.verification).toBe('matches-author')
+  })
+
+  it('read() enforces the attested size — a body exceeding the declared size is rejected', async () => {
+    const hashAnchor = uid(0x4a54)
+    const hashProp = uid(0x4a51)
+    const sizeAnchor = uid(0x5102)
+    const sizeProp = uid(0x5170)
+    const ctx = makeCtx({
+      edges: README_EDGES,
+      files: [fileItem({})],
+      placementPins: README_PLACEMENT,
+      keyAnchors: {
+        [`${DATA_UID}|contentHash`]: hashAnchor,
+        [`${DATA_UID}|size`]: sizeAnchor,
+      },
+      pinTargets: {
+        [`${hashAnchor}|${LENS.toLowerCase()}`]: hashProp,
+        [`${sizeAnchor}|${LENS.toLowerCase()}`]: sizeProp,
+      },
+      attestations: {
+        [hashProp]: propertyData(GOOD_HASH),
+        [sizeProp]: propertyData('4'), // declared 4 bytes, but the body is 12
+      },
+      mirrors: [{ uri: dataUri, attester: LENS }],
+    })
+    // The 12-byte body exceeds the declared 4 → the fetch cap rejects it (all mirrors
+    // fail) rather than returning oversized bytes as matches-author.
+    await expect(read(ctx, '/docs/readme.md', { lens: LENS })).rejects.toThrow()
   })
 
   it('read throws FileNotFoundError when nothing is placed at the path', async () => {

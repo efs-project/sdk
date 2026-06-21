@@ -60,7 +60,7 @@ import {
   resolveAttesters,
 } from './context.js'
 import { type RedirectFollowResult, followRedirectChain, resolveHopCap } from './redirects.js'
-import { ParentNotFoundError, resolvePathToAnchor } from './resolve.js'
+import { ParentNotFoundError, resolveFilePathToAnchor } from './resolve.js'
 
 /** The reserved PROPERTY keys the SDK reads as typed slots. Custom `fields` keys
  * fall through to the `properties` bag. */
@@ -109,11 +109,19 @@ export async function resolvePlacement(
   const attesters = await resolveAttesters(ctx, opts)
   const { contracts, schemas } = ctx.deployment
 
-  // 1. Walk to the file's OWN anchor (file name included). A missing segment means
-  //    the file (or a parent folder) does not exist — surfaced as `null`, not a throw.
+  // 1. Walk to the file's OWN anchor. Parent folders resolve generically; the terminal
+  //    FILE segment resolves in the DATA-typed slot (the SDK writes file anchors at
+  //    `(parent, name, DATA_SCHEMA_UID)`), with a generic fallback for legacy anchors —
+  //    a generic-only walk would report SDK-written files as absent. A missing segment
+  //    means the file (or a parent folder) does not exist — surfaced as `null`.
   let fileAnchorUID: Hex
   try {
-    fileAnchorUID = await resolvePathToAnchor(ctx.publicClient as never, contracts.indexer, path)
+    fileAnchorUID = await resolveFilePathToAnchor(
+      ctx.publicClient as never,
+      contracts.indexer,
+      path,
+      schemas.data,
+    )
   } catch (err) {
     if (err instanceof ParentNotFoundError) return null
     throw err

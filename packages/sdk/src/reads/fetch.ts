@@ -57,6 +57,14 @@ type MirrorItem = {
   timestamp: bigint
 }
 
+/** Parse a `size` PROPERTY value (decimal byte count) to a safe number, or `undefined`
+ * when absent/malformed/too-large-to-cap-safely (then no size cap is applied). */
+function parseSize(value: string | undefined): number | undefined {
+  if (value === undefined || !/^\d+$/.test(value)) return undefined
+  const n = Number(value)
+  return Number.isSafeInteger(n) ? n : undefined
+}
+
 /** How many mirrors to read per `getDataMirrors` window. */
 const MIRROR_PAGE = 50
 /** Hard cap on mirror rows scanned (matches the router's 500-row ceiling). */
@@ -125,11 +133,28 @@ export async function fetchRef(
     uris = uris.filter((u) => allow.has(schemeName(u)))
   }
 
-  // The author's attested contentHash, scoped to the winning lens. Skipped when
-  // verification is off (then the engine reports `no-claim`).
-  const claimedHash = verify
-    ? (await readReservedProperty(ctx, ref.uid, resolvedBy, 'contentHash')).value
-    : undefined
+  // Author-attested metadata, scoped to the winning lens. `contentType` is ALWAYS
+  // taken from the attestation (never the untrusted transport `Content-Type` header — a
+  // gateway can change it independently of the lens-scoped metadata model). `contentHash`
+  // + `size` drive verification and are only read when requested.
+  const [attestedContentType, claimedHash, declaredSize] = await Promise.all([
+    readReservedProperty(ctx, ref.uid, resolvedBy, 'contentType').then((p) => p.value),
+    verify
+      ? readReservedProperty(ctx, ref.uid, resolvedBy, 'contentHash').then((p) => p.value)
+      : Promise.resolve(undefined),
+    verify
+      ? readReservedProperty(ctx, ref.uid, resolvedBy, 'size').then((p) => parseSize(p.value))
+      : Promise.resolve(undefined),
+  ])
+
+  // Cap the fetch at the author's declared `size` (when present): bytes exceeding it are
+  // rejected during the fetch, so an oversized mirror body can't slip through as
+  // `matches-author` (the content-hash spec treats over-declared-size as a failure) and
+  // can't force buffering past the declared length.
+  const effectiveMaxBytes =
+    declaredSize !== undefined
+      ? Math.min(opts?.maxBytes ?? declaredSize, declaredSize)
+      : opts?.maxBytes
 
   const mirrors: Mirror[] = uris.map((uri) => ({ uri }))
   const engineOpts: FetchVerifiedOptions = {
@@ -139,7 +164,7 @@ export async function fetchRef(
     ...(opts?.allowHosts !== undefined ? { allowlist: opts.allowHosts } : {}),
     ...(opts?.allowInsecureHttp !== undefined ? { allowInsecureHttp: opts.allowInsecureHttp } : {}),
     ...(opts?.fetchImpl !== undefined ? { fetchImpl: opts.fetchImpl } : {}),
-    ...(opts?.maxBytes !== undefined ? { maxBytes: opts.maxBytes } : {}),
+    ...(effectiveMaxBytes !== undefined ? { maxBytes: effectiveMaxBytes } : {}),
     // Thread the read `publicClient` into the `web3://` (SSTORE2) read transport so
     // on-chain-stored files read back. Enabled only when the client can read bytecode
     // (`getCode`) — a real viem PublicClient always can. The engine stays chain-free;
@@ -153,7 +178,8 @@ export async function fetchRef(
   }
   try {
     const result = await fetchVerified(mirrors, claimedHash, engineOpts)
-    return makeEfsFile(result.bytes, result.verification, result.contentType, resolvedBy)
+    // Use the ATTESTED contentType (or omit) — never the untrusted transport header.
+    return makeEfsFile(result.bytes, result.verification, attestedContentType, resolvedBy)
   } catch (err) {
     throw classifyError(err)
   }

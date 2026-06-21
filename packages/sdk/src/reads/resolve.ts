@@ -139,6 +139,67 @@ export async function resolvePathToAnchor(
 }
 
 /**
+ * Resolve a FILE path to its file-ANCHOR UID. Walks the PARENT folders generically
+ * (`resolvePath`, the `forSchema = bytes32(0)` slot), then resolves the terminal FILE
+ * segment in the DATA-typed slot (`resolveAnchor(parent, name, DATA_SCHEMA_UID)`), with
+ * a generic fallback for legacy file anchors. This mirrors the router's resolution order
+ * (EFSRouter.sol:240-245): SDK-written file anchors live at `(parent, name, DATA)`, so a
+ * generic-only walk would report them ABSENT.
+ *
+ * @returns the file-ANCHOR UID, or `ZERO_UID` if the terminal segment has neither a
+ *   DATA-typed nor a generic anchor (the file does not exist).
+ * @throws {ParentNotFoundError} if a PARENT folder segment is missing.
+ */
+export async function resolveFilePathToAnchor(
+  publicClient: ResolvePublicClient,
+  indexerAddr: Address,
+  path: string,
+  dataSchema: Hex,
+): Promise<Hex> {
+  const segments = splitPath(path)
+  if (segments.length === 0) return ZERO_UID // the root is a folder, never a file
+
+  const root = (await publicClient.readContract({
+    address: indexerAddr,
+    abi: indexerAbi,
+    functionName: 'rootAnchorUID',
+  })) as Hex
+
+  // Walk the parent folders generically (folders are the generic slot).
+  let parent = root
+  const resolved: string[] = []
+  for (const segment of segments.slice(0, -1)) {
+    const child = (await publicClient.readContract({
+      address: indexerAddr,
+      abi: indexerAbi,
+      functionName: 'resolvePath',
+      args: [parent, segment],
+    })) as Hex
+    if (child === ZERO_UID) throw new ParentNotFoundError(path, resolved, segment)
+    parent = child
+    resolved.push(segment)
+  }
+
+  // The file leaf: the DATA-typed slot first (where the SDK writes file anchors),
+  // then the generic slot as a fallback (legacy file anchors / router parity).
+  const leaf = segments[segments.length - 1] as string
+  const dataAnchor = (await publicClient.readContract({
+    address: indexerAddr,
+    abi: indexerAbi,
+    functionName: 'resolveAnchor',
+    args: [parent, leaf, dataSchema],
+  })) as Hex
+  if (dataAnchor !== ZERO_UID) return dataAnchor
+
+  return (await publicClient.readContract({
+    address: indexerAddr,
+    abi: indexerAbi,
+    functionName: 'resolvePath',
+    args: [parent, leaf],
+  })) as Hex
+}
+
+/**
  * Split a target file path into its parent folder segments + the file name.
  * `/docs/api/readme.md` → `{ parentSegments: ['docs', 'api'], fileName: 'readme.md' }`.
  *
