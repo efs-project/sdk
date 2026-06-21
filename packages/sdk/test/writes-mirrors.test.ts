@@ -185,6 +185,20 @@ function makeReadClient(handler: (fn: string, args: readonly unknown[]) => unkno
 // ── resolveMirrorTransport ─────────────────────────────────────────────────────────
 
 describe('resolveMirrorTransport', () => {
+  it('rejects an empty/blank URI with InvalidArgument even with an explicit transport', async () => {
+    // An explicit transport must NOT smuggle an empty URI into the MIRROR plan — that would
+    // make the caller sign a tx MirrorResolver can only revert. Same preflight as fs.write.
+    const err = await resolveMirrorTransport(
+      makeReadClient(() => {
+        throw new Error('should not read — rejected before any resolution')
+      }) as never,
+      deployment,
+      '',
+      uid(0xe5b1), // explicit transport present
+    ).catch((e) => e)
+    expect((err as { code?: string }).code).toBe('InvalidArgument')
+  })
+
   it('an explicit transport UID wins (scheme not consulted)', async () => {
     const out = await resolveMirrorTransport(
       makeReadClient(() => {

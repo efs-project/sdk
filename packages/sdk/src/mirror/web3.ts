@@ -31,7 +31,15 @@
  * off-chain mirror (the on-chain store is a *locator*, never trusted as the hash).
  */
 
-import { type Address, type Hex, getAddress, hexToBytes } from 'viem'
+import {
+  AbiDecodingZeroDataError,
+  type Address,
+  BaseError,
+  ContractFunctionZeroDataError,
+  type Hex,
+  getAddress,
+  hexToBytes,
+} from 'viem'
 import { chunkedSstore2Abi } from '../chain/abi/chunkStore.js'
 
 /** The minimal viem public surface the `web3://` read needs: a typed `readContract`
@@ -119,14 +127,23 @@ export async function readWeb3Bytes(
       abi: chunkedSstore2Abi,
       functionName: 'chunkCount',
     })) as bigint
-  } catch {
-    // Not a chunk manager: a `web3://` mirror may point DIRECTLY at a single RAW SSTORE2
-    // data contract (an older on-chain store, or one written by another client). The
-    // canonical router treats a failed/short `chunkCount()` staticcall as "not chunked"
-    // and reads the TARGET's own bytecode via extcodecopy from offset 1 (EFSRouter.sol
-    // web3:// branch). Mirror that exactly (router parity — ADR-0013) instead of failing
-    // an otherwise-valid read when the raw store is the only mirror.
-    return readRawSstore2(manager, client, maxBytes)
+  } catch (err) {
+    // Fall back to a RAW single-SSTORE2 read ONLY for the expected "not a chunk manager"
+    // signal: the target returned 0x for `chunkCount()` (a raw SSTORE2 contract has no
+    // function dispatcher, so the call STOPs and returns empty data). The canonical router
+    // treats that short return as "not chunked" and reads the TARGET's own bytecode via
+    // extcodecopy from offset 1 (EFSRouter.sol web3:// branch) — mirror it (router parity,
+    // ADR-0013). A transport/RPC failure (timeout, connection error, rate-limit) on a REAL
+    // chunk manager must NOT be mistaken for a raw store: returning the manager's own
+    // bytecode would surface garbage and pre-empt later mirrors. Propagate it as a failed
+    // attempt (Web3ReadError) so the fetch engine moves on to the next mirror.
+    const returnedNoData =
+      err instanceof BaseError &&
+      err.walk(
+        (e) => e instanceof ContractFunctionZeroDataError || e instanceof AbiDecodingZeroDataError,
+      ) !== null
+    if (returnedNoData) return readRawSstore2(manager, client, maxBytes)
+    throw new Web3ReadError(`chunkCount() unreadable on ${manager}: ${errMsg(err)}`)
   }
   if (count <= 0n) throw new Web3ReadError(`chunk manager ${manager} reports zero chunks`)
   if (count > BigInt(MAX_CHUNKS)) {

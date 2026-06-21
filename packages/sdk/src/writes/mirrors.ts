@@ -123,6 +123,17 @@ export async function resolveMirrorTransport(
   uri: string,
   transport: Hex | undefined,
 ): Promise<Hex> {
+  // 0. Reject an empty/blank URI up front — BEFORE the explicit-transport early return, so
+  // an explicit `transport` can't smuggle an empty URI into the MIRROR plan. MirrorResolver
+  // requires a non-empty URI, so encoding `''` would make the caller sign a tx that can
+  // only revert; fail closed with the same preflight `InvalidArgument` `fs.write` gives.
+  if (uri.trim() === '') {
+    throw new EfsError(
+      'efs.mirrors.add: the mirror URI is empty. Pass a non-empty URI (e.g. `ipfs://…`, `ar://…`, `web3://…`).',
+      { code: 'InvalidArgument' },
+    )
+  }
+
   // 1. Explicit UID — unambiguous; never consult the scheme.
   if (transport !== undefined) return transport
 

@@ -10,7 +10,7 @@
  * original (STOP byte stripped).
  */
 
-import { type Address, type Hex, bytesToHex, getAddress } from 'viem'
+import { type Address, ContractFunctionZeroDataError, type Hex, bytesToHex, getAddress } from 'viem'
 import { describe, expect, it } from 'vitest'
 import { hashContent } from '../src/content/hash.js'
 import { fetchVerified } from '../src/mirror/fetch.js'
@@ -147,9 +147,11 @@ describe('readWeb3Bytes (matches EFSRouter web3:// read)', () => {
     // another client) with no chunkCount(). The router treats the failed staticcall as
     // "not chunked" and reads the target's own code; we must too, not fail the read.
     const content = enc('raw single-contract SSTORE2 payload')
+    // A raw SSTORE2 contract returns 0x for chunkCount() → viem ContractFunctionZeroDataError.
+    const zeroData = new ContractFunctionZeroDataError({ functionName: 'chunkCount' })
     const client: Web3ReadClient = {
       async readContract(args) {
-        if (args.functionName === 'chunkCount') throw new Error('execution reverted: no chunkCount')
+        if (args.functionName === 'chunkCount') throw zeroData
         throw new Error(`unexpected ${args.functionName}`)
       },
       async getCode(args) {
@@ -164,9 +166,10 @@ describe('readWeb3Bytes (matches EFSRouter web3:// read)', () => {
   })
 
   it('surfaces a no-code raw target as Web3ReadError (router HTTP 500 parity)', async () => {
+    const zeroData = new ContractFunctionZeroDataError({ functionName: 'chunkCount' })
     const client: Web3ReadClient = {
       async readContract(args) {
-        if (args.functionName === 'chunkCount') throw new Error('no chunkCount')
+        if (args.functionName === 'chunkCount') throw zeroData
         throw new Error('unexpected')
       },
       async getCode() {
@@ -174,6 +177,26 @@ describe('readWeb3Bytes (matches EFSRouter web3:// read)', () => {
       },
     }
     await expect(readWeb3Bytes(`web3://${MANAGER}`, client)).rejects.toBeInstanceOf(Web3ReadError)
+  })
+
+  it('does NOT raw-fall-back on a transport/RPC error (real manager — try the next mirror)', async () => {
+    // A timeout/connection error on a genuine chunk manager must NOT be mistaken for a raw
+    // store: returning the manager's own bytecode as content would be garbage and skip
+    // later mirrors. It propagates as a Web3ReadError (a failed attempt) — getCode is
+    // never even consulted (the manager IS a chunk manager).
+    let getCodeCalled = false
+    const client: Web3ReadClient = {
+      async readContract(args) {
+        if (args.functionName === 'chunkCount') throw new Error('HTTP request failed: ETIMEDOUT')
+        throw new Error('unexpected')
+      },
+      async getCode() {
+        getCodeCalled = true
+        return sstore2Code(enc('manager bytecode — must NOT be returned'))
+      },
+    }
+    await expect(readWeb3Bytes(`web3://${MANAGER}`, client)).rejects.toBeInstanceOf(Web3ReadError)
+    expect(getCodeCalled).toBe(false)
   })
 
   it('stops early when the running total exceeds maxBytes (no full-payload read)', async () => {
