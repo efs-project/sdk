@@ -130,7 +130,14 @@ export async function resolveMirrors(
   bytes: Uint8Array,
   ctx: FileWriteContext,
   opts: WriteOptions | undefined,
-): Promise<{ mirrors: { uri: string; transportDefinition: Hex }[] }> {
+): Promise<{
+  mirrors: { uri: string; transportDefinition: Hex }[]
+  /** Wallet transactions the storage step sent BEFORE the EAS layers — `0` for caller-
+   * supplied mirrors (no storage), `2` for the on-chain SSTORE2 store (chunk + manager).
+   * The orchestrator folds this into the receipt's `signatureCount` so the wallet-
+   * confirmation count is honest on the default `fs.write(path, bytes)` path. */
+  storageTxCount: number
+}> {
   const { deployment } = ctx
 
   // An explicitly-supplied `mirrors` list means "the bytes already live at these URIs;
@@ -151,6 +158,7 @@ export async function resolveMirrors(
   //    URI's. (An explicit `opts.transportDefinition` still wins for every entry.)
   if (opts?.mirrors !== undefined) {
     return {
+      storageTxCount: 0, // caller hosts the bytes — the SDK sends no storage tx
       mirrors: await Promise.all(
         opts.mirrors.map(async (uri) => ({
           uri,
@@ -183,7 +191,7 @@ export async function resolveMirrors(
     opts,
     ctx.publicClient,
   )
-  const { web3Uri } = await storeOnchain(bytes, {
+  const { web3Uri, txHashes } = await storeOnchain(bytes, {
     walletClient: ctx.walletClient,
     publicClient: ctx.publicClient,
     ...(ctx.account !== undefined ? { account: ctx.account } : {}),
@@ -195,7 +203,9 @@ export async function resolveMirrors(
     // So an abort between the chunk and chunk-manager deploys stops the manager tx.
     ...(opts?.signal !== undefined ? { signal: opts.signal } : {}),
   })
-  return { mirrors: [{ uri: web3Uri, transportDefinition }] }
+  // The on-chain store sent `txHashes.length` wallet txs (chunk + manager) before any
+  // EAS layer — fold them into the receipt's signatureCount via the orchestrator.
+  return { mirrors: [{ uri: web3Uri, transportDefinition }], storageTxCount: txHashes.length }
 }
 
 /** The viem clients + deployment context the file-write orchestrator needs. */
@@ -344,7 +354,7 @@ export async function writeFileTier1(
   // on-chain (SSTORE2) and yields a web3:// mirror — the zero-infra default, and the
   // FIRST irreversible step. Abort-check immediately before it.
   opts?.signal?.throwIfAborted()
-  const { mirrors } = await resolveMirrors(content, ctx, opts)
+  const { mirrors, storageTxCount } = await resolveMirrors(content, ctx, opts)
 
   // 4. Build the pure write plan (the 9-schema, layered attestation DAG).
   const plan = buildFileWriteGraph({
@@ -411,6 +421,10 @@ export async function writeFileTier1(
     contentHash,
     chainId: deployment.chainId,
     attester,
+    // Wallet txs the storage step already sent (chunk + manager deploys, or 0 for
+    // caller mirrors) — folded into the receipt's signatureCount so it reports the
+    // HONEST wallet-confirmation count, not just the EAS layers.
+    storageTxCount,
     ...(ctx.account !== undefined ? { account: ctx.account } : {}),
     ...(ctx.chain !== undefined ? { chain: ctx.chain } : {}),
     // Forwarded so the layered submitter bails between layers (before each

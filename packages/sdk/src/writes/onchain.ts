@@ -228,7 +228,15 @@ function bytesToHex(bytes: Uint8Array): string {
 export async function storeOnchain(
   bytes: Uint8Array,
   ctx: OnchainStoreContext,
-): Promise<{ web3Uri: string; chunkManager: Address; chunkAddress: Address }> {
+): Promise<{
+  web3Uri: string
+  chunkManager: Address
+  chunkAddress: Address
+  /** The wallet transactions this store sent, in order (chunk deploy, then manager
+   * deploy). Each is a wallet signature the caller's `signatureCount`/UI must account
+   * for — they happen BEFORE any EAS attestation layer. v1 is single-chunk ⇒ length 2. */
+  txHashes: readonly Hex[]
+}> {
   const fwd = {
     ...(ctx.account !== undefined ? { account: ctx.account } : {}),
     ...(ctx.chain !== undefined ? { chain: ctx.chain } : {}),
@@ -262,7 +270,12 @@ export async function storeOnchain(
   // only (chainId is the router's own chain, never encoded in the URI). viem's
   // `deployContract` ABI-encodes the `address[]` constructor arg from the ABI, so
   // the on-chain encoding stays single-sourced through viem (not hand-rolled).
-  return { web3Uri: `web3://${chunkManager}`, chunkManager, chunkAddress }
+  return {
+    web3Uri: `web3://${chunkManager}`,
+    chunkManager,
+    chunkAddress,
+    txHashes: [chunkTx, managerTx],
+  }
 }
 
 /** Run a wallet/RPC call through the {@link classifyError} funnel so a raw viem/provider

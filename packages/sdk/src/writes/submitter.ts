@@ -52,6 +52,11 @@ export interface SubmitterContext extends SubmitContext {
   readonly chainId: number
   /** The attester the receipt records (lenses key on it). */
   readonly attester: Address
+  /** Wallet transactions the on-chain storage step sent BEFORE the EAS layers (chunk +
+   * manager deploys on the default `fs.write(path, bytes)` path; `0`/omitted when the
+   * caller supplied mirrors). Folded into `signatureCount` so the receipt reports the
+   * honest wallet-confirmation count, not just the attestation layers. */
+  readonly storageTxCount?: number
 }
 
 /**
@@ -97,7 +102,9 @@ function toReceipt(result: Tier1WriteResult, ctx: SubmitterContext): WriteReceip
     contentHash: ctx.contentHash,
     ...(data !== undefined ? { data } : {}),
     steps,
-    signatureCount: result.layerTxHashes.length,
+    // Honest wallet-confirmation count: the EAS attestation layers PLUS the on-chain
+    // storage deploys (chunk + manager) the orchestrator sent before them.
+    signatureCount: result.layerTxHashes.length + (ctx.storageTxCount ?? 0),
     mechanism: 'sequential',
     status: 'confirmed',
     gasless: false,

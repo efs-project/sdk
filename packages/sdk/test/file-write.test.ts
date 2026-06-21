@@ -285,8 +285,8 @@ describe('writeFileTier1 — full Tier-1 path with on-chain (web3://) default st
     expect(receipt.contentHash).toBe(hashContent(CONTENT))
     expect(receipt.mechanism).toBe('sequential')
     expect(receipt.status).toBe('confirmed')
-    // One signature per layer.
-    expect(receipt.signatureCount).toBe(4)
+    // Honest wallet count: 4 EAS layers + 2 on-chain storage deploys (chunk + manager).
+    expect(receipt.signatureCount).toBe(6)
     // Every minted attestation is recorded as a done step (14 refs).
     expect(receipt.steps).toHaveLength(14)
     expect(receipt.steps.every((s) => s.done)).toBe(true)
@@ -341,6 +341,17 @@ describe('writeFileTier1 — full Tier-1 path with on-chain (web3://) default st
 })
 
 describe('writeFileTier1 — caller-supplied mirrors', () => {
+  it('does NOT count any storage tx (signatureCount = EAS layers only, no deploys)', async () => {
+    const { ctx, sent, deploys } = makeCtx()
+    const receipt = await writeFileTier1('/docs/readme.md', CONTENT, ctx, {
+      mirrors: ['ipfs://QmExample'],
+    })
+    // Caller hosts the bytes → no SSTORE2 store → signatureCount is purely the EAS
+    // layers (contrast the on-chain default path, which adds 2 for chunk + manager).
+    expect(deploys).toHaveLength(0)
+    expect(receipt.signatureCount).toBe(sent.length)
+  })
+
   it('uses opts.mirrors and the per-scheme transport from the deployment map', async () => {
     const { ctx, sent } = makeCtx()
     await writeFileTier1('/docs/readme.md', CONTENT, ctx, {
@@ -584,11 +595,13 @@ describe('writeFileTier1 — createParents (mkdir -p)', () => {
       contentType: 'image/jpeg',
     })
 
-    // Layers: photos(1) → 2026(2) → DATA(3) → L2(4) → PINs(5) → visTAGs(6) = 6
-    // signatures. Both created folders (photos, 2026) get a visibility TAG (last
-    // layer); root is never tagged.
+    // Layers: photos(1) → 2026(2) → DATA(3) → L2(4) → PINs(5) → visTAGs(6) = 6 EAS
+    // layers. Both created folders (photos, 2026) get a visibility TAG (last layer);
+    // root is never tagged.
     expect(sent).toHaveLength(6)
-    expect(receipt.signatureCount).toBe(6)
+    // signatureCount is the HONEST wallet count: 6 EAS layers + 2 on-chain storage
+    // deploys (chunk + manager) the default no-mirrors path sent first.
+    expect(receipt.signatureCount).toBe(8)
 
     // The final layer is the two created-folder visibility TAGs, each targeting a
     // freshly-minted folder anchor (photos → uid(0xd000), 2026 → uid(0xd001)).

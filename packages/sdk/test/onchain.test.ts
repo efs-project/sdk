@@ -98,13 +98,17 @@ describe('storeOnchain', () => {
   it('deploys chunk then manager and returns the canonical web3://<manager> URI', async () => {
     const { ctx, calls } = makeCtx()
     const bytes = new Uint8Array([1, 2, 3, 4])
-    const { web3Uri, chunkManager, chunkAddress } = await storeOnchain(bytes, ctx)
+    const { web3Uri, chunkManager, chunkAddress, txHashes } = await storeOnchain(bytes, ctx)
 
     expect(calls).toHaveLength(2)
     expect(calls[0].kind).toBe('chunk')
     expect(calls[0].data).toBe(buildSstore2InitCode(bytes))
     expect(calls[1].kind).toBe('manager')
     expect(calls[1].args).toEqual([CHUNK_ADDR])
+
+    // Both wallet txs (chunk + manager) are reported so the caller can count them as
+    // wallet confirmations in the write receipt's signatureCount.
+    expect(txHashes).toHaveLength(2)
 
     expect(chunkAddress).toBe(CHUNK_ADDR)
     expect(chunkManager).toBe(MANAGER_ADDR)
