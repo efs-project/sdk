@@ -515,6 +515,11 @@ export function createEfsClient(config: EfsClientConfig): EfsClient {
     publicClient: publicClient as unknown as Parameters<typeof makeEasVerbs>[0]['publicClient'],
     walletClient: walletClient as unknown as Parameters<typeof makeEasVerbs>[0]['walletClient'],
     requireWallet,
+    // Same fail-closed wrong-chain guard as fs.write / the edge verbs — covers the raw
+    // efs.eas.attest/multiAttest/revoke AND every namespace remove/revoke (they route
+    // through easVerbs.revoke). Only invoked after requireWallet, so the wallet is set.
+    assertChain: () =>
+      assertWalletOnDeploymentChain(walletClient as WalletClient, getDeployment().chainId),
     ...(walletClient?.account !== undefined ? { account: walletClient.account } : {}),
     ...(walletClient?.chain !== undefined ? { chain: walletClient.chain } : {}),
   })

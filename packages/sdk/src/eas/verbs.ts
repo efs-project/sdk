@@ -74,6 +74,12 @@ export interface EasVerbContext {
   walletClient: EasWalletClient | undefined
   /** Throws {@link WalletRequired} when no wallet is set (the runtime backstop). */
   requireWallet(): void
+  /** Optional pre-flight assertion run BEFORE every write tx (attest/multiAttest/revoke).
+   * The client wires this to the wallet-vs-deployment chain guard, so a wrong-chain wallet
+   * cannot send EAS txs to the deployment addresses on another chain — and it covers the
+   * standalone-verb `remove`/revoke paths, which route through {@link EasVerbs.revoke}.
+   * Omitted ⇒ no check (e.g. a pre-validated mock). */
+  assertChain?: () => Promise<void>
   /** The signing account, forwarded to `writeContract` when set. */
   account?: Account | Address
   /** The chain, forwarded to `writeContract` when set. */
@@ -134,6 +140,7 @@ export function makeEasVerbs(ctx: EasVerbContext): EasVerbs {
   return {
     attest: async (request) => {
       ctx.requireWallet()
+      await ctx.assertChain?.() // fail closed on a wrong-chain wallet before any tx
       const wallet = ctx.walletClient as EasWalletClient
       try {
         const call = buildAttest(ctx.easAddress, request)
@@ -151,6 +158,7 @@ export function makeEasVerbs(ctx: EasVerbContext): EasVerbs {
     },
     multiAttest: async (requests) => {
       ctx.requireWallet()
+      await ctx.assertChain?.() // fail closed on a wrong-chain wallet before any tx
       const wallet = ctx.walletClient as EasWalletClient
       try {
         const call = buildMultiAttest(ctx.easAddress, requests)
@@ -168,6 +176,7 @@ export function makeEasVerbs(ctx: EasVerbContext): EasVerbs {
     },
     revoke: async (request) => {
       ctx.requireWallet()
+      await ctx.assertChain?.() // fail closed on a wrong-chain wallet before any tx
       const wallet = ctx.walletClient as EasWalletClient
       try {
         return await wallet.writeContract({

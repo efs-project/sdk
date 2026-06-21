@@ -155,6 +155,28 @@ describe('createEfsClient — runtime write gate', () => {
     expect((err as EfsError).code).toBe('WrongChain')
   })
 
+  it('rejects a REVOKE/remove (graph.tags.remove + eas.revoke) with WrongChain on a mismatched wallet', async () => {
+    // The remove/revoke path bypasses edgeSubmitContext and routes through easVerbs.revoke
+    // — it must run the same chain guard, else a wrong-chain wallet could send a no-op /
+    // wrong-chain EAS revoke while the deployment-chain attestation stays active.
+    const make = createEfsClient as unknown as (c: unknown) => {
+      graph: { tags: { remove(uid: string): Promise<unknown> } }
+      eas: { revoke(r: { schema: string; uid: string }): Promise<unknown> }
+    }
+    const efs = make({
+      publicClient: { chain: { id: CHAIN_ID } },
+      walletClient: { account: { address: addr(7) }, chain: { id: 1 } },
+      deployments,
+    })
+    const b32 = (h: string) => `0x${h.repeat(64).slice(0, 64)}` as `0x${string}`
+    const removeErr = await efs.graph.tags.remove(b32('e')).catch((e) => e)
+    expect(removeErr).toBeInstanceOf(EfsError)
+    expect((removeErr as EfsError).code).toBe('WrongChain')
+    // The raw escape-hatch revoke is guarded too (covers efs.eas.attest/multiAttest).
+    const easErr = await efs.eas.revoke({ schema: b32('5'), uid: b32('e') }).catch((e) => e)
+    expect((easErr as EfsError).code).toBe('WrongChain')
+  })
+
   it('a write client wires write (Tier-1) and still stubs batch', async () => {
     const provider = createMockProvider({ chainId: CHAIN_ID })
     const efs = createEfsClient({ provider, chain: localChain, account: addr(1) })

@@ -86,9 +86,12 @@ export function parseWeb3Uri(uri: string): Address {
   if (hex.length < 40 || !/^[0-9a-fA-F]{40}$/.test(hex)) {
     throw new Web3ReadError(`malformed address in ${uri.slice(0, 64)}`)
   }
-  // getAddress checksums + validates; the router builds the address numerically, but
-  // an EIP-55 checksum is a strict superset (any 40-hex is accepted lowercased).
-  return getAddress(`0x${hex}`)
+  // Lowercase BEFORE `getAddress`: the router parses the address numerically /
+  // case-insensitively, so a router-valid mirror may carry arbitrary mixed-case hex with
+  // NO valid EIP-55 checksum. Passing that verbatim would make `getAddress` throw
+  // `InvalidAddress` and fail an otherwise-valid read (esp. when it's the only mirror).
+  // All-lowercase is always accepted; `getAddress` returns the canonical checksummed form.
+  return getAddress(`0x${hex.toLowerCase()}`)
 }
 
 /**

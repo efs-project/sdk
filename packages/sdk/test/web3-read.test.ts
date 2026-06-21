@@ -10,7 +10,7 @@
  * original (STOP byte stripped).
  */
 
-import { type Address, type Hex, bytesToHex } from 'viem'
+import { type Address, type Hex, bytesToHex, getAddress } from 'viem'
 import { describe, expect, it } from 'vitest'
 import { hashContent } from '../src/content/hash.js'
 import { fetchVerified } from '../src/mirror/fetch.js'
@@ -78,6 +78,25 @@ describe('parseWeb3Uri', () => {
     expect(() => parseWeb3Uri('https://x')).toThrow(Web3ReadError)
     expect(() => parseWeb3Uri('web3://0x1234')).toThrow(Web3ReadError)
     expect(() => parseWeb3Uri(`web3://0x${'z'.repeat(40)}`)).toThrow(Web3ReadError)
+  })
+
+  it('accepts a router-valid mixed-case address with NO valid EIP-55 checksum', () => {
+    // The router parses the address case-insensitively, so a mirror from another client
+    // may carry arbitrary mixed-case hex. Build a variant with every alpha case flipped
+    // vs the canonical checksum — guaranteed-invalid EIP-55 (the address has letters).
+    // The old code passed it verbatim to getAddress and threw; we must accept it.
+    const lower = `0x${'da7a'.repeat(10)}` as Address
+    const canonical = getAddress(lower)
+    const badChecksum = `0x${canonical
+      .slice(2)
+      .split('')
+      .map((c) =>
+        c >= 'a' && c <= 'f' ? c.toUpperCase() : c >= 'A' && c <= 'F' ? c.toLowerCase() : c,
+      )
+      .join('')}`
+    expect(badChecksum).not.toBe(canonical) // genuinely a wrong checksum
+    expect(() => parseWeb3Uri(`web3://${badChecksum}`)).not.toThrow()
+    expect(parseWeb3Uri(`web3://${badChecksum}`)).toBe(canonical) // normalized back
   })
 })
 
