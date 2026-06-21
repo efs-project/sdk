@@ -945,7 +945,12 @@ describe('list({ excludes }) — on-chain tag-exclusion filter (ADR-0011)', () =
       readonly Hex[],
       readonly bigint[],
     ]
-    expect(anchorSchema).toBe(SCHEMAS.anchor)
+    // The bucket key MUST be the DATA schema, not the ANCHOR schema: file anchors are
+    // stored under `_childrenBySchema[parent][DATA_SCHEMA_UID]` and folder-visibility
+    // tags key on `definition = DATA_SCHEMA_UID`. Passing the ANCHOR schema here scanned
+    // an empty bucket → filtered listings dropped normal files (the bug).
+    expect(anchorSchema).toBe(SCHEMAS.data)
+    expect(anchorSchema).not.toBe(SCHEMAS.anchor)
     expect(attesters).toEqual([LENS]) // lens-scoped
     expect(excludeTagDefs).toEqual([NSFW_DEF])
     expect(minWeights).toEqual([0n]) // omitted ⇒ all-zero (ADR-0042 default)

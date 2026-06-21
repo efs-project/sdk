@@ -195,11 +195,20 @@ async function readUnfilteredPage(
 
 /**
  * Read one FILTERED page (`getDirectoryPageFiltered`, ADR-0011/0054): the on-chain
- * tag-exclusion filter, lens-scoped via `attesters`, scoped to the ANCHOR schema (a
- * directory page enumerates anchors). The cursor is OPAQUE `bytes` (a phase/index
- * triple, ADR-0036): `0x` ⇒ exhausted, anything else ⇒ keep paging — even when
- * `items` is empty (the phase-1 scan budget can yield an empty page mid-walk; empty
- * ≠ end). The opaque cursor is carried verbatim as a hex string on {@link Page}.
+ * tag-exclusion filter, lens-scoped via `attesters`, scoped to the **DATA** anchor-
+ * schema bucket. The `anchorSchema` arg is the `forSchema` BUCKET KEY the walk scans
+ * (`_childrenBySchema[parent][anchorSchema]` in phase 1) AND the folder-visibility tag
+ * `definition` it qualifies tagged subfolders by (phase 0) — NOT the schema of the
+ * anchor attestation itself. SDK-written file anchors are bucketed under
+ * `schemas.data` (DATA_SCHEMA_UID — see `writes/graph.ts buildFileAnchor`) and folder-
+ * visibility tags are minted with `definition = DATA_SCHEMA_UID`, so passing the
+ * ANCHOR schema UID here would scan an empty bucket and return no files. This matches
+ * the production client (`getDirectoryPageFiltered(parent, dataSchemaUID, …)`).
+ *
+ * The cursor is OPAQUE `bytes` (a phase/index triple, ADR-0036): `0x` ⇒ exhausted,
+ * anything else ⇒ keep paging — even when `items` is empty (the phase-1 scan budget
+ * can yield an empty page mid-walk; empty ≠ end). The opaque cursor is carried verbatim
+ * as a hex string on {@link Page}.
  */
 async function readFilteredPage(
   ctx: ReadContext,
@@ -216,7 +225,10 @@ async function readFilteredPage(
     functionName: 'getDirectoryPageFiltered',
     args: [
       parentAnchor,
-      ctx.deployment.schemas.anchor,
+      // The DATA-schema bucket key (NOT the ANCHOR schema): file anchors are stored
+      // under `_childrenBySchema[parent][DATA_SCHEMA_UID]` and folder-visibility tags
+      // key on `definition = DATA_SCHEMA_UID`. See the function doc above.
+      ctx.deployment.schemas.data,
       attesters,
       excludeTagDefs,
       minWeights,
