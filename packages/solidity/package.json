@@ -8,7 +8,7 @@
     "url": "git+https://github.com/efs-project/sdk.git",
     "directory": "packages/solidity"
   },
-  "files": ["src/**/*.sol", "README.md"],
+  "files": ["src/**/*.sol", "vendor/**/*.sol", "remappings.txt", "README.md"],
   "publishConfig": { "access": "public", "provenance": true },
   "exports": {
     "./src/*.sol": "./src/*.sol",
