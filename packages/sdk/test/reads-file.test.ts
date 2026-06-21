@@ -866,6 +866,20 @@ describe('list', () => {
     expect(all[0]?.name).toBe('a.md')
   })
 
+  it('.toArray rejects a non-finite/fractional/non-positive limit (cap stays bounded)', async () => {
+    // toArray's cap is mandatory: Infinity must NOT silently collapse to a normal page
+    // size and collect the whole directory; 1.5/NaN/0/-1 are likewise invalid.
+    const ctx = makeCtx({
+      edges: { [`${ROOT}|docs`]: DOCS_ANCHOR },
+      dirPage: { items: dirEntries, nextCursor: 0n },
+    })
+    for (const bad of [Number.POSITIVE_INFINITY, 1.5, Number.NaN, 0, -1]) {
+      await expect(
+        list(() => ctx, '/docs', { lens: LENS }).toArray({ limit: bad }),
+      ).rejects.toThrow(/positive integer/)
+    }
+  })
+
   it('falls back to the SystemAccount lens on .byPage (no lens/wallet)', async () => {
     // With no lens/wallet the listing resolves via the deployment SystemAccount
     // (SYSTEM_LENS) rather than throwing — a public directory lists in one line.

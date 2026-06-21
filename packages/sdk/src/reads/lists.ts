@@ -425,6 +425,11 @@ export function listEntries(
   }
 
   const toArray = async (arrOpts: { limit: number }): Promise<ListEntry[]> => {
+    // The mandatory materialization cap must be a finite positive integer — the same
+    // guard the constructor and `byPage` apply. Without it a fractional limit (1.5)
+    // over-collects (the `>= limit` break fires one entry late) and `Infinity` pages
+    // until the list is exhausted, defeating the documented cap.
+    assertPositiveLimit(arrOpts.limit)
     const { dedupe } = await prime()
     const out: ListEntry[] = []
     const seen = new Set<string>()

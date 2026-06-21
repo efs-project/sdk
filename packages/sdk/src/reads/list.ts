@@ -360,6 +360,16 @@ export function list(
    * cap (sdk-read-surface §4). Walks pages (coalesced) until `limit` is reached or
    * the listing is exhausted. */
   const toArray = async (arrOpts: { limit: number }): Promise<DirEntry[]> => {
+    // The mandatory cap must be a finite positive integer. Without this guard,
+    // `Infinity` makes `remaining` infinite and `Math.min(defaultLimit, remaining)`
+    // collapses to a normal page size — so the loop silently materializes the WHOLE
+    // directory instead of rejecting an unbounded collect-all. (`Number.isInteger`
+    // also rejects `NaN`/fractional limits.)
+    if (!Number.isInteger(arrOpts.limit) || arrOpts.limit <= 0) {
+      throw new InvalidDirectoryQuery(
+        `toArray limit must be a positive integer (got ${arrOpts.limit}).`,
+      )
+    }
     const out: DirEntry[] = []
     let cursor: string | undefined
     do {

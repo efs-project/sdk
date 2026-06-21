@@ -449,6 +449,27 @@ describe('lists.entries pagination (.byPage cursor)', () => {
     const got = await listEntries(() => ctx, LIST_UID, { limit: 3 }).toArray({ limit: 4 })
     expect(got.length).toBe(4)
   })
+
+  it('toArray rejects a non-finite/fractional/non-positive limit (enforces the cap)', async () => {
+    const many = Array.from({ length: 10 }, (_, i) => ({
+      entryUID: uid(0xf00 + i),
+      targetType: 1,
+      identityKey: addrKey(addr(0x2000 + i)),
+    }))
+    const { ctx } = makeCtx({
+      [LIST_UID.toLowerCase()]: {
+        mode: mode({ targetType: 1, allowsDuplicates: true }),
+        entriesByAttester: { [CURATOR.toLowerCase()]: many },
+      },
+    })
+    // Infinity would otherwise page until the list is exhausted; 1.5 would over-collect
+    // (the `>= limit` break fires one entry late). Both must throw, not silently collect.
+    for (const bad of [Number.POSITIVE_INFINITY, 1.5, Number.NaN, 0, -1]) {
+      await expect(listEntries(() => ctx, LIST_UID).toArray({ limit: bad })).rejects.toThrow(
+        /positive integer/,
+      )
+    }
+  })
 })
 
 // ── length / has ───────────────────────────────────────────────────────────────

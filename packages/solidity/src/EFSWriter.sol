@@ -98,9 +98,16 @@ abstract contract EFSWriter {
         tagUID = EFSLib.tag(EAS, schemas, target, definition, weight);
     }
 
-    /// @notice Set an arbitrary key/value **PROPERTY** triple on a DATA (key-ANCHOR + PROPERTY +
-    ///         binding PIN).
-    /// @dev    Delegates to {EFSLib.setProperty}. Cardinality-1: re-setting supersedes for the lens.
+    /// @notice **First-set / create** an arbitrary key/value **PROPERTY** triple on a DATA
+    ///         (key-ANCHOR + PROPERTY + binding PIN).
+    /// @dev    Delegates to {EFSLib.setProperty}, which ALWAYS mints a fresh key-ANCHOR. Because the
+    ///         `(dataUID, keyName, PROPERTY)` key-ANCHOR is permanent / non-revocable, calling this a
+    ///         second time for the same `(dataUID, keyName)` reverts on the duplicate anchor — it does
+    ///         NOT supersede. To UPDATE an existing key, resolve its key-ANCHOR (e.g.
+    ///         `EFSReader.resolveAnchor(indexer, dataUID, keyName, schemas.property)`) and call
+    ///         {_efsSetPropertyAt}; the binding PIN there is cardinality-1, so the value supersedes in
+    ///         O(1). (Mirrors the TypeScript `props.set`, which resolves the anchor first and reuses
+    ///         it on update.)
     /// @param  schemas The frozen schema UID set (`anchor`, `property`, `pin` are used).
     /// @param  dataUID The DATA the property binds under.
     /// @param  keyName The property key (the key-ANCHOR's `name`).
@@ -116,6 +123,26 @@ abstract contract EFSWriter {
     ) internal returns (bytes32 keyAnchorUID, bytes32 propertyUID, bytes32 bindingPinUID) {
         (keyAnchorUID, propertyUID, bindingPinUID) =
             EFSLib.setProperty(EAS, schemas, dataUID, keyName, value);
+    }
+
+    /// @notice **Update** the value at an already-minted key-ANCHOR — set/replace without re-minting
+    ///         the (permanent) anchor.
+    /// @dev    Delegates to {EFSLib.setPropertyAt}: mints only the PROPERTY + binding PIN. The binding
+    ///         PIN is cardinality-1 over `(attester, key-ANCHOR, PROPERTY)`, so this supersedes the
+    ///         prior value for this contract's lens in O(1). Resolve `keyAnchorUID` first via
+    ///         `EFSReader.resolveAnchor(indexer, dataUID, keyName, schemas.property)` (returns
+    ///         {EMPTY_UID} when the key was never set — call {_efsSetProperty} for that first write).
+    /// @param  schemas      The frozen schema UID set (`property`, `pin` are used).
+    /// @param  keyAnchorUID The pre-existing key-ANCHOR UID (the slot under the DATA).
+    /// @param  value        The new stringified property value.
+    /// @return propertyUID   The created PROPERTY UID.
+    /// @return bindingPinUID The created binding-PIN UID.
+    function _efsSetPropertyAt(
+        EFSLib.SchemaUIDs memory schemas,
+        bytes32 keyAnchorUID,
+        string memory value
+    ) internal returns (bytes32 propertyUID, bytes32 bindingPinUID) {
+        (propertyUID, bindingPinUID) = EFSLib.setPropertyAt(EAS, schemas, keyAnchorUID, value);
     }
 
     /// @notice A placement **PIN** (cardinality-1) binding `dataUID` at `anchor` — the hardlink /

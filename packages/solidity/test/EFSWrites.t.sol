@@ -33,6 +33,13 @@ contract WritesConsumerMock is EFSWriter {
         return _efsSetProperty(s, data, k, v);
     }
 
+    function setPropertyAt(EFSLib.SchemaUIDs memory s, bytes32 keyAnchorUID, string memory v)
+        external
+        returns (bytes32, bytes32)
+    {
+        return _efsSetPropertyAt(s, keyAnchorUID, v);
+    }
+
     function place(EFSLib.SchemaUIDs memory s, bytes32 anchor, bytes32 data)
         external
         returns (bytes32)
@@ -189,6 +196,36 @@ contract EFSWritesTest is Test {
 
         assertEq(ka.attester, address(consumer), "attester = consumer across the triple");
         assertEq(bp.attester, address(consumer));
+    }
+
+    function test_SetPropertyAt_ReusesAnchorOnUpdate() public {
+        // An UPDATE must NOT re-mint the permanent key-ANCHOR: it mints only the new
+        // PROPERTY + binding-PIN against the supplied (pre-resolved) key-ANCHOR, so the
+        // cardinality-1 binding supersedes the prior value. (Re-minting the anchor would
+        // revert on the duplicate permanent (DATA, key, PROPERTY) slot — the bug.)
+        bytes32 keyAnchorUID = keccak256("EXISTING_KEY_ANCHOR");
+        vm.prank(ALICE);
+        (bytes32 propertyUID, bytes32 bindingPinUID) =
+            consumer.setPropertyAt(schemas, keyAnchorUID, "bob");
+
+        assertEq(eas.callCount(), 2, "update = PROPERTY + binding-PIN only (no fresh ANCHOR)");
+
+        // 0: PROPERTY (free-floating new value)
+        MockEAS.Call memory p = eas.callAt(0);
+        assertEq(p.schema, schemas.property, "PROPERTY schema");
+        assertEq(p.refUID, bytes32(0), "PROPERTY refUID = 0 (free-floating)");
+        assertEq(p.revocable, false, "PROPERTY non-revocable");
+        assertEq(p.data, abi.encode("bob"), "PROPERTY data = (new value)");
+        assertEq(propertyUID, _uid(0));
+
+        // 1: binding-PIN definition = the EXISTING key-ANCHOR (not a freshly minted one)
+        MockEAS.Call memory bp = eas.callAt(1);
+        assertEq(bp.schema, schemas.pin, "binding-PIN schema");
+        assertEq(bp.refUID, propertyUID, "binding-PIN refUID = PROPERTY (threaded)");
+        assertEq(bp.revocable, true, "binding-PIN revocable");
+        assertEq(bp.data, abi.encode(keyAnchorUID), "binding-PIN definition = existing key-ANCHOR");
+        assertEq(bindingPinUID, _uid(1));
+        assertEq(bp.attester, address(consumer), "attester = consumer");
     }
 
     // ── place (cardinality-1 placement PIN) ──────────────────────────────────────────────────
