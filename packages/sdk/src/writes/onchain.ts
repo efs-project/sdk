@@ -48,7 +48,7 @@
  */
 
 import { type Address, type Hex, toHex } from 'viem'
-import { EfsError } from '../errors.js'
+import { EfsError, classifyError } from '../errors.js'
 import { EFS_BYTES_STORE_BYTECODE } from './onchain-bytecode.js'
 
 /**
@@ -198,9 +198,17 @@ function bytesToHex(bytes: Uint8Array): string {
  * then the manager deploy wrapping the chunk address. Reuses the contracts'
  * reference deployment logic exactly (`simulate-transports.ts`).
  *
+ * Every wallet/RPC call (the two deploys + each receipt wait) runs through the SAME
+ * {@link classifyError} funnel the submitter uses, so a wallet rejection / RPC failure
+ * on the default `fs.write(path, bytes)` quickstart path surfaces as the documented
+ * typed tree (`UserRejected` / `RpcError` / …) instead of a raw viem/provider error.
+ * The pre-send `signal.throwIfAborted()` checks stay OUTSIDE the funnel so an abort
+ * still propagates as the caller's `AbortError`, not a generic wrapped `EfsError`.
+ *
  * @throws {MultiChunkUnsupported} if `bytes` exceeds one chunk's capacity.
- * @throws {EfsError} if a deploy receipt carries no `contractAddress` (a deploy
- *   that didn't create a contract — a wrong receipt or a non-deploy tx).
+ * @throws {EfsError} a classified wallet/RPC failure (`UserRejected`/`RpcError`/…), or
+ *   if a deploy receipt carries no `contractAddress` (a deploy that didn't create a
+ *   contract — a wrong receipt or a non-deploy tx).
  */
 export async function storeOnchain(
   bytes: Uint8Array,
@@ -214,19 +222,23 @@ export async function storeOnchain(
   // 1. Deploy the SSTORE2 chunk (raw init-code deploy; throws on multi-chunk).
   ctx.signal?.throwIfAborted()
   const initCode = buildSstore2InitCode(bytes)
-  const chunkTx = await ctx.walletClient.sendTransaction({ data: initCode, ...fwd })
+  const chunkTx = await classified(() =>
+    ctx.walletClient.sendTransaction({ data: initCode, ...fwd }),
+  )
   const chunkAddress = await requireContractAddress(ctx, chunkTx, 'SSTORE2 chunk')
 
   // 2. Deploy the chunk manager wrapping the chunk address (single-element array).
   //    Re-check the signal BETWEEN the two irreversible deploys — an abort after the
   //    chunk landed must not still send the manager tx.
   ctx.signal?.throwIfAborted()
-  const managerTx = await ctx.walletClient.deployContract({
-    abi: EFS_BYTES_STORE_ABI,
-    bytecode: EFS_BYTES_STORE_BYTECODE,
-    args: [[chunkAddress]],
-    ...fwd,
-  })
+  const managerTx = await classified(() =>
+    ctx.walletClient.deployContract({
+      abi: EFS_BYTES_STORE_ABI,
+      bytecode: EFS_BYTES_STORE_BYTECODE,
+      args: [[chunkAddress]],
+      ...fwd,
+    }),
+  )
   const chunkManager = await requireContractAddress(ctx, managerTx, 'chunk manager')
 
   // web3://<chunkManager> — EFSRouter._parseContractFromWeb3URI parses the address
@@ -236,13 +248,24 @@ export async function storeOnchain(
   return { web3Uri: `web3://${chunkManager}`, chunkManager, chunkAddress }
 }
 
+/** Run a wallet/RPC call through the {@link classifyError} funnel so a raw viem/provider
+ * failure surfaces as the SDK's typed error tree (`UserRejected`/`RpcError`/…). Idempotent
+ * for an already-typed `EfsError` (it passes through unchanged). */
+async function classified<T>(fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn()
+  } catch (cause) {
+    throw classifyError(cause)
+  }
+}
+
 /** Wait for a deploy receipt and return its created contract address, or throw. */
 async function requireContractAddress(
   ctx: OnchainStoreContext,
   hash: Hex,
   what: string,
 ): Promise<Address> {
-  const receipt = await ctx.publicClient.waitForTransactionReceipt({ hash })
+  const receipt = await classified(() => ctx.publicClient.waitForTransactionReceipt({ hash }))
   const addr = receipt.contractAddress
   if (addr === undefined || addr === null) {
     throw new EfsError(

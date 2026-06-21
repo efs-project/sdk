@@ -12,6 +12,7 @@
 
 import { type Address, type Hex, toHex } from 'viem'
 import { describe, expect, it } from 'vitest'
+import { EfsError, RpcError, UserRejected } from '../src/errors.js'
 import {
   MAX_SINGLE_CHUNK_BYTES,
   MultiChunkUnsupported,
@@ -125,6 +126,45 @@ describe('storeOnchain', () => {
     await expect(storeOnchain(new Uint8Array([1]), broken)).rejects.toThrow(/no contract address/)
   })
 
+  it('classifies a wallet rejection on the chunk deploy into UserRejected', async () => {
+    const { ctx } = makeCtx()
+    // viem/provider surfaces EIP-1193 4001 for a user rejection — must become the SDK's
+    // typed UserRejected, not a raw provider error, on the default quickstart write path.
+    const rejecting = {
+      ...ctx,
+      walletClient: {
+        ...ctx.walletClient,
+        async sendTransaction() {
+          throw Object.assign(new Error('User rejected the request.'), { code: 4001 })
+        },
+      },
+    } as unknown as OnchainStoreContext
+    await expect(storeOnchain(new Uint8Array([1, 2, 3]), rejecting)).rejects.toBeInstanceOf(
+      UserRejected,
+    )
+  })
+
+  it('classifies an RPC failure on the receipt wait into RpcError', async () => {
+    const { ctx } = makeCtx()
+    const flaky = {
+      ...ctx,
+      publicClient: {
+        async waitForTransactionReceipt() {
+          throw Object.assign(new Error('JSON-RPC internal error'), { code: -32000 })
+        },
+      },
+    } as unknown as OnchainStoreContext
+    await expect(storeOnchain(new Uint8Array([1, 2, 3]), flaky)).rejects.toBeInstanceOf(RpcError)
+  })
+
+  it('does NOT re-wrap a typed MultiChunkUnsupported through the classifier', async () => {
+    // buildSstore2InitCode throws before any wallet call; classifyError is idempotent,
+    // so the typed error must survive (not collapse into a generic EfsError).
+    const { ctx } = makeCtx()
+    const big = new Uint8Array(MAX_SINGLE_CHUNK_BYTES + 1)
+    await expect(storeOnchain(big, ctx)).rejects.toBeInstanceOf(MultiChunkUnsupported)
+  })
+
   it('aborts between the chunk and manager deploys — never sends the manager tx', async () => {
     const { ctx, calls } = makeCtx()
     const controller = new AbortController()
@@ -137,7 +177,11 @@ describe('storeOnchain', () => {
       return h
     }
     const signalCtx = { ...ctx, signal: controller.signal } as unknown as OnchainStoreContext
-    await expect(storeOnchain(new Uint8Array([1, 2, 3]), signalCtx)).rejects.toThrow()
+    const err = await storeOnchain(new Uint8Array([1, 2, 3]), signalCtx).catch((e) => e)
+    // The abort comes from `signal.throwIfAborted()`, which is OUTSIDE the classifier
+    // funnel — so it must propagate as the raw AbortError, NOT a wrapped EfsError.
+    expect(err).not.toBeInstanceOf(EfsError)
+    expect((err as Error).name).toBe('AbortError')
     expect(calls.filter((c) => c.kind === 'chunk')).toHaveLength(1) // chunk did deploy
     expect(calls.filter((c) => c.kind === 'manager')).toHaveLength(0) // manager never sent
   })
