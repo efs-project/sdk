@@ -17,8 +17,12 @@ import {
   lens,
 } from '../src/index.js'
 
-const publicClient = createPublicClient({ chain: sepolia, transport: http() })
-const walletClient = createWalletClient({ chain: sepolia, transport: http() }) as WalletClient
+// An UNREGISTERED chain — Sepolia (11155111) is now seeded in the built-in registry, so
+// these "the verb is wired" tests use a chain with no EFS deployment, where reaching
+// deployment resolution still surfaces DeploymentNotFound (the signal they rely on).
+const noDeployChain = { ...sepolia, id: 999_999 } as const
+const publicClient = createPublicClient({ chain: noDeployChain, transport: http() })
+const walletClient = createWalletClient({ chain: noDeployChain, transport: http() }) as WalletClient
 const addr = (n: number) => `0x${n.toString(16).padStart(40, '0')}` as Address
 
 describe('namespaced client (Decision F)', () => {
@@ -94,14 +98,14 @@ describe('namespaced client (Decision F)', () => {
     } as unknown as EIP1193Provider
 
     // No account → read-only client; the read verb is wired and reaches deployment
-    // resolution (DeploymentNotFound on sepolia, where none is registered).
-    const ro = createEfsClient({ provider, chain: sepolia })
+    // resolution (DeploymentNotFound on an unregistered chain).
+    const ro = createEfsClient({ provider, chain: noDeployChain })
     await expect(ro.fs.read('/x')).rejects.toThrow(DeploymentNotFound)
 
     // With an account → write-capable; write is wired (Tier-1) and passes the
     // wallet gate, reaching deployment resolution (DeploymentNotFound on a chain
     // with no registered EFS deployment) — not WalletRequired, not NotImplemented.
-    const rw = createEfsClient({ provider, chain: sepolia, account: addr(1) })
+    const rw = createEfsClient({ provider, chain: noDeployChain, account: addr(1) })
     await expect(rw.fs.write('/x', new Uint8Array())).rejects.toThrow(DeploymentNotFound)
   })
 })

@@ -79,15 +79,54 @@ export type EfsDeployment = {
 export type DeploymentsMap = Record<number, EfsDeployment>
 
 /**
- * Built-in registry. Populated as EFS deploys to chains; values are
- * deploy-derived (addresses from the atomic CREATE3 deploy, UIDs from the
- * registered schemas — ADR-0005). Pre-launch this is empty: Sepolia (11155111)
- * lands after the freeze sign-off + CREATE3 deploy (UIDs/addresses are TBD until
- * then, so nothing is seeded here — do not seed from a stale
- * `deployedContracts.ts` snapshot). For a local fork (chainId 31337) until then,
- * pass `deployments` in the client config.
+ * Sepolia (chainId 11155111) — frozen 2026-06-19 (9 schemas registered + scaffolding
+ * sealed). Addresses + UIDs are the canonical record from the contracts repo
+ * `docs/CHAINS.md`. Safe-keyed CREATE3 proxies (the read views EFSFileView/EFSRouter/
+ * ListReader are stateless + redeployable — if they move, override at the client).
+ *
+ * `transports` is intentionally absent: the per-scheme `/transports/<scheme>` anchor
+ * UIDs are runtime EAS UIDs (not derivable offline) and `docs/CHAINS.md` lists only the
+ * `/transports` root. Reads work fully; a default on-chain (`web3://`) write needs the
+ * per-scheme UID via `WriteOptions.transportDefinition` until the map is seeded (else a
+ * clear `MissingTransport`). Add the per-scheme UIDs here once the deploy records them.
  */
-export const deployments: DeploymentsMap = {}
+export const SEPOLIA: EfsDeployment = {
+  chainId: 11155111,
+  contracts: {
+    eas: '0xC2679fBD37d54388Ce493F1DB75320D236e1815e',
+    schemaRegistry: '0x0a7E2Ff54e76B8E6659aedc9103FB21c038050D0',
+    indexer: '0xc4DeaBB482C2FA74690629eEa662efb166BD658a',
+    router: '0x4EF216e1096237dA8A962157Ed13ea1B3FcC5E17',
+    fileView: '0x141D9FdbadCd9f6e6928A4842FF00094502CC146',
+    edgeResolver: '0xD6643DB36B20895E3E46aD08cdD4ED4BC1dBB7F1',
+    mirrorResolver: '0xd4991Ced6D460A3794E9120dC6C19975092982b9',
+    listResolver: '0x678883253e0edA926aC48F23655967e78E7d464C',
+    listEntryResolver: '0x7a14832E355d5937019C3D0b72bd11F2dbD5e513',
+    listReader: '0x689AA70BF6a8b22BE4E959dcf33A40ea03F85Bd5',
+    aliasResolver: '0xB07225842d6513239a3519ae052B5bc7EBf18996',
+    systemAccount: '0x63DEA7336C4217B7c5433eE3CB21Bb6a6813588d',
+  },
+  schemas: {
+    anchor: '0xf818abd74da70345c8acd7087e6ce69fd48eaf4e79c1931e5c6b08fb148c921a',
+    property: '0xa1f54f2d395c24077e374d9a2d835a2d2fcb3b4c3e019f63525bee3424f1c246',
+    data: '0xa3400cecc384d66d84f502fd91e56dc0321edccde9ef8e49d303ba63cc841b3c',
+    pin: '0x5aaabaea19accff34c604f6f1b0dd2361a0a9ba64f7746ea6b3ed95d4047d878',
+    tag: '0x0c41f8ee209fdbea4de3942c488a4098dd5a8bb1afce117857c5493002dd0e87',
+    mirror: '0x9573ea8100bda88cc09ba275d8307b309c42ae82cca7f96ccf0e3eef4b5ea58d',
+    list: '0x2e2801910184228802919fcc6f20c7e6c9e9c12fb8ae7a1f4e516cd3eeec6a59',
+    listEntry: '0x9a22c62bf63ef3a04412c124747df97d9f9e81376fa202d4ed514d0a5e6c9af1',
+    redirect: '0x5dca2fcc2c39c8629616b175a38c5e71d641b3019a3cb4ca790cc8fd32c9b8e0',
+  },
+}
+
+/**
+ * Built-in registry. Seeded from the contracts repo `docs/CHAINS.md` as EFS freezes on
+ * a chain (addresses from the CREATE3 deploy, UIDs from the registered schemas — ADR-0005).
+ * For a local fork (chainId 31337), pass `deployments` in the client config.
+ */
+export const deployments: DeploymentsMap = {
+  [SEPOLIA.chainId]: SEPOLIA,
+}
 
 /** Resolve the deployment for a chain, preferring a caller override. */
 export function resolveDeployment(chainId: number, override?: DeploymentsMap): EfsDeployment {

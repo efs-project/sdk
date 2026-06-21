@@ -25,6 +25,7 @@ import {
   type EfsSchemaUIDs,
   SchemaMismatchError,
   assertSchemaIntegrity,
+  resolveDeployment,
   verifyDeployment,
 } from '../src/index.js'
 
@@ -169,5 +170,26 @@ describe('verifyDeployment', () => {
     const wrong = { ...ONCHAIN_TRUTH, MIRROR_SCHEMA_UID: uid(0x999) }
     const { client } = makeClient(wrong)
     await expect(verifyDeployment(client, deployment)).rejects.toThrow(SchemaMismatchError)
+  })
+})
+
+describe('built-in registry — Sepolia (11155111)', () => {
+  it('resolveDeployment(11155111) returns the seeded Sepolia deployment (no override)', () => {
+    const dep = resolveDeployment(11_155_111)
+    expect(dep.chainId).toBe(11_155_111)
+    // Canonical addresses from contracts docs/CHAINS.md (frozen 2026-06-19).
+    expect(dep.contracts.indexer).toBe('0xc4DeaBB482C2FA74690629eEa662efb166BD658a')
+    expect(dep.contracts.eas).toBe('0xC2679fBD37d54388Ce493F1DB75320D236e1815e')
+    expect(dep.contracts.aliasResolver).toBe('0xB07225842d6513239a3519ae052B5bc7EBf18996')
+    // All nine frozen schema UIDs present + 32-byte.
+    const schemas = dep.schemas
+    expect(schemas.data).toBe('0xa3400cecc384d66d84f502fd91e56dc0321edccde9ef8e49d303ba63cc841b3c')
+    expect(schemas.redirect).toBe(
+      '0x5dca2fcc2c39c8629616b175a38c5e71d641b3019a3cb4ca790cc8fd32c9b8e0',
+    )
+    for (const uidValue of Object.values(schemas)) {
+      expect(uidValue).toMatch(/^0x[0-9a-f]{64}$/)
+    }
+    expect(Object.keys(schemas)).toHaveLength(9)
   })
 })
