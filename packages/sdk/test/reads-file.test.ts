@@ -35,6 +35,7 @@ import {
   FileNotFoundError,
   LensRequired,
   MalformedClaim,
+  MissingContentHash,
 } from '../src/errors.js'
 import { attestationsFor } from '../src/reads/attestations.js'
 import type { ReadContext } from '../src/reads/context.js'
@@ -640,6 +641,35 @@ describe('read + read(ref)', () => {
       verify: false,
     })
     expect(text).toBe('# Hello EFS\n')
+  })
+
+  // A file with a mirror but NO contentHash PROPERTY → verification 'no-claim'.
+  const ctxNoHash = () =>
+    makeCtx({
+      edges: README_EDGES,
+      files: [fileItem({})],
+      placementPins: README_PLACEMENT,
+      mirrors: [{ uri: dataUri, attester: LENS }],
+      // deliberately no keyAnchors/pinTargets/attestations → no contentHash claim
+    })
+
+  it('readText THROWS MissingContentHash when verification is requested but no claim exists', async () => {
+    // Bare-value helpers are fail-closed: a missing claim ('no-claim') is unverifiable,
+    // and there is no status field to warn — so the default (verify on) must throw.
+    await expect(readText(ctxNoHash(), '/docs/readme.md', { lens: LENS })).rejects.toBeInstanceOf(
+      MissingContentHash,
+    )
+  })
+
+  it('readBytes with verify:false returns unverifiable (no-claim) bytes without throwing', async () => {
+    const bytes = await readBytes(ctxNoHash(), '/docs/readme.md', { lens: LENS, verify: false })
+    expect(new TextDecoder().decode(bytes)).toBe('# Hello EFS\n')
+  })
+
+  it('read() (non-value) reports no-claim for a missing hash WITHOUT throwing', async () => {
+    const file = await read(ctxNoHash(), '/docs/readme.md', { lens: LENS })
+    expect(file.verification).toBe('no-claim')
+    expect(file.bytes.byteLength).toBeGreaterThan(0)
   })
 
   it('readJson parses + (optionally) validates', async () => {

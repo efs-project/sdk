@@ -14,11 +14,18 @@ EFS keys all content by **attester address** (`msg.sender` at EAS). This library
 npm i @efs/solidity
 ```
 
-The package ships its EFS sources **and** a byte-identical vendored copy of the EAS
-interfaces (`@ethereum-attestation-service/eas-contracts@1.7.1`, under `vendor/`) so it
-compiles standalone. Add these remappings to your project:
+The package declares `@ethereum-attestation-service/eas-contracts@1.7.1` as a dependency
+(so `npm i @efs/solidity` installs it into your `node_modules`) **and** ships a
+byte-identical vendored copy of the EAS interfaces under `vendor/` (so a Foundry project
+can compile standalone via a remapping, without relying on `node_modules` layout).
 
-**Foundry** — `remappings.txt`:
+**Hardhat** — works with no extra config: `@efs/solidity/...` resolves from
+`node_modules/@efs/solidity`, and `@ethereum-attestation-service/eas-contracts/...`
+resolves from `node_modules/@ethereum-attestation-service/eas-contracts` (the declared
+dependency). Hardhat's package-import resolution reads your project's `node_modules`, not
+this package's Foundry `remappings.txt`, which is why the dependency must be declared.
+
+**Foundry** — add to `remappings.txt`:
 
 ```
 @efs/solidity/=node_modules/@efs/solidity/
@@ -27,13 +34,9 @@ compiles standalone. Add these remappings to your project:
 
 The import `@efs/solidity/src/EFSWriter.sol` then resolves to
 `node_modules/@efs/solidity/src/EFSWriter.sol` (the remapping points at the package
-root; the `src/` is part of the import path).
-
-> If your project already depends on `eas-contracts`, point the second remapping at
-> your own copy instead — the vendored sources are identical, so either resolves.
-
-**Hardhat** resolves `@efs/solidity/...` and `@ethereum-attestation-service/...` from
-`node_modules` directly (the vendored EAS sources travel with the package).
+root; the `src/` is part of the import path). You may instead point the second remapping
+at `node_modules/@ethereum-attestation-service/eas-contracts/` (the installed dependency)
+— the sources are identical, so either resolves.
 
 ## Use
 

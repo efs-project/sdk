@@ -27,7 +27,13 @@
 import type { Address, Hex } from 'viem'
 import { fileViewAbi } from '../chain/abi/fileView.js'
 import { classifyError } from '../errors.js'
-import { ContentHashMismatch, EfsError, FileNotFoundError, MalformedClaim } from '../errors.js'
+import {
+  ContentHashMismatch,
+  EfsError,
+  FileNotFoundError,
+  MalformedClaim,
+  MissingContentHash,
+} from '../errors.js'
 import { type FetchVerifiedOptions, type Mirror, fetchVerified } from '../mirror/fetch.js'
 import { type Web3ReadClient, readWeb3Bytes } from '../mirror/web3.js'
 import type {
@@ -258,17 +264,25 @@ async function hydrateByteAttestations(
 // ── Value sugar (fail-closed) ────────────────────────────────────────────────────
 
 /** Map a verification status to the throw the fail-closed sugar owes (sdk-read-surface
- * §error matrix). `matches-author`/`no-claim` pass; the rest throw. With `verify:false`
- * nothing is checked (`no-claim`) so nothing throws. */
-function assertVerified(file: EfsFile, path: string): void {
+ * §error matrix). `matches-author` passes; `mismatch`/`malformed-claim` always throw.
+ * `no-claim` is the subtle one: it means NOTHING was verified — legitimate when the
+ * caller opted out (`verify:false`), but a fail-closed problem when verification was
+ * REQUESTED (the default) and the file simply has no contentHash claim. A bare value
+ * has no status field to carry that, so we throw {@link MissingContentHash} rather than
+ * silently hand back unverifiable bytes. `verifyRequested` = `opts.verify !== false`. */
+function assertVerified(file: EfsFile, path: string, verifyRequested: boolean): void {
   switch (file.verification) {
     case 'mismatch':
       throw new ContentHashMismatch(path)
     case 'malformed-claim':
       throw new MalformedClaim(path)
+    case 'no-claim':
+      // Opted out (`verify:false`) ⇒ acceptable. Verification requested but no claim
+      // exists ⇒ fail closed (the bytes are unverifiable, and the bare helper can't warn).
+      if (verifyRequested) throw new MissingContentHash(path)
+      return
     default:
-      // 'matches-author' | 'no-claim' — trust-safe (no-claim only when verify:false
-      // or the attester set no hash; the caller opted out / there is nothing to check).
+      // 'matches-author' — verified.
       return
   }
 }
@@ -282,7 +296,7 @@ export async function readBytes(
   opts?: ReadOpts & FetchOptions,
 ): Promise<Uint8Array> {
   const file = await read(ctx, path, opts)
-  assertVerified(file, path)
+  assertVerified(file, path, opts?.verify !== false)
   return file.bytes
 }
 
@@ -294,7 +308,7 @@ export async function readText(
   opts?: ReadOpts & FetchOptions,
 ): Promise<string> {
   const file = await read(ctx, path, opts)
-  assertVerified(file, path)
+  assertVerified(file, path, opts?.verify !== false)
   return file.text()
 }
 
@@ -311,7 +325,7 @@ export async function readJson<T = unknown>(
   opts?: ReadOpts & FetchOptions & { schema?: ParseSchema<T> },
 ): Promise<T> {
   const file = await read(ctx, path, opts)
-  assertVerified(file, path)
+  assertVerified(file, path, opts?.verify !== false)
   const value = file.json<unknown>()
   return opts?.schema ? opts.schema.parse(value) : (value as T)
 }

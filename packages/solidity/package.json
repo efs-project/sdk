@@ -16,6 +16,9 @@
   },
   "keywords": ["ethereum", "efs", "eas", "solidity", "filesystem"],
   "homepage": "https://github.com/efs-project/sdk/tree/main/packages/solidity",
+  "dependencies": {
+    "@ethereum-attestation-service/eas-contracts": "1.7.1"
+  },
   "scripts": {
     "setup": "[ -d lib/forge-std ] || git clone --depth 1 --branch v1.9.4 https://github.com/foundry-rs/forge-std lib/forge-std",
     "prebuild": "pnpm run setup",

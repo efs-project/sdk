@@ -62,8 +62,9 @@ abstract contract EFSWriter {
         bytes32 parentAnchorUID,
         string memory fileName
     ) internal returns (bytes32 fileAnchorUID, bytes32 placementPinUID) {
-        (fileAnchorUID, placementPinUID) =
-            EFSLib.placeExisting(EAS, schemas, dataUID, parentAnchorUID, fileName);
+        (fileAnchorUID, placementPinUID) = EFSLib.placeExisting(
+            EAS, schemas, dataUID, parentAnchorUID, fileName
+        );
         emit EFSFileWritten(fileAnchorUID, dataUID, placementPinUID);
     }
 

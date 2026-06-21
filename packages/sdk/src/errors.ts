@@ -331,6 +331,26 @@ export class MalformedClaim extends EfsError {
   }
 }
 
+/** The file has NO `contentHash` claim under the lens, so the bytes cannot be verified.
+ * Thrown by the fail-closed value sugar when verification was requested (the default):
+ * a bare value has no status field to carry `no-claim`, so returning unverifiable bytes
+ * would silently defeat the fail-closed contract. Pass `{ verify: false }` to opt out
+ * (then `no-claim` is acceptable), or use `read()` which reports `verification` instead
+ * of throwing. The {@link EfsFile} path reports `verification:'no-claim'`. */
+export class MissingContentHash extends EfsError {
+  override name = 'MissingContentHash'
+  readonly path?: string
+  constructor(path?: string) {
+    super(
+      path !== undefined
+        ? `EFS read: no contentHash claim for '${path}' under this lens, so the bytes cannot be verified. Pass { verify: false } to read them unverified, or use read() to inspect the verification status.`
+        : 'EFS read: no contentHash claim under this lens, so the bytes cannot be verified. Pass { verify: false } to read them unverified, or use read() to inspect the verification status.',
+      { code: 'MissingContentHash' },
+    )
+    if (path !== undefined) this.path = path
+  }
+}
+
 /**
  * A REDIRECT alias chain forms a cycle under the resolving lens (e.g. A→B asserted
  * by one attester, B→A by another — ADR-0050 §"Write-time guards vs read-time
