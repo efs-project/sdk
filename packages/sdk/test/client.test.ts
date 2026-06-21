@@ -120,15 +120,22 @@ describe('createEfsClient — runtime write gate', () => {
   })
 
   it('rejects fs.write with WrongChain when the wallet is on a different chain than the deployment', async () => {
-    // Public client on CHAIN_ID (deployment resolves there), but the wallet is bound to
-    // chain 1 with an account — writes would target the wrong chain's contracts. Fail
-    // closed BEFORE any tx, using the wallet's bound `chain` (no getChainId RPC needed).
+    // Public client on CHAIN_ID (deployment resolves there), but the wallet's LIVE chain
+    // is different — writes would target the wrong chain's contracts. Fail closed BEFORE
+    // any tx, using the live getChainId (NOT the possibly-stale bound `chain`).
     const make = createEfsClient as unknown as (c: unknown) => {
       fs: { write(p: string, c: Uint8Array): Promise<unknown> }
     }
     const efs = make({
       publicClient: { chain: { id: CHAIN_ID } },
-      walletClient: { account: { address: addr(7) }, chain: { id: 1 } },
+      // Bound `chain` is STALE-matching (CHAIN_ID), but the LIVE getChainId reports a
+      // different network — the guard must trust the live value (an injected wallet that
+      // switched networks). The old bound-chain shortcut would have wrongly passed.
+      walletClient: {
+        account: { address: addr(7) },
+        chain: { id: CHAIN_ID },
+        getChainId: async () => 1,
+      },
       deployments,
     })
     const err = await efs.fs.write('/x', new Uint8Array([1])).catch((e) => e)
@@ -145,7 +152,14 @@ describe('createEfsClient — runtime write gate', () => {
     }
     const efs = make({
       publicClient: { chain: { id: CHAIN_ID } },
-      walletClient: { account: { address: addr(7) }, chain: { id: 1 } },
+      // Bound `chain` is STALE-matching (CHAIN_ID), but the LIVE getChainId reports a
+      // different network — the guard must trust the live value (an injected wallet that
+      // switched networks). The old bound-chain shortcut would have wrongly passed.
+      walletClient: {
+        account: { address: addr(7) },
+        chain: { id: CHAIN_ID },
+        getChainId: async () => 1,
+      },
       deployments,
     })
     // place() takes bytes32 anchor + DATA UIDs; the guard fires before the tx.
@@ -165,7 +179,14 @@ describe('createEfsClient — runtime write gate', () => {
     }
     const efs = make({
       publicClient: { chain: { id: CHAIN_ID } },
-      walletClient: { account: { address: addr(7) }, chain: { id: 1 } },
+      // Bound `chain` is STALE-matching (CHAIN_ID), but the LIVE getChainId reports a
+      // different network — the guard must trust the live value (an injected wallet that
+      // switched networks). The old bound-chain shortcut would have wrongly passed.
+      walletClient: {
+        account: { address: addr(7) },
+        chain: { id: CHAIN_ID },
+        getChainId: async () => 1,
+      },
       deployments,
     })
     const b32 = (h: string) => `0x${h.repeat(64).slice(0, 64)}` as `0x${string}`

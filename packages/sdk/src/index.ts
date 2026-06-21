@@ -450,8 +450,9 @@ function chainIdOf(publicClient: PublicClient): number {
  * chain, but `writeContract` runs on the WALLET's chain. If they differ — a `ViemConfig`
  * with a public client on one chain and a wallet bound or connected to another — the
  * EAS/storage txs would be sent on the wallet chain to the public chain's addresses, and
- * receipts awaited on the public chain (a silent cross-chain write). Uses the wallet's
- * bound `chain` when present (no RPC), else queries the live connected chain once.
+ * receipts awaited on the public chain (a silent cross-chain write). Queries the wallet's
+ * LIVE connected chain (`getChainId()` → `eth_chainId`) — NOT the bound `wallet.chain`,
+ * which can go stale if an injected wallet switches networks after the client is built.
  */
 async function assertWalletOnDeploymentChain(
   wallet: WalletClient,
@@ -460,7 +461,11 @@ async function assertWalletOnDeploymentChain(
   // No bound account ⇒ the write fails closed with `WalletRequired` regardless of chain
   // (the attester would be 0x0); skip the chain probe (there is nothing to send).
   if (wallet.account === undefined) return
-  const walletChainId = wallet.chain?.id ?? (await wallet.getChainId())
+  // Always ask the provider's CURRENT chain — the one the tx will actually land on. A
+  // bound `wallet.chain` is set at construction and is NOT updated when the user switches
+  // networks in their wallet, so trusting it would let a stale id pass this guard while
+  // the provider submits on a different network.
+  const walletChainId = await wallet.getChainId()
   if (walletChainId !== deploymentChainId) {
     throw new EfsError(
       `EFS write: the wallet is on chain ${walletChainId} but the EFS deployment (resolved from the public client) is chain ${deploymentChainId}. The write would target the wrong chain's contracts. Use a wallet and public client on the same chain.`,
