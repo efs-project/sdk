@@ -257,6 +257,12 @@ library EFSLib {
     /// @return placementPinUID The created placement-PIN UID.
     /// @dev    The file-ANCHOR's `forSchema` is the DATA schema UID (a file slot is
     ///         `(parent, name, DATA_SCHEMA_UID)`), NOT generic — same rule as {writeFile}.
+    ///         This form always MINTS the file-ANCHOR, so it is "place at a NEW path". To
+    ///         RE-point an existing path (overwrite/relink), resolve the slot first
+    ///         (`EFSReader.resolveAnchor(parent, name, schemas.data)`) and pass it to the
+    ///         6-arg overload — re-minting the permanent `(parent, name, DATA)` anchor
+    ///         reverts (DuplicateFileName) or files a non-canonical anchor the read path
+    ///         never finds. Mirrors {writeFile}'s `existingFileAnchorUID`.
     function placeExisting(
         IEAS eas,
         SchemaUIDs memory schemas,
@@ -264,7 +270,29 @@ library EFSLib {
         bytes32 parentAnchorUID,
         string memory fileName
     ) internal returns (bytes32 fileAnchorUID, bytes32 placementPinUID) {
-        fileAnchorUID = _attestAnchor(eas, schemas.anchor, fileName, schemas.data, parentAnchorUID);
+        return placeExisting(eas, schemas, dataUID, parentAnchorUID, fileName, EMPTY_UID);
+    }
+
+    /// @notice {placeExisting} that REUSES an already-resolved file-ANCHOR — the overwrite /
+    ///         relink form, so re-pointing an existing path does not re-mint its permanent anchor.
+    /// @dev    When `existingFileAnchorUID != EMPTY_UID` the file-ANCHOR is reused (no mint) and
+    ///         only the cardinality-1 placement PIN is attested — the PIN supersedes the prior
+    ///         placement at `(attester, anchor, DATA)` in O(1). When `EMPTY_UID`, behaves exactly
+    ///         like the 5-arg form (mints a fresh file-ANCHOR for a NEW path). Resolve the anchor
+    ///         via `EFSReader.resolveAnchor(parentAnchorUID, fileName, schemas.data)` (⇒ {EMPTY_UID}
+    ///         when the path is new).
+    /// @param  existingFileAnchorUID The pre-resolved file-ANCHOR to reuse, or {EMPTY_UID} to mint.
+    function placeExisting(
+        IEAS eas,
+        SchemaUIDs memory schemas,
+        bytes32 dataUID,
+        bytes32 parentAnchorUID,
+        string memory fileName,
+        bytes32 existingFileAnchorUID
+    ) internal returns (bytes32 fileAnchorUID, bytes32 placementPinUID) {
+        fileAnchorUID = existingFileAnchorUID != EMPTY_UID
+            ? existingFileAnchorUID
+            : _attestAnchor(eas, schemas.anchor, fileName, schemas.data, parentAnchorUID);
         placementPinUID = _attestPin(eas, schemas.pin, fileAnchorUID, dataUID);
     }
 

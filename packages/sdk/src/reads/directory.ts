@@ -104,6 +104,13 @@ export function validateDirectoryQuery(args: {
       `Too many exclude tags: ${excludeTagDefs.length} given, the on-chain cap (MAX_EXCLUDE_TAGS_PER_QUERY) is ${MAX_EXCLUDE_TAGS_PER_QUERY}.`,
     )
   }
+  // A `number` maxItems must be a finite integer: a fractional/NaN/Infinity limit
+  // otherwise survives the `> 0` check here (the constructor/default limit's only
+  // guard) and later throws a raw `RangeError` at `BigInt(pageSize)` instead of the
+  // SDK's typed error. (A `bigint` is always integral, so this only gates `number`.)
+  if (typeof maxItems === 'number' && !Number.isInteger(maxItems)) {
+    throw new InvalidDirectoryQuery(`maxItems must be an integer (got ${maxItems}).`)
+  }
   if (maxItems <= 0) {
     throw new InvalidDirectoryQuery(`maxItems must be greater than 0 (got ${maxItems.toString()}).`)
   }

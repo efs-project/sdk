@@ -173,6 +173,16 @@ contract ConsumerMock is EFSWriter {
     ) external returns (bytes32 fileAnchorUID, bytes32 placementPinUID) {
         return _efsPlaceExisting(schemas, dataUID, parentAnchorUID, fileName);
     }
+
+    function placeExistingAt(
+        EFSLib.SchemaUIDs memory schemas,
+        bytes32 dataUID,
+        bytes32 parentAnchorUID,
+        string memory fileName,
+        bytes32 existingFileAnchorUID
+    ) external returns (bytes32 fileAnchorUID, bytes32 placementPinUID) {
+        return _efsPlaceExisting(schemas, dataUID, parentAnchorUID, fileName, existingFileAnchorUID);
+    }
 }
 
 contract EFSWriterTest is Test {
@@ -389,6 +399,44 @@ contract EFSWriterTest is Test {
         assertTrue(
             anchor.schema != schemas.data && pin.schema != schemas.data, "no fresh DATA minted"
         );
+    }
+
+    /// @notice Overwrite/relink: re-pointing an EXISTING path reuses its permanent file-ANCHOR
+    ///         (no re-mint) and emits only the cardinality-1 placement PIN — re-minting the
+    ///         `(parent, name, DATA)` anchor would revert (DuplicateFileName) or file a
+    ///         non-canonical anchor the read path never finds. Mirrors the TS hardlink branch.
+    function test_PlaceExistingAt_ReusesAnchorOnRelink() public {
+        bytes32 existingData = keccak256("PRE_EXISTING_DATA_2");
+        bytes32 existingAnchor = keccak256("ALREADY_RESOLVED_FILE_ANCHOR");
+
+        vm.prank(ALICE);
+        (bytes32 fileAnchorUID, bytes32 pinUID) =
+            consumer.placeExistingAt(schemas, existingData, PARENT, "linked.txt", existingAnchor);
+
+        assertEq(eas.callCount(), 1, "relink = ONE attestation (the placement PIN only)");
+
+        // The single attestation is the placement PIN, bound to the EXISTING anchor.
+        MockEAS.Call memory pin = eas.callAt(0);
+        assertEq(pin.schema, schemas.pin, "relink pin schema");
+        assertEq(pin.refUID, existingData, "relink pin refUID = pre-existing DATA");
+        assertEq(
+            pin.data, abi.encode(existingAnchor), "relink pin definition = existing file-ANCHOR"
+        );
+        assertEq(fileAnchorUID, existingAnchor, "returns the reused anchor (no fresh mint)");
+        assertEq(pinUID, _uid(0));
+
+        // No ANCHOR-schema attestation: the permanent file-ANCHOR was NOT re-minted.
+        assertTrue(pin.schema != schemas.anchor, "no fresh file-ANCHOR minted on relink");
+    }
+
+    /// @notice The 6-arg form with a zero `existingFileAnchorUID` behaves like the 4-arg form:
+    ///         it MINTS a fresh file-ANCHOR (place at a NEW path).
+    function test_PlaceExistingAt_ZeroAnchorMintsLikeNewPath() public {
+        bytes32 existingData = keccak256("PRE_EXISTING_DATA_3");
+        vm.prank(ALICE);
+        consumer.placeExistingAt(schemas, existingData, PARENT, "fresh.txt", bytes32(0));
+        assertEq(eas.callCount(), 2, "new path = anchor + pin (2 attestations)");
+        assertEq(eas.callAt(0).schema, schemas.anchor, "minted a fresh file-ANCHOR");
     }
 
     /// @notice The library inlines, so EAS records the CALLER (the consumer) as attester, never

@@ -905,6 +905,18 @@ describe('list', () => {
       /positive integer/,
     )
   })
+
+  it('rejects a fractional/Infinity CONSTRUCTOR limit with InvalidDirectoryQuery (not RangeError)', async () => {
+    // A bad default limit (no per-page override) must surface the typed error at prime
+    // time, not slip through to a raw `BigInt(pageSize)` RangeError on the first page.
+    const ctx = makeCtx({ edges: README_EDGES, files: [fileItem({})] })
+    for (const bad of [1.5, Number.POSITIVE_INFINITY]) {
+      const err = await list(() => ctx, '/docs', { lens: LENS, limit: bad })
+        .byPage()
+        .catch((e) => e)
+      expect(err).toBeInstanceOf(InvalidDirectoryQuery)
+    }
+  })
 })
 
 // ── list with excludes (ADR-0011 tag-exclusion filter) ──────────────────────────

@@ -152,4 +152,14 @@ describe('validateDirectoryQuery (on-chain cap fail-fast)', () => {
     expect(() => validateDirectoryQuery({ ...valid, maxItems: 10n })).not.toThrow()
     expect(() => validateDirectoryQuery({ ...valid, maxItems: 0n })).toThrow(InvalidDirectoryQuery)
   })
+
+  it('throws (not a raw RangeError) on a fractional/NaN/Infinity maxItems', () => {
+    // The constructor/default limit's only guard — a non-integer here would otherwise
+    // survive to `BigInt(pageSize)` and throw a raw RangeError instead of the typed error.
+    for (const bad of [1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(() => validateDirectoryQuery({ ...valid, maxItems: bad })).toThrow(
+        InvalidDirectoryQuery,
+      )
+    }
+  })
 })

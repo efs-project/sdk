@@ -68,6 +68,29 @@ abstract contract EFSWriter {
         emit EFSFileWritten(fileAnchorUID, dataUID, placementPinUID);
     }
 
+    /// @notice {_efsPlaceExisting} that REUSES an already-resolved file-ANCHOR — the overwrite /
+    ///         relink form, so re-pointing an existing path does not re-mint its permanent anchor.
+    /// @dev    Delegates to {EFSLib.placeExisting}'s 6-arg overload. When `existingFileAnchorUID`
+    ///         is nonzero the file-ANCHOR is reused and only the cardinality-1 placement PIN is
+    ///         attested (supersedes the prior placement); when {bytes32(0)} it mints a fresh anchor
+    ///         like the 4-arg form. Resolve the slot first via
+    ///         `EFSReader.resolveAnchor(parentAnchorUID, fileName, schemas.data)` (zero ⇒ new path) —
+    ///         re-minting the permanent `(parent, name, DATA)` anchor reverts or files a
+    ///         non-canonical anchor the read path never finds.
+    /// @param  existingFileAnchorUID The pre-resolved file-ANCHOR to reuse, or zero to mint.
+    function _efsPlaceExisting(
+        EFSLib.SchemaUIDs memory schemas,
+        bytes32 dataUID,
+        bytes32 parentAnchorUID,
+        string memory fileName,
+        bytes32 existingFileAnchorUID
+    ) internal returns (bytes32 fileAnchorUID, bytes32 placementPinUID) {
+        (fileAnchorUID, placementPinUID) = EFSLib.placeExisting(
+            EAS, schemas, dataUID, parentAnchorUID, fileName, existingFileAnchorUID
+        );
+        emit EFSFileWritten(fileAnchorUID, dataUID, placementPinUID);
+    }
+
     /// @notice The **mkdir** primitive: create a child ANCHOR (folder/name node) under a parent.
     /// @dev    Delegates to {EFSLib.anchorAt}. The created anchor's attester is `address(this)`.
     /// @param  schemas      The frozen schema UID set (only `anchor` is used).
