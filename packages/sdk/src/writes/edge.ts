@@ -162,22 +162,64 @@ export function buildTagPlan(
  * key supersedes the prior value in O1 (the key-ANCHOR is reused/re-minted; only the
  * binding moves).
  *
+ * UPDATE (Bug-2 fix): when the caller resolved an EXISTING key-anchor at
+ * `(dataUID, key, PROPERTY_SCHEMA_UID)`, pass it as `existingKeyAnchorUID`. EFS
+ * key-ANCHORs are PERMANENT/non-revocable, so re-minting the same slot reverts (or
+ * mis-binds). With the existing UID supplied the plan emits ONLY the new PROPERTY (L1)
+ * + the binding-PIN (L1; its `definition` is the CONCRETE existing key-anchor,
+ * `refUID` the fresh PROPERTY threaded from L1) — mirroring Solidity `EFSLib.setPropertyAt`.
+ * Omitted ⇒ a NEW key: the full key-ANCHOR + PROPERTY + binding-PIN triple as before.
+ *
  * @param schemas The frozen schema-UID set (anchor / property / pin UIDs).
  * @param dataUID The DATA (or any anchorable target) the property is bound under.
  * @param key     The property key (the key-ANCHOR `name`).
  * @param value   The property value (the PROPERTY `string value`).
+ * @param existingKeyAnchorUID The pre-existing key-anchor UID to REUSE (Bug-2), or
+ *   `undefined`/omitted to mint a fresh key-ANCHOR.
  */
 export function buildPropertyPlan(
   schemas: EfsSchemaUIDs,
   dataUID: Hex,
   key: string,
   value: string,
+  existingKeyAnchorUID?: Hex,
 ): FileWriteGraph {
-  // L1 key-ANCHOR — `forSchema` MUST be the PROPERTY schema UID, not a generic
-  // sentinel: the kernel indexes the anchor at `_nameToAnchor[DATA][key][forSchema]`
-  // (EFSIndexer.sol:432) and the canonical reader resolves it via
-  // `resolveAnchor(DATA, key, PROPERTY_SCHEMA_UID)` (mirrored by the SDK's
-  // `readReservedProperty`/`readCustomProperty`). A generic `forSchema` files it
+  // PROPERTY — the interned value (refUID 0, non-revocable). Always minted fresh (new
+  // content), whether the key-anchor is reused or not.
+  const property: PlannedAttestation = {
+    ref: EDGE_REF.PROPERTY,
+    layer: 1,
+    kind: 'PROPERTY',
+    schema: schemas.property,
+    data: propertyEncoder.encodeData([value]),
+    revocable: false, // EFSIndexer.sol:489 — PROPERTY rejects revocable
+    refUID: ZERO_UID, // EFSIndexer.sol:488 — PROPERTY rejects refUID != 0
+    dataRefs: [],
+  }
+
+  // UPDATE (Bug-2): the key-anchor already exists — do NOT re-mint it (it is permanent
+  // and re-minting reverts). The binding-PIN's `definition` is the CONCRETE existing
+  // key-anchor (encoded directly, no symbolic thread); `refUID` is the fresh PROPERTY.
+  // The PROPERTY is L1; the binding-PIN sits at L2 because it refs the fresh PROPERTY.
+  if (existingKeyAnchorUID !== undefined) {
+    const bindingPin: PlannedAttestation = {
+      ref: EDGE_REF.BINDING_PIN,
+      layer: 2,
+      kind: 'PIN',
+      schema: schemas.pin,
+      data: pinEncoder.encodeData([existingKeyAnchorUID]), // definition = concrete existing key-anchor
+      revocable: true, // EdgeResolver.sol:336 — PIN must be revocable
+      refUID: { ref: EDGE_REF.PROPERTY }, // refUID = the fresh PROPERTY (the binding claim)
+      dataRefs: [], // definition is concrete — nothing for the submitter to thread
+    }
+    return { hardlink: false, attestations: [property, bindingPin] }
+  }
+
+  // NEW key — the full triple. L1 key-ANCHOR — `forSchema` MUST be the PROPERTY schema
+  // UID, not a generic sentinel: the kernel indexes the anchor at
+  // `_nameToAnchor[DATA][key][forSchema]` (EFSIndexer.sol:432) and the canonical reader
+  // resolves it via `resolveAnchor(DATA, key, PROPERTY_SCHEMA_UID)` (mirrored by the
+  // SDK's `readReservedProperty`/`readCustomProperty`). A generic `forSchema` files it
   // under the wrong slot and the read returns 0. (Same crux as graph.ts.)
   const keyAnchor: PlannedAttestation = {
     ref: EDGE_REF.KEY_ANCHOR,
@@ -187,18 +229,6 @@ export function buildPropertyPlan(
     data: anchorEncoder.encodeData([key, schemas.property]),
     revocable: false, // EFSIndexer.sol:376 — anchors are non-revocable
     refUID: dataUID, // the key-ANCHOR is bound to the DATA identity
-    dataRefs: [],
-  }
-
-  // L1 PROPERTY — the interned value (refUID 0, non-revocable).
-  const property: PlannedAttestation = {
-    ref: EDGE_REF.PROPERTY,
-    layer: 1,
-    kind: 'PROPERTY',
-    schema: schemas.property,
-    data: propertyEncoder.encodeData([value]),
-    revocable: false, // EFSIndexer.sol:489 — PROPERTY rejects revocable
-    refUID: ZERO_UID, // EFSIndexer.sol:488 — PROPERTY rejects refUID != 0
     dataRefs: [],
   }
 

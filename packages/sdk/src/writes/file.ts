@@ -20,6 +20,7 @@
  */
 
 import type { Account, Address, Chain, Hex } from 'viem'
+import { indexerAbi } from '../chain/abi/indexer.js'
 import type { EfsDeployment } from '../chain/deployments.js'
 import { hashContent } from '../content/hash.js'
 import { EfsError, WalletRequired } from '../errors.js'
@@ -28,6 +29,7 @@ import {
   ParentNotFoundError,
   type ResolvePublicClient,
   type TagReadPublicClient,
+  ZERO_UID,
   planExistingAncestorVisibilityTags,
   resolveOrPlanParents,
   resolvePathToAnchor,
@@ -265,6 +267,24 @@ export async function writeFileTier1(
     throw new ParentNotFoundError(path, resolvedSegments, parentPlan.missingSegments[0] as string)
   }
 
+  // 2b. OVERWRITE detection (Bug-1 fix). EFS file-ANCHORs are keyed by
+  // `(parent, fileName, schemas.data)` and are PERMANENT/non-revocable, so re-minting
+  // the same slot reverts (`DuplicateFileName`). When the parent already exists (no
+  // `missingParents`), resolve whether a DATA-typed file anchor is ALREADY present at
+  // this path; if so, the write must REUSE it (no fresh file-ANCHOR) and let the
+  // cardinality-1 placement PIN supersede the prior content. When parents are being
+  // created in this same write, the leaf cannot pre-exist — skip the read.
+  let existingFileAnchorUID: Hex | undefined
+  if (missingParents.length === 0) {
+    const resolved = (await ctx.publicClient.readContract({
+      address: deployment.contracts.indexer,
+      abi: indexerAbi,
+      functionName: 'resolveAnchor',
+      args: [parentAnchorUID, fileName, deployment.schemas.data],
+    })) as Hex
+    if (resolved !== ZERO_UID) existingFileAnchorUID = resolved
+  }
+
   // 3. Folder-visibility TAGs (overview.md "Upload flow" step 7; ADR-0038/0041).
   // Walk the EXISTING ancestors bottom-up and find the ones the uploader hasn't tagged
   // yet (short-circuiting at the first already-tagged ancestor). The freshly-created
@@ -310,6 +330,9 @@ export async function writeFileTier1(
     parentAnchorUID,
     ...(missingParents.length > 0 ? { missingParents } : {}),
     ...(existingAncestorTagUIDs.length > 0 ? { existingAncestorTagUIDs } : {}),
+    // OVERWRITE (Bug-1): reuse the existing DATA-typed file anchor when present — the
+    // graph then emits NO file-ANCHOR and points the placement PIN at this concrete UID.
+    ...(existingFileAnchorUID !== undefined ? { existingFileAnchorUID } : {}),
     fileName,
     // ADR-0011 Overview marker: tag the README's OWN anchor `system` before the
     // placement PIN (the setOverview path sets this on the context; a normal write

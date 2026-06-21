@@ -96,7 +96,26 @@ export function makePropsNs(deps: PropsNsDeps): PropsNs {
   return {
     set: async (dataUID, key, value) => {
       const dep = deps.getDeployment()
-      const plan = buildPropertyPlan(dep.schemas, dataUID, key, value)
+      // UPDATE detection (Bug-2 fix). EFS key-ANCHORs are keyed by
+      // `(dataUID, key, PROPERTY_SCHEMA_UID)` and are PERMANENT/non-revocable, so
+      // re-minting the same slot on a repeat `set` reverts (or binds the new PROPERTY to
+      // an anchor the read path does not use, so the visible value never updates).
+      // Resolve the existing key-anchor FIRST: when present, the plan reuses it and emits
+      // ONLY the new PROPERTY + a binding-PIN bound to it (the cardinality-1 binding
+      // supersedes in O1); when absent, the full key-ANCHOR + PROPERTY + binding triple.
+      const existingKeyAnchorUID = (await read<Hex>(deps.publicClient, {
+        address: dep.contracts.indexer,
+        abi: indexerAbi,
+        functionName: 'resolveAnchor',
+        args: [dataUID, key, dep.schemas.property],
+      })) as Hex
+      const plan = buildPropertyPlan(
+        dep.schemas,
+        dataUID,
+        key,
+        value,
+        existingKeyAnchorUID !== ZERO_UID ? existingKeyAnchorUID : undefined,
+      )
       return submitEdgePlan(plan, deps.submitContext())
     },
 

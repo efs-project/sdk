@@ -135,6 +135,27 @@ describe('buildPropertyPlan', () => {
     expect(pin?.refUID).toEqual({ ref: EDGE_REF.PROPERTY }) // refUID = PROPERTY (symbolic)
     expect(pin?.dataRefs).toEqual([{ field: 'definition', ref: { ref: EDGE_REF.KEY_ANCHOR } }])
   })
+
+  it('with an existing key anchor (Bug-2): emits ONLY PROPERTY + binding-PIN (no key-ANCHOR)', () => {
+    const EXISTING = uid(0x7aa)
+    const plan = buildPropertyPlan(SCHEMAS, DATA, 'author', 'bob', EXISTING)
+    // No fresh key-ANCHOR — the permanent existing one is reused.
+    expect(plan.attestations).toHaveLength(2)
+    const byRef = Object.fromEntries(plan.attestations.map((a) => [a.ref, a]))
+    expect(byRef[EDGE_REF.KEY_ANCHOR]).toBeUndefined()
+    // Fresh PROPERTY (new value).
+    const property = byRef[EDGE_REF.PROPERTY]
+    expect(property?.kind).toBe('PROPERTY')
+    expect(property?.data).toBe(propEnc.encodeData(['bob']))
+    // binding-PIN: definition = the CONCRETE existing key-anchor (encoded directly, no
+    // symbolic thread); refUID = the fresh PROPERTY.
+    const pin = byRef[EDGE_REF.BINDING_PIN]
+    expect(pin?.kind).toBe('PIN')
+    expect(pin?.revocable).toBe(true)
+    expect(pin?.refUID).toEqual({ ref: EDGE_REF.PROPERTY })
+    expect(pin?.dataRefs).toEqual([]) // concrete definition — nothing to thread
+    expect(pin?.data).toBe(pinEnc.encodeData([EXISTING]))
+  })
 })
 
 describe('buildPlacementPinPlan', () => {
@@ -457,6 +478,65 @@ describe('makePropsNs', () => {
       pinReq?.data[0]?.data as Hex,
     ) as [Hex]
     expect(definition).toBe(minedAnchor)
+  })
+
+  it('set on a NEW key resolves the key anchor first (absent ⇒ full triple)', async () => {
+    const { ctx, calls } = makeSubmitCtx()
+    const reads: { fn: string; args: readonly unknown[] }[] = []
+    const props = makePropsNs({
+      getDeployment: () => deployment,
+      publicClient: makeReadClient((fn, args) => {
+        reads.push({ fn, args })
+        return uid(0) // resolveAnchor → ZERO ⇒ new key
+      }) as never,
+      readContext,
+      submitContext: () => ctx,
+      attester: () => ATTESTER,
+    })
+    await props.set(DATA, KEY, VALUE)
+    // The overwrite probe ran: resolveAnchor(dataUID, key, PROPERTY_SCHEMA).
+    const probe = reads.find((r) => r.fn === 'resolveAnchor')
+    expect(probe?.args).toEqual([DATA, KEY, SCHEMAS.property])
+    // Full triple (key-ANCHOR + PROPERTY + binding-PIN) across two layers.
+    const l1 = calls[0] ?? []
+    expect(l1.some((r) => r.schema === SCHEMAS.anchor)).toBe(true)
+    expect(calls).toHaveLength(2)
+  })
+
+  it('set on an EXISTING key emits ONLY PROPERTY + binding-PIN bound to the existing anchor (Bug-2)', async () => {
+    const { ctx, calls } = makeSubmitCtx()
+    const props = makePropsNs({
+      getDeployment: () => deployment,
+      publicClient: makeReadClient((fn, args) => {
+        // resolveAnchor(dataUID, key, PROPERTY_SCHEMA) → the existing key anchor.
+        if (fn === 'resolveAnchor' && args[1] === KEY) return KEY_ANCHOR
+        return uid(0)
+      }) as never,
+      readContext,
+      submitContext: () => ctx,
+      attester: () => ATTESTER,
+    })
+    const receipt = await props.set(DATA, KEY, 'newValue')
+
+    // No fresh key-ANCHOR is minted (the permanent existing one is reused).
+    const allEntries = calls.flat()
+    expect(allEntries.some((r) => r.schema === SCHEMAS.anchor)).toBe(false)
+    // Two attestations total: the fresh PROPERTY + the binding-PIN.
+    expect(receipt.steps).toHaveLength(2)
+
+    // The fresh PROPERTY carries the new value.
+    const propReq = allEntries.find((r) => r.schema === SCHEMAS.property)
+    expect(propReq?.data[0]?.data).toBe(propEnc.encodeData(['newValue']))
+
+    // The binding-PIN's definition is the CONCRETE existing key anchor (encoded in the
+    // first layer already — no symbolic thread), and its refUID is the mined PROPERTY.
+    const pinReq = allEntries.find((r) => r.schema === SCHEMAS.pin)
+    expect(pinReq).toBeDefined()
+    const [definition] = decodeAbiParameters(
+      [{ type: 'bytes32' }],
+      pinReq?.data[0]?.data as Hex,
+    ) as [Hex]
+    expect(definition).toBe(KEY_ANCHOR)
   })
 
   it('get reads the active value the lens attester bound', async () => {

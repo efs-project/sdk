@@ -252,6 +252,28 @@ describe('lists.entries (target decoding, order, the three targetTypes)', () => 
     expect(got).toEqual([])
   })
 
+  it('honors a constructor-level cursor for the initial page (resume without restarting at 0)', async () => {
+    const ks = [addr(0x1), addr(0x2), addr(0x3), addr(0x4)]
+    const { ctx } = makeCtx({
+      [LIST_UID.toLowerCase()]: {
+        mode: mode({ targetType: 1 }),
+        entriesByAttester: {
+          [CURATOR.toLowerCase()]: ks.map((k, i) => ({
+            entryUID: uid(0xe0 + i),
+            targetType: 1,
+            identityKey: addrKey(k),
+          })),
+        },
+      },
+    })
+    // Resume at offset 2 (a persisted Page.cursor) — byPage with no per-page cursor and
+    // toArray (iterate) must both START there, not restart at 0 and duplicate entries.
+    const page = await listEntries(() => ctx, LIST_UID, { cursor: '2' }).byPage({ limit: 10 })
+    expect(page.items.map((e) => e.target)).toEqual([ks[2], ks[3]])
+    const arr = await listEntries(() => ctx, LIST_UID, { cursor: '2' }).toArray({ limit: 10 })
+    expect(arr.map((e) => e.target)).toEqual([ks[2], ks[3]])
+  })
+
   it('rejects a non-positive entries limit (would otherwise loop forever)', async () => {
     const { ctx } = makeCtx({
       [LIST_UID.toLowerCase()]: { mode: mode({ targetType: 1 }), entriesByAttester: {} },

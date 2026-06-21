@@ -138,9 +138,13 @@ function makeCtx(
      * `getActiveTagWeight` returns `[true, 1n]` for these, `[false, 0n]` otherwise —
      * the short-circuit input for the ancestor-walk. */
     taggedAncestors?: readonly Hex[]
+    /** Pre-existing DATA-typed file anchors, keyed `parent|name|schema → uid`, that the
+     * overwrite probe (`resolveAnchor`) finds. Absent ⇒ a first write at the path. */
+    anchors?: Record<string, Hex>
   } = {},
 ): { ctx: FileWriteContext; sent: SentLayer[]; deploys: SentDeploy[] } {
   const edges = opts.edges ?? { [`${ROOT}|docs`]: DOCS_ANCHOR }
+  const anchors = opts.anchors ?? {}
   const tagged = new Set<string>(opts.taggedAncestors ?? [])
   const sent: SentLayer[] = []
   const deploys: SentDeploy[] = []
@@ -157,6 +161,12 @@ function makeCtx(
       if (args.functionName === 'resolvePath') {
         const [parent, name] = args.args as [Hex, string]
         return edges[`${parent}|${name}`] ?? ZERO_UID
+      }
+      if (args.functionName === 'resolveAnchor') {
+        // (parent, name, schema) — the DATA-typed file-anchor overwrite probe (Bug-1).
+        // Keyed on `parent|name|schema`; absent ⇒ ZERO_UID (a first write at this path).
+        const [parent, name, schema] = args.args as [Hex, string, Hex]
+        return anchors[`${parent}|${name}|${schema}`] ?? ZERO_UID
       }
       if (args.functionName === 'getActiveTagWeight') {
         // (attester, target, definition, targetSchema) — the active visibility-TAG
@@ -679,6 +689,111 @@ describe('writeFileTier1 — folder-visibility TAGs (overview.md step 7, ADR-003
     expect(targets).toEqual([C]) // only the untagged immediate parent
     expect(targets).not.toContain(B)
     expect(targets).not.toContain(A)
+  })
+})
+
+describe('writeFileTier1 — overwrite (reuse the existing file anchor, Bug-1)', () => {
+  /** Flatten every submitted anchor entry, decoding its (name, forSchema). */
+  const anchorNames = async (sent: SentLayer[]) => {
+    const { SchemaEncoder } = await import('../src/eas/schema-encoder.js')
+    const { EFS_SCHEMA_FIELDS } = await import('../src/eas/schemas.js')
+    const anchorEnc = new SchemaEncoder(EFS_SCHEMA_FIELDS.anchor)
+    const out: string[] = []
+    for (const layer of sent) {
+      for (const e of layer.entries) {
+        if (e.schema === SCHEMAS.anchor) {
+          const [name] = anchorEnc.decodeData(e.data) as [string, Hex]
+          out.push(name)
+        }
+      }
+    }
+    return out
+  }
+
+  /** Decode the placement PIN's `definition` (the only PIN whose refUID is the DATA UID,
+   * i.e. not a reserved-key binding PIN). Returns the decoded definition word. */
+  const placementPinDefinition = async (sent: SentLayer[], dataUID: Hex): Promise<Hex> => {
+    const { decodeAbiParameters } = await import('viem')
+    for (const layer of sent) {
+      for (const e of layer.entries) {
+        if (e.schema === SCHEMAS.pin && e.refUID === dataUID) {
+          const [def] = decodeAbiParameters([{ type: 'bytes32' }], e.data) as [Hex]
+          return def
+        }
+      }
+    }
+    throw new Error('no placement PIN found')
+  }
+
+  const FILE_ANCHOR = uid(0x111) // a pre-existing DATA-typed file anchor at /docs/readme.md
+
+  it('overwrite: emits NO file-ANCHOR; placement PIN definition = the existing anchor UID', async () => {
+    const { ctx, sent } = makeCtx({
+      anchors: { [`${DOCS_ANCHOR}|readme.md|${SCHEMAS.data}`]: FILE_ANCHOR },
+    })
+    const receipt = await writeFileTier1('/docs/readme.md', CONTENT, ctx, {
+      contentType: 'text/markdown',
+    })
+
+    // No file-ANCHOR named `readme.md` was minted (the existing one is reused).
+    const names = await anchorNames(sent)
+    expect(names).not.toContain('readme.md')
+    // The reserved-key anchors (contentType/contentHash/size) ARE freshly minted.
+    expect(names).toContain('contentHash')
+    expect(names).toContain('size')
+
+    // The placement PIN points at the CONCRETE existing anchor (not a fresh symbolic).
+    const dataUID = receipt.data?.uid as Hex
+    expect(await placementPinDefinition(sent, dataUID)).toBe(FILE_ANCHOR)
+  })
+
+  it('first write (anchor ABSENT): still mints the file-ANCHOR fresh', async () => {
+    const { ctx, sent } = makeCtx() // no `anchors` → resolveAnchor returns ZERO_UID
+    await writeFileTier1('/docs/readme.md', CONTENT, ctx, { contentType: 'text/markdown' })
+    const names = await anchorNames(sent)
+    expect(names).toContain('readme.md') // minted fresh
+  })
+
+  it('overwrite reuses the anchor but still mints fresh DATA + MIRROR (new content)', async () => {
+    const { ctx, sent } = makeCtx({
+      anchors: { [`${DOCS_ANCHOR}|readme.md|${SCHEMAS.data}`]: FILE_ANCHOR },
+    })
+    await writeFileTier1('/docs/readme.md', CONTENT, ctx)
+    const dataEntries = sent.flatMap((l) => l.entries.filter((e) => e.schema === SCHEMAS.data))
+    const mirrorEntries = sent.flatMap((l) => l.entries.filter((e) => e.schema === SCHEMAS.mirror))
+    expect(dataEntries).toHaveLength(1) // a fresh DATA hub
+    expect(mirrorEntries.length).toBeGreaterThanOrEqual(1) // a fresh MIRROR
+  })
+
+  it('a second setOverview (README anchor already exists) succeeds: no duplicate anchor, TAG on the existing one', async () => {
+    // A second `efs.fs.setOverview` on the same folder = a markdown overwrite of the
+    // existing /docs/README.md whose DATA-typed anchor already exists. It must NOT
+    // re-mint the file-ANCHOR (which would revert DuplicateFileName); the cardinality-1
+    // placement PIN supersedes. setOverview routes through writeFileTier1 with the
+    // `overviewSystemTagDef` marker set on the context — simulate that here.
+    const SYSTEM_DEF = uid(0x5751)
+    const README_ANCHOR = uid(0x222)
+    const { ctx, sent } = makeCtx({
+      anchors: { [`${DOCS_ANCHOR}|README.md|${SCHEMAS.data}`]: README_ANCHOR },
+    })
+    ;(ctx as { overviewSystemTagDef?: Hex }).overviewSystemTagDef = SYSTEM_DEF
+    const receipt = await writeFileTier1('/docs/README.md', CONTENT, ctx, {
+      contentType: 'text/markdown',
+    })
+
+    // No second README.md anchor minted.
+    const names = await anchorNames(sent)
+    expect(names).not.toContain('README.md')
+
+    // The Overview `system` TAG targets the CONCRETE existing anchor (not a fresh ref).
+    const systemTag = sent
+      .flatMap((l) => l.entries)
+      .find((e) => e.schema === SCHEMAS.tag && e.refUID === README_ANCHOR)
+    expect(systemTag).toBeDefined()
+
+    // The placement PIN's definition is the existing anchor too.
+    const dataUID = receipt.data?.uid as Hex
+    expect(await placementPinDefinition(sent, dataUID)).toBe(README_ANCHOR)
   })
 })
 

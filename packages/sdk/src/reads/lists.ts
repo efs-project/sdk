@@ -379,7 +379,10 @@ export function listEntries(
   }): Promise<Page<ListEntry>> => {
     assertPositiveLimit(pageOpts?.limit)
     const { ctx, attester, kind, dedupe } = await prime()
-    const start = parseCursor(pageOpts?.cursor)
+    // No per-page cursor ⇒ fall back to the constructor-level `opts.cursor` (a caller
+    // who persisted a `Page.cursor` and resumed via `entries(uid, { cursor })` must start
+    // there, not restart at offset 0 and duplicate entries).
+    const start = parseCursor(pageOpts?.cursor ?? opts?.cursor)
     const pageSize = pageOpts?.limit ?? defaultLimit
     const page = await readEntriesPage(ctx, listUID, attester, kind, start, pageSize)
     // A short page (fewer than requested) means the end; otherwise advance the cursor
@@ -413,7 +416,9 @@ export function listEntries(
    * globally, so the windowed reads must surface raw entries. */
   const byPageRaw = async (cursor: string | undefined): Promise<Page<ListEntry>> => {
     const { ctx, attester, kind } = await prime()
-    const start = parseCursor(cursor)
+    // The first page (cursor undefined) honors the constructor-level `opts.cursor`;
+    // subsequent pages thread their own advanced cursor.
+    const start = parseCursor(cursor ?? opts?.cursor)
     const page = await readEntriesPage(ctx, listUID, attester, kind, start, defaultLimit)
     const next = page.length < defaultLimit ? undefined : (start + BigInt(page.length)).toString()
     return next !== undefined ? { items: page, cursor: next } : { items: page }

@@ -230,6 +230,19 @@ export interface FileWriteGraphInput {
   /** The file's anchor name (canonical encoding; the file-ANCHOR's `name`). */
   readonly fileName: string
   /**
+   * An OVERWRITE's reuse of the existing file anchor (Bug-1 fix). EFS file-ANCHORs
+   * are keyed by `(parent, fileName, schemas.data)` and are PERMANENT/non-revocable,
+   * so re-minting the same slot reverts (`DuplicateFileName`). When this concrete UID
+   * is supplied (the caller resolved a pre-existing DATA-typed anchor at this path via
+   * `resolveAnchor`), the builder does NOT emit a fresh file-ANCHOR and instead points
+   * the placement PIN's `definition` at this CONCRETE UID — the cardinality-1 placement
+   * PIN supersedes the prior content in O(1). Omitted/`undefined` ⇒ a first write at
+   * this path: the DATA-typed file-ANCHOR is minted fresh (symbolic placement `definition`).
+   * Only valid when the parent already exists (no `missingParents`) — a brand-new parent
+   * cannot already hold a same-named file anchor.
+   */
+  readonly existingFileAnchorUID?: Hex
+  /**
    * Folder-Overview marker (ADR-0011): when set, emit a `system` TAG on the file's
    * OWN anchor — `TAG(definition = overviewSystemTagDef, refUID = file-ANCHOR,
    * weight = 1)` — in the layer STRICTLY BEFORE the placement PIN, so the file is
@@ -370,7 +383,18 @@ export function buildFileWriteGraph(input: FileWriteGraphInput): FileWriteGraph 
   })
 
   // ── file-ANCHOR — names the path under the parent folder (base layer 2) ───────
-  attestations.push(buildFileAnchor(input, m + 2))
+  // OVERWRITE (Bug-1 fix): when the file anchor at `(parent, fileName, DATA)` already
+  // exists, it is PERMANENT/non-revocable — re-minting the same slot reverts
+  // (`DuplicateFileName`). So skip the file-ANCHOR entirely; the placement PIN and any
+  // Overview `system` TAG point at the supplied CONCRETE `existingFileAnchorUID` instead.
+  const existingFileAnchorUID = input.existingFileAnchorUID
+  if (existingFileAnchorUID === undefined) {
+    attestations.push(buildFileAnchor(input, m + 2))
+  }
+  // The file-ANCHOR reference the Overview TAG + placement PIN target: the freshly
+  // minted anchor (symbolic) on a first write, or the concrete reused UID on overwrite.
+  const fileAnchorRef: RefOrUID =
+    existingFileAnchorUID !== undefined ? existingFileAnchorUID : { ref: REF.FILE_ANCHOR }
 
   // ── MIRROR ×N — retrieval methods bound to DATA (base layer 2) ───────────────
   // MirrorResolver.onAttest (MirrorResolver.sol:142-192): refUID must resolve to a
@@ -453,15 +477,20 @@ export function buildFileWriteGraph(input: FileWriteGraphInput): FileWriteGraph 
       schema: schemas.tag,
       data: tagEncoder.encodeData([input.overviewSystemTagDef, VISIBILITY_TAG_WEIGHT]),
       revocable: true, // EdgeResolver.sol — TAG must be revocable
-      refUID: { ref: REF.FILE_ANCHOR }, // the file's own anchor (fresh L2 sibling)
+      // The file's own anchor: a fresh L2 sibling (symbolic) on a first write, or the
+      // concrete reused UID on an overwrite (Bug-1 fix).
+      refUID: fileAnchorRef,
       dataRefs: [],
     })
   }
 
   // ── placement-PIN — definition = file-ANCHOR, refUID = DATA (fresh) ──────────
   // Base L3, shifted to L4 when the Overview `system` TAG occupies L3 (so the TAG
-  // mines first — the README is never placed before it is tagged).
-  attestations.push(buildPlacementPin(schemas, { ref: REF.DATA }, m + 3 + ov))
+  // mines first — the README is never placed before it is tagged). On an overwrite the
+  // `definition` is the concrete reused file-ANCHOR UID (no fresh sibling to thread).
+  attestations.push(
+    buildPlacementPin(schemas, { ref: REF.DATA }, m + 3 + ov, existingFileAnchorUID),
+  )
 
   // ── visibility TAGs — one per uncovered ancestor folder ──────────────────────
   // Emitted AFTER every folder ANCHOR + PIN so a `createParents`-minted folder is
@@ -545,25 +574,42 @@ function buildFileAnchor(input: FileWriteGraphInput, layer: number): PlannedAtte
 }
 
 /**
- * Build the placement-PIN: definition = file-ANCHOR, refUID = the DATA UID
- * (symbolic for a fresh write, concrete for a hardlink). PIN onAttest requires
- * revocable=true (EdgeResolver.sol:336) and expirationTime 0 (:337); the
- * `definition` is the file-ANCHOR (always a fresh sibling here). `layer` is the
- * base L3, shifted by any created folders.
+ * Build the placement-PIN: refUID = the DATA UID (symbolic for a fresh write,
+ * concrete for a hardlink). The `definition` is the file-ANCHOR — a FRESH sibling
+ * for a first write (threaded symbolically via `dataRefs`), or a CONCRETE
+ * pre-existing UID on an OVERWRITE that reuses the anchor (Bug-1 fix:
+ * `existingFileAnchorUID`), in which case the anchor is encoded directly and there is
+ * no `dataRefs` to thread. PIN onAttest requires revocable=true (EdgeResolver.sol:336)
+ * and expirationTime 0 (:337). `layer` is the base L3, shifted by any created folders.
  */
 function buildPlacementPin(
   schemas: EfsSchemaUIDs,
   dataRef: RefOrUID,
   layer: number,
+  existingFileAnchorUID?: Hex,
 ): PlannedAttestation {
+  // OVERWRITE: the file-ANCHOR already exists (not re-minted), so encode the concrete
+  // UID into `definition` and carry NO symbolic dataRef.
+  if (existingFileAnchorUID !== undefined) {
+    return {
+      ref: REF.PLACEMENT_PIN,
+      layer,
+      kind: 'PIN',
+      schema: schemas.pin,
+      data: pinEncoder.encodeData([existingFileAnchorUID]),
+      revocable: true, // EdgeResolver.sol:336 — PIN must be revocable
+      refUID: dataRef, // refUID = DATA (symbolic for fresh, concrete for a hardlink)
+      dataRefs: [], // definition is concrete — nothing for the submitter to thread
+    }
+  }
+  // FIRST write: `definition` is a FRESH anchor UID — encode a placeholder; the
+  // submitter re-encodes with the mined file-ANCHOR UID (tracked via `dataRefs`).
   const definitionRef: SymbolicRef = { ref: REF.FILE_ANCHOR }
   return {
     ref: REF.PLACEMENT_PIN,
     layer,
     kind: 'PIN',
     schema: schemas.pin,
-    // `definition` is a fresh anchor UID — encode a placeholder; the submitter
-    // re-encodes with the mined file-ANCHOR UID (tracked via `dataRefs`).
     data: pinEncoder.encodeData([ZERO_UID]),
     revocable: true, // EdgeResolver.sol:336 — `if (!attestation.revocable) revert NotRevocable`
     refUID: dataRef, // refUID = DATA (symbolic for fresh, the existing UID for a hardlink)
