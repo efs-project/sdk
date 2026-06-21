@@ -58,3 +58,4 @@ Compact, scannable — one screen per ADR. Copy `_template.md`. The next number 
 - [ADR-0010 — Off-chain fetch/verify/mirror engine](./0010-fetch-mirror-engine.md)
 - [ADR-0011 — Build on the on-chain tag-exclusion filter + folder Overviews](./0011-onchain-filter-and-overviews.md)
 - [ADR-0012 — Reshape the deployments registry to the frozen 9-schema set](./0012-registry-reshape-to-frozen-nine-schema-set.md)
+- [ADR-0013 — Re-vendor the ERC-5219 `EFSBytesStore`; keep the direct chunk reader](./0013-onchain-store-erc5219-revendor-and-direct-reader.md)

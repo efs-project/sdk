@@ -27,9 +27,19 @@ const MANAGER_ADDR = '0x00000000000000000000000000000000000a1234' as Address
 /** A mocked store context recording the chunk init-code + manager args. */
 function makeCtx(): {
   ctx: OnchainStoreContext
-  calls: { kind: 'chunk' | 'manager'; data?: Hex; args?: readonly Address[] }[]
+  calls: {
+    kind: 'chunk' | 'manager'
+    data?: Hex
+    args?: readonly Address[]
+    contentType?: string
+  }[]
 } {
-  const calls: { kind: 'chunk' | 'manager'; data?: Hex; args?: readonly Address[] }[] = []
+  const calls: {
+    kind: 'chunk' | 'manager'
+    data?: Hex
+    args?: readonly Address[]
+    contentType?: string
+  }[] = []
   const deployAddr = new Map<Hex, Address>()
   let n = 0
 
@@ -40,8 +50,8 @@ function makeCtx(): {
       deployAddr.set(h, CHUNK_ADDR)
       return h
     },
-    async deployContract(args: { args: readonly [readonly Address[]] }) {
-      calls.push({ kind: 'manager', args: args.args[0] })
+    async deployContract(args: { args: readonly [readonly Address[], string] }) {
+      calls.push({ kind: 'manager', args: args.args[0], contentType: args.args[1] })
       const h = `0x${(++n).toString(16).padStart(64, '0')}` as Hex
       deployAddr.set(h, MANAGER_ADDR)
       return h
@@ -101,6 +111,20 @@ describe('storeOnchain', () => {
     // EFSRouter._parseContractFromWeb3URI expects web3://0x<40-hex> (address only).
     expect(web3Uri).toBe(`web3://${MANAGER_ADDR}`)
     expect(web3Uri).toMatch(/^web3:\/\/0x[0-9a-fA-F]{40}$/)
+  })
+
+  it('passes the ERC-5219 contentType to the store constructor (2-arg)', async () => {
+    const { ctx, calls } = makeCtx()
+    await storeOnchain(new Uint8Array([1, 2, 3]), { ...ctx, contentType: 'text/markdown' })
+    const manager = calls.find((c) => c.kind === 'manager')
+    expect(manager?.args).toEqual([CHUNK_ADDR])
+    expect(manager?.contentType).toBe('text/markdown') // threaded into EFSBytesStore(chunks, contentType_)
+  })
+
+  it('defaults the store contentType to empty (⇒ application/octet-stream) when omitted', async () => {
+    const { ctx, calls } = makeCtx()
+    await storeOnchain(new Uint8Array([1, 2, 3]), ctx) // no contentType in ctx
+    expect(calls.find((c) => c.kind === 'manager')?.contentType).toBe('')
   })
 
   it('round-trips the content into the chunk runtime (after the STOP byte)', async () => {

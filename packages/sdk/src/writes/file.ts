@@ -188,6 +188,10 @@ export async function resolveMirrors(
     publicClient: ctx.publicClient,
     ...(ctx.account !== undefined ? { account: ctx.account } : {}),
     ...(ctx.chain !== undefined ? { chain: ctx.chain } : {}),
+    // The store reports the SAME MIME the write binds as the lens-scoped `contentType`
+    // PROPERTY (single source), so a bare `web3://<store>` self-describes consistently.
+    // Empty ⇒ the store serves application/octet-stream.
+    contentType: opts?.contentType ?? '',
     // So an abort between the chunk and chunk-manager deploys stops the manager tx.
     ...(opts?.signal !== undefined ? { signal: opts.signal } : {}),
   })

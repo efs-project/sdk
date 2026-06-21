@@ -119,6 +119,8 @@ interface SentDeploy {
   data?: Hex
   /** The manager's constructor args (`address[]`), present only for `kind: 'manager'`. */
   managerArgs?: readonly Address[]
+  /** The store's ERC-5219 `contentType_` constructor arg (`kind: 'manager'`). */
+  managerContentType?: string
 }
 
 /**
@@ -221,9 +223,9 @@ function makeCtx(
       deployContractAddr.set(hash, CHUNK_ADDR)
       return hash
     },
-    // Chunk-manager deploy. Returns the manager address.
-    async deployContract(args: { args: readonly [readonly Address[]] }) {
-      deploys.push({ kind: 'manager', managerArgs: args.args[0] })
+    // Chunk-manager (EFSBytesStore) deploy: (address[] chunks, string contentType_).
+    async deployContract(args: { args: readonly [readonly Address[], string] }) {
+      deploys.push({ kind: 'manager', managerArgs: args.args[0], managerContentType: args.args[1] })
       const hash = uid(0xe000 + deploys.length)
       deployContractAddr.set(hash, MANAGER_ADDR)
       return hash
@@ -321,6 +323,20 @@ describe('writeFileTier1 — full Tier-1 path with on-chain (web3://) default st
     const [transportDef, uriValue] = mirrorEnc.decodeData(mirrorEntry!.data) as [Hex, string]
     expect(transportDef).toBe(TRANSPORT_ONCHAIN)
     expect(uriValue).toBe(`web3://${MANAGER_ADDR}`)
+  })
+
+  it('threads opts.contentType into the EFSBytesStore deploy (standards-compliant web3://)', async () => {
+    const { ctx, deploys } = makeCtx()
+    await writeFileTier1('/docs/readme.md', CONTENT, ctx, { contentType: 'text/markdown' })
+    // The store reports the same MIME the write binds as the contentType PROPERTY, so a
+    // bare web3://<store> self-describes in any ERC-5219 client. Omitted ⇒ '' (octet-stream).
+    expect(deploys.find((d) => d.kind === 'manager')?.managerContentType).toBe('text/markdown')
+  })
+
+  it('deploys the store with an empty contentType when none is supplied', async () => {
+    const { ctx, deploys } = makeCtx()
+    await writeFileTier1('/docs/readme.md', CONTENT, ctx) // no opts.contentType
+    expect(deploys.find((d) => d.kind === 'manager')?.managerContentType).toBe('')
   })
 })
 

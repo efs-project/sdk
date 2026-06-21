@@ -115,11 +115,12 @@ export class MultiChunkUnsupported extends EfsError {
  * trivially mockable in unit tests, mirroring {@link SubmitWalletClient}.
  */
 export interface OnchainWalletClient {
-  /** Deploy the chunk-manager contract; returns its tx hash. */
+  /** Deploy the chunk-manager contract; returns its tx hash. The constructor takes
+   * the chunk addresses AND the store's reported MIME (ERC-5219 `contentType_`). */
   deployContract(args: {
     abi: typeof EFS_BYTES_STORE_ABI
     bytecode: Hex
-    args: readonly [readonly Address[]]
+    args: readonly [readonly Address[], string]
     account?: unknown
     chain?: unknown
   }): Promise<Hex>
@@ -145,6 +146,13 @@ export interface OnchainStoreContext {
   readonly account?: unknown
   /** Forwarded to viem's deploy/send when the wallet client isn't chain-bound. */
   readonly chain?: unknown
+  /** The MIME the deployed store reports on its ERC-5219 `request()` path (the store's
+   *  `contentType_` constructor arg). Empty/omitted ⇒ the store serves
+   *  `application/octet-stream`. This is the SAME value the write path binds as the
+   *  lens-scoped `contentType` PROPERTY, so a bare `web3://<store>` URL self-describes
+   *  consistently with the EFS metadata. The SDK reader IGNORES it (it trusts the
+   *  PROPERTY); it exists for generic EIP-4804/5219 clients. */
+  readonly contentType?: string
   /** Optional cancellation signal, checked before each of the two irreversible
    *  deploys (chunk, then manager) — never mid-flight (a sent tx can't be unsent). */
   readonly signal?: AbortSignal
@@ -161,7 +169,12 @@ export const EFS_BYTES_STORE_ABI = [
   {
     type: 'constructor',
     stateMutability: 'nonpayable',
-    inputs: [{ name: 'chunks', type: 'address[]' }],
+    inputs: [
+      { name: 'chunks', type: 'address[]' },
+      // ERC-5219 store MIME (empty ⇒ application/octet-stream). The router reads bytes
+      // by interface; this arg only affects the store's own `request()`/`contentType()`.
+      { name: 'contentType_', type: 'string' },
+    ],
   },
 ] as const
 
@@ -195,8 +208,10 @@ function bytesToHex(bytes: Uint8Array): string {
 /**
  * Store `bytes` on-chain as a single SSTORE2 chunk + chunk manager and return the
  * canonical `web3://<chunkManager>` MIRROR URI. Two transactions: the chunk deploy,
- * then the manager deploy wrapping the chunk address. Reuses the contracts'
- * reference deployment logic exactly (`simulate-transports.ts`).
+ * then the manager (`EFSBytesStore`) deploy wrapping the chunk address + the store's
+ * reported MIME (`ctx.contentType`). The store is a standards-compliant ERC-5219
+ * resource, so the resulting `web3://<store>` resolves both via the EFS router
+ * (extcodecopy chunk path) AND in any generic EIP-4804/5219 client.
  *
  * Every wallet/RPC call (the two deploys + each receipt wait) runs through the SAME
  * {@link classifyError} funnel the submitter uses, so a wallet rejection / RPC failure
@@ -235,7 +250,9 @@ export async function storeOnchain(
     ctx.walletClient.deployContract({
       abi: EFS_BYTES_STORE_ABI,
       bytecode: EFS_BYTES_STORE_BYTECODE,
-      args: [[chunkAddress]],
+      // The store reports `ctx.contentType` on its ERC-5219 path (empty ⇒
+      // application/octet-stream). viem ABI-encodes the 2-arg constructor.
+      args: [[chunkAddress], ctx.contentType ?? ''],
       ...fwd,
     }),
   )
