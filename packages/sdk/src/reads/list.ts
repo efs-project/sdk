@@ -311,12 +311,23 @@ export function list(
     limit?: number
     cursor?: string
   }): Promise<Page<DirEntry>> => {
+    // Validate a per-page limit override too — the constructor only validated the
+    // default. A `limit <= 0` is the contract's `maxItems` revert / a non-progressing
+    // empty page; surface the SDK's typed error instead.
+    if (pageOpts?.limit !== undefined && (!Number.isInteger(pageOpts.limit) || pageOpts.limit <= 0)) {
+      throw new InvalidDirectoryQuery(
+        `maxItems must be a positive integer (got ${pageOpts.limit}).`,
+      )
+    }
     const p = await prime()
     const pageSize = pageOpts?.limit ?? defaultLimit
+    // No per-page cursor ⇒ fall back to the constructor-level `opts.cursor`, so a caller
+    // resuming via `list(path, { cursor })` starts there instead of restarting at offset 0.
+    const cursorIn = pageOpts?.cursor ?? opts?.cursor
     if (p.filtered) {
       // The filtered cursor is opaque `bytes` (hex), fed back verbatim; empty/absent
       // ⇒ a fresh `0x` walk.
-      const cursor = parseBytesCursor(pageOpts?.cursor)
+      const cursor = parseBytesCursor(cursorIn)
       return readFilteredPage(
         p.ctx,
         p.parentAnchor,
@@ -327,7 +338,7 @@ export function list(
         pageSize,
       )
     }
-    const start = parseCursor(pageOpts?.cursor)
+    const start = parseCursor(cursorIn)
     return readUnfilteredPage(p.ctx, p.parentAnchor, p.attesters, start, pageSize)
   }
 

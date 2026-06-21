@@ -135,6 +135,25 @@ contract MockFileView {
             anchorUID, keccak256(abi.encode(attesters)), schema, cursor, maxItems, cannedCursor
         );
     }
+
+    // The directory-listing method `listChildren` now forwards to — echoes args the same way.
+    function getDirectoryPageBySchemaAndAddressList(
+        bytes32 parentAnchor,
+        bytes32 anchorSchema,
+        address[] calldata attesters,
+        bytes calldata cursor,
+        uint256 maxItems
+    ) external view returns (IEFSFileViewRead.DirectoryPage memory page) {
+        page.items = items;
+        page.nextCursor = abi.encode(
+            parentAnchor,
+            keccak256(abi.encode(attesters)),
+            anchorSchema,
+            cursor,
+            maxItems,
+            cannedCursor
+        );
+    }
 }
 
 /// @dev Spy `ListReader` read surface. Scripted mode/length/entries; length/entries echo their lens

@@ -90,6 +90,17 @@ interface IEFSFileViewRead {
         bytes calldata cursor,
         uint256 maxItems
     ) external view returns (DirectoryPage memory page);
+
+    /// @dev Mirrors `EFSFileView.getDirectoryPageBySchemaAndAddressList` — enumerates the
+    ///      CHILD anchors of `parentAnchor` typed by `anchorSchema` (a directory listing),
+    ///      NOT the active placements AT the anchor (that is {getFilesAtPath}).
+    function getDirectoryPageBySchemaAndAddressList(
+        bytes32 parentAnchor,
+        bytes32 anchorSchema,
+        address[] calldata attesters,
+        bytes calldata cursor,
+        uint256 maxItems
+    ) external view returns (DirectoryPage memory page);
 }
 
 /// @notice The list read surface of `ListReader`.
@@ -500,7 +511,11 @@ library EFSReader {
         bytes memory cursor,
         uint256 max
     ) internal view returns (IEFSFileViewRead.DirectoryPage memory page) {
-        return fileView.getFilesAtPath(anchor, attesters, schema, cursor, max);
+        // Enumerate the folder's CHILD anchors (a directory listing), NOT the active DATA
+        // placements at the anchor — `getFilesAtPath` would return empty/wrong for a normal
+        // directory that has children but no DATA pinned at the directory anchor itself.
+        return
+            fileView.getDirectoryPageBySchemaAndAddressList(anchor, schema, attesters, cursor, max);
     }
 
     // ── List reads (ListReader) ──────────────────────────────────────────────────────────────

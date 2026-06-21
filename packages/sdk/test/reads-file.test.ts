@@ -870,6 +870,15 @@ describe('list', () => {
     ;(ctx.deployment.contracts as { systemAccount?: Address }).systemAccount = undefined
     await expect(list(() => ctx, '/docs').byPage()).rejects.toBeInstanceOf(LensRequired)
   })
+
+  it('rejects a non-positive per-page limit override (InvalidDirectoryQuery)', async () => {
+    // The constructor validates the default limit; a per-page byPage({limit:0}) override
+    // must be validated too (else the contract reverts / the page never progresses).
+    const ctx = makeCtx({ edges: README_EDGES, files: [fileItem({})] })
+    await expect(list(() => ctx, '/docs', { lens: LENS }).byPage({ limit: 0 })).rejects.toThrow(
+      /positive integer/,
+    )
+  })
 })
 
 // ── list with excludes (ADR-0011 tag-exclusion filter) ──────────────────────────
