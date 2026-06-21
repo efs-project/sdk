@@ -202,6 +202,10 @@ export type FetchOptions = {
    * pinned DNS), a test stub, or a dev proxy. Most callers leave this unset.
    */
   fetchImpl?: typeof fetch
+  /** Hard cap (bytes) on the payload buffered per fetch attempt; default 50 MB. The
+   * reader stops once the running total exceeds it (a web3:// chunk walk bails
+   * mid-stream), so an untrusted mirror can't force allocation past the cap. */
+  maxBytes?: number
 }
 
 // ── Pagination ─────────────────────────────────────────────────────────────────

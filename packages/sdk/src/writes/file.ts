@@ -22,7 +22,7 @@
 import type { Account, Address, Chain, Hex } from 'viem'
 import type { EfsDeployment } from '../chain/deployments.js'
 import { hashContent } from '../content/hash.js'
-import { EfsError } from '../errors.js'
+import { EfsError, WalletRequired } from '../errors.js'
 import { TRANSPORT } from '../mirror/transport.js'
 import {
   ParentNotFoundError,
@@ -197,6 +197,12 @@ export async function writeFileTier1(
       { code: 'NotImplemented' },
     )
   }
+
+  // A wallet with no bound account would attest as the zero address — but EFS lenses,
+  // the planning visibility checks, and the receipt's `resolvedBy` all key on the REAL
+  // attester. Fail closed (matching the edge-write + top-level gates) rather than write
+  // under 0x0.
+  if (ctx.account === undefined) throw new WalletRequired()
 
   // 1. Content identity (ADR-0006: bare SHA-256) + size.
   const contentHash = hashContent(content)

@@ -132,6 +132,7 @@ export async function fetchRef(
     ...(opts?.allowPrivateHosts !== undefined ? { allowPrivateHosts: opts.allowPrivateHosts } : {}),
     ...(opts?.allowHosts !== undefined ? { allowlist: opts.allowHosts } : {}),
     ...(opts?.fetchImpl !== undefined ? { fetchImpl: opts.fetchImpl } : {}),
+    ...(opts?.maxBytes !== undefined ? { maxBytes: opts.maxBytes } : {}),
     // Thread the read `publicClient` into the `web3://` (SSTORE2) read transport so
     // on-chain-stored files read back. Enabled only when the client can read bytecode
     // (`getCode`) — a real viem PublicClient always can. The engine stays chain-free;
@@ -190,8 +191,16 @@ export async function read(
   opts?: ReadOpts & FetchOptions,
 ): Promise<EfsFile> {
   if (typeof pathOrRef !== 'string') {
-    // A DataRef carries its own lens (`resolvedBy`) — no path resolution needed.
-    return fetchRef(ctx, pathOrRef, opts)
+    // A DataRef carries its own lens (`resolvedBy`) — no path resolution needed. Still
+    // honor `expand:['attestations']` so the common `locate() → read(ref, {expand})`
+    // two-step gets a populated `attestations` bag (the generic signature narrows it to
+    // non-optional). A DataRef has no placement PIN, so only the contentHash record is
+    // hydrated (placement is omitted) — never left `undefined` where the type says set.
+    const refFile = await fetchRef(ctx, pathOrRef, opts)
+    if (wantsAttestations(opts?.expand)) {
+      refFile.attestations = await hydrateByteAttestations(ctx, pathOrRef, undefined, opts?.expand)
+    }
+    return refFile
   }
   const path = pathOrRef
   const placement = await resolvePlacement(ctx, path, opts)

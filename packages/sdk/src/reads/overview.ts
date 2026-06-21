@@ -126,10 +126,14 @@ export async function overview(
   // Determine the source (on-chain vs mirror) and fetch the bytes. The fetch is
   // verified by default (the value path is never trust-blind), mirroring `read`.
   const source = await overviewSource(ctx, dataUID, resolvedBy)
+  // Cap the fetch at the render limit: the `size`-PROPERTY pre-check above is a
+  // best-effort signal an UNTRUSTED Overview can lie about (missing/malformed/under-
+  // reported), so enforce MAX_RENDER_BYTES during the fetch too — the reader stops
+  // buffering past it rather than letting an attacker force a huge folder header.
   const file = await fetchRef(
     ctx,
     { __brand: 'DataRef', uid: dataUID as never, chainId: ctx.deployment.chainId, resolvedBy },
-    opts as FetchOptions | undefined,
+    { ...(opts as FetchOptions | undefined), maxBytes: MAX_RENDER_BYTES },
   )
 
   if (isMarkdownContentType(contentType)) {

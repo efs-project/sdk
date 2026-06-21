@@ -103,6 +103,22 @@ describe('createEfsClient — runtime write gate', () => {
     expect(() => readOnly.batch()).toThrow(WalletRequired)
   })
 
+  it('a walletClient with no bound account rejects fs.write with WalletRequired', async () => {
+    // The wallet is present (passes the top-level gate) but has no `account`, so the
+    // attester would default to 0x0 — EFS lenses + the receipt key on the real attester,
+    // so writeFileTier1 must fail closed. A chain-bearing publicClient + `deployments`
+    // gets the write context built and reaching that guard.
+    const make = createEfsClient as unknown as (c: unknown) => {
+      fs: { write(p: string, c: Uint8Array): Promise<unknown> }
+    }
+    const efs = make({
+      publicClient: { chain: { id: CHAIN_ID } },
+      walletClient: {}, // present, but no bound account
+      deployments,
+    })
+    await expect(efs.fs.write('/x', new Uint8Array([1]))).rejects.toThrow(WalletRequired)
+  })
+
   it('a write client wires write (Tier-1) and still stubs batch', async () => {
     const provider = createMockProvider({ chainId: CHAIN_ID })
     const efs = createEfsClient({ provider, chain: localChain, account: addr(1) })

@@ -341,6 +341,24 @@ describe('fs.overview — read (ADR-0011)', () => {
     if (res.kind === 'too-large') expect(res.size).toBe(BigInt(256 * 1024 + 1))
   })
 
+  it('caps the fetch at MAX_RENDER_BYTES when size is absent (untrusted, lying size)', async () => {
+    // No `size` PROPERTY → the pre-fetch too-large guard CANNOT trip. The actual bytes
+    // exceed MAX_RENDER_BYTES, so the fetch (capped at the render limit) rejects the
+    // oversized inline payload rather than buffering it — fails closed, no over-render.
+    const huge = 'a'.repeat(256 * 1024 + 64)
+    const hash = hashContent(new TextEncoder().encode(huge))
+    const ctx = makeCtx({
+      winner: { attester: LENS, dataUID: README_DATA },
+      props: {
+        [`${LENS}|contentType`]: 'text/markdown',
+        [`${LENS}|contentHash`]: hash,
+        // deliberately no `size`
+      },
+      mirrors: { [LENS.toLowerCase()]: [dataUri(huge)] },
+    })
+    await expect(overview(ctx, '/docs', { lens: LENS })).rejects.toThrow()
+  })
+
   it('is lens-scoped: a README under OTHER is invisible through LENS', async () => {
     const md = '# other'
     const ctx = makeCtx({

@@ -574,6 +574,25 @@ describe('read + read(ref)', () => {
     expect(file.hashAuthor).toBe(LENS)
   })
 
+  it('read(ref, { expand:["attestations"] }) hydrates provenance (contentHash; no placement)', async () => {
+    const hashAnchor = uid(0x4a54)
+    const hashProp = uid(0x4a51)
+    const ctx = makeCtx({
+      keyAnchors: { [`${DATA_UID}|contentHash`]: hashAnchor },
+      pinTargets: { [`${hashAnchor}|${LENS.toLowerCase()}`]: hashProp },
+      attestations: { [hashProp]: propertyData(GOOD_HASH) },
+      mirrors: [{ uri: dataUri, attester: LENS }],
+    })
+    const ref: DataRef = { __brand: 'DataRef', uid: DATA_UID, chainId: 31337, resolvedBy: LENS }
+    // The DataRef path now honors expand (the generic signature narrows `attestations`
+    // to non-optional) — it must not return undefined where TS says the field is set.
+    const file = await read(ctx, ref, { expand: ['attestations'] })
+    expect(file.attestations).toBeDefined()
+    expect(file.attestations?.contentHash).toBeDefined()
+    // A bare ref has no placement PIN, so that slot is legitimately absent.
+    expect(file.attestations?.placement).toBeUndefined()
+  })
+
   it('ignores mirrors attached by a non-lens attester (lens-scoped view)', async () => {
     const hashAnchor = uid(0x4a54)
     const hashProp = uid(0x4a51)
