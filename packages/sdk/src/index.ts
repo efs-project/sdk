@@ -492,6 +492,27 @@ async function assertWalletOnDeploymentChain(
 }
 
 /**
+ * Fail closed before a write if EITHER the wallet OR the public client has drifted from the
+ * deployment chain. A write sends the tx on the WALLET's chain but uses the PUBLIC client
+ * for parent/transport reads and `waitForTransactionReceipt` — so a `ViemConfig` whose
+ * public client switched away (while the wallet stayed) could send on the deployment chain
+ * yet read/wait on another, producing false misses or a mined tx reported as a partial
+ * failure. Both must be on the deployment chain.
+ */
+async function assertWriteChain(
+  wallet: WalletClient,
+  publicClient: PublicClient,
+  deploymentChainId: number,
+): Promise<void> {
+  // No bound account ⇒ the write fails closed with `WalletRequired` regardless of chain
+  // (there is nothing to send); skip both probes (the higher-level verbs derive the
+  // attester from the bound account).
+  if (wallet.account === undefined) return
+  await assertChainMatches(wallet, deploymentChainId)
+  await assertChainMatches(publicClient, deploymentChainId)
+}
+
+/**
  * Wrap a wallet client so every `writeContract` runs the {@link assertChainMatches} preflight
  * first. The `efs.raw.*` escape hatch builds viem `getContract` instances whose `.write.*`
  * methods call `walletClient.writeContract` directly — bypassing the per-verb guard. Checks
@@ -600,7 +621,13 @@ export function createEfsClient(config: EfsClientConfig): EfsClient {
     get easAddress() {
       return getDeployment().contracts.eas
     },
-    publicClient: publicClient as unknown as Parameters<typeof makeEasVerbs>[0]['publicClient'],
+    // Guard `getAttestation` (and `efs.decode(uid)`, which uses it) against a drifted
+    // provider — the EAS address is the construction-chain one, so a live mismatch must
+    // fail closed rather than read the old address on the new chain (same as the raw surface).
+    publicClient: chainGuardedPublicClient(
+      publicClient,
+      () => getDeployment().chainId,
+    ) as unknown as Parameters<typeof makeEasVerbs>[0]['publicClient'],
     walletClient: walletClient as unknown as Parameters<typeof makeEasVerbs>[0]['walletClient'],
     requireWallet,
     // Same fail-closed wrong-chain guard as fs.write / the edge verbs — covers the raw
@@ -641,10 +668,10 @@ export function createEfsClient(config: EfsClientConfig): EfsClient {
       chainId: dep.chainId,
       attester,
       // Same fail-closed wrong-chain guard as `fs.write`, run before any standalone-verb
-      // tx (props/tags/pins/mirrors/redirects/lists) — the wallet must be on the
-      // deployment chain (resolved from the public client), else EAS txs would land on
+      // tx (props/tags/pins/mirrors/redirects/lists) — BOTH the wallet (tx) and the public
+      // client (receipt wait) must be on the deployment chain, else EAS txs would land on
       // the wallet chain at the deployment's addresses.
-      assertChain: () => assertWalletOnDeploymentChain(wallet, dep.chainId),
+      assertChain: () => assertWriteChain(wallet, publicClient, dep.chainId),
       ...(wallet.account !== undefined ? { account: wallet.account } : {}),
       ...(wallet.chain !== undefined ? { chain: wallet.chain } : {}),
     }
@@ -758,9 +785,9 @@ export function createEfsClient(config: EfsClientConfig): EfsClient {
         requireWallet()
         // requireWallet() guarantees `walletClient` is defined here.
         const wallet = walletClient as WalletClient
-        // Fail closed BEFORE any tx if the wallet is on a different chain than the
-        // deployment (resolved from the public client) — see the helper's note.
-        await assertWalletOnDeploymentChain(wallet, getDeployment().chainId)
+        // Fail closed BEFORE any tx if the wallet OR the public client (parent/transport
+        // reads + receipt wait) is on a different chain than the deployment.
+        await assertWriteChain(wallet, publicClient, getDeployment().chainId)
         // Tier-1 (any-wallet, multi-signature) write: one multiAttest per DAG
         // layer. The Tier-2 one-signature path (7702/5792 via @efs/solidity) is a
         // later slice; both consume the same `buildFileWriteGraph` plan.
@@ -800,8 +827,8 @@ export function createEfsClient(config: EfsClientConfig): EfsClient {
         requireWallet()
         const wallet = walletClient as WalletClient
         const dep = getDeployment()
-        // Fail closed if the wallet is on a different chain than the deployment.
-        await assertWalletOnDeploymentChain(wallet, dep.chainId)
+        // Fail closed if the wallet OR the public client is on a different chain.
+        await assertWriteChain(wallet, publicClient, dep.chainId)
         const baseCtx = {
           publicClient,
           walletClient: wallet,

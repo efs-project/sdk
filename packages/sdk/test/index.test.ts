@@ -216,6 +216,43 @@ describe('namespaced client (Decision F)', () => {
     await expect(efs.mirrors.list(data)).rejects.toThrow(DeploymentNotFound)
     await expect(efs.props.list(data)).rejects.toThrow(DeploymentNotFound)
   })
+
+  it('fs.write guards the PUBLIC client chain, not just the wallet (WrongChain)', async () => {
+    // The wallet is on the deployment chain (Sepolia) but the public client — used for
+    // parent reads + receipt wait — drifted to 999999. The write must fail closed, else it
+    // would send on Sepolia yet read/wait on the wrong chain.
+    const pub = createPublicClient({
+      chain: sepolia, // bound deployment chain = 11155111
+      transport: custom(createMockProvider({ chainId: 999_999 })), // but LIVE = 999999
+    })
+    const wal = createWalletClient({
+      chain: sepolia,
+      account: addr(7),
+      transport: custom(createMockProvider({ chainId: 11_155_111 })), // wallet on Sepolia (matches)
+    }) as WalletClient
+    const efs = createEfsClient({ publicClient: pub, walletClient: wal })
+    const err = await efs.fs.write('/x', new Uint8Array([1])).catch((e) => e)
+    expect((err as { code?: string }).code).toBe('WrongChain')
+  })
+
+  it('efs.eas.getAttestation / efs.decode(uid) guard a drifted public chain', async () => {
+    // getAttestation (and decode(uid), which uses it) reads at the construction-chain EAS
+    // address; on a drifted provider it must fail closed rather than hit the old address on
+    // the new chain. Bound to Sepolia, live 999999.
+    const drifted = createPublicClient({
+      chain: sepolia,
+      transport: custom(createMockProvider({ chainId: 999_999 })),
+    })
+    const efs = createEfsClient({ publicClient: drifted }) as unknown as {
+      eas: { getAttestation(uid: string): Promise<unknown> }
+      decode(uid: string): Promise<unknown>
+    }
+    const uid = `0x${'2'.repeat(64)}`
+    expect(((await efs.eas.getAttestation(uid).catch((e) => e)) as { code?: string }).code).toBe(
+      'WrongChain',
+    )
+    expect(((await efs.decode(uid).catch((e) => e)) as { code?: string }).code).toBe('WrongChain')
+  })
 })
 
 describe('lenses', () => {
