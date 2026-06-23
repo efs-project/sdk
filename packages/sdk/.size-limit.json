@@ -1,10 +1,10 @@
 [
   {
-    "name": "@efs/sdk ESM (gzip, viem external) — budget doubled to 36 kB for the web3:// read transport; revisit size after launch",
+    "name": "@efs/sdk ESM (gzip, viem external) — 38 kB for the ReadSource foundation (ADR-0014/0015): adapters + reserved seams + the upcoming read-path wiring/trust slice; revisit size after launch",
     "path": "dist/index.js",
     "import": "*",
     "ignore": ["viem"],
     "gzip": true,
-    "limit": "36 kB"
+    "limit": "38 kB"
   }
 ]
