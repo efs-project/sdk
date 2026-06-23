@@ -39,3 +39,24 @@ describe('fetchRef — cross-chain guard', () => {
     expect((err as { code?: string } | undefined)?.code).not.toBe('WrongChain')
   })
 })
+
+describe('fetchRef — maxBytes cap validation', () => {
+  // The downstream cap checks are `>` comparisons: NaN never trips them (an over-cap body
+  // reads as in-bounds) and Infinity disables the 50 MB ceiling. A non-finite/non-positive
+  // cap must be rejected BEFORE it becomes the fetch limit, before any read.
+  for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, 0, -1]) {
+    it(`rejects a non-finite/non-positive maxBytes (${bad}) with InvalidArgument`, async () => {
+      const err = await fetchRef(ctxForChain(1), ref(1), { maxBytes: bad }).catch((e) => e)
+      expect(err).toBeInstanceOf(EfsError)
+      expect((err as EfsError).code).toBe('InvalidArgument')
+      expect((err as Error).message).toMatch(/maxBytes/)
+    })
+  }
+
+  it('accepts a finite positive maxBytes (passes the guard, no InvalidArgument)', async () => {
+    // Valid cap → passes validation and proceeds to read (fails on the bare mock ctx) —
+    // but never with InvalidArgument.
+    const err = await fetchRef(ctxForChain(1), ref(1), { maxBytes: 1024 }).catch((e) => e)
+    expect((err as { code?: string } | undefined)?.code).not.toBe('InvalidArgument')
+  })
+})

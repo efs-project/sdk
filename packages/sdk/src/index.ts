@@ -570,6 +570,22 @@ export function createEfsClient(config: EfsClientConfig): EfsReadClient
 export function createEfsClient(config: EfsClientConfig): EfsClient {
   const { publicClient, walletClient } = resolveClients(config)
   const override = config.deployments
+  // Require a chain-bound public client at construction. The write/raw/eas paths resolve
+  // the deployment SYNCHRONOUSLY from `publicClient.chain.id` and then VALIDATE it against
+  // the live chain (the deliberate "writes validate, reads re-resolve" split — a public
+  // client must not drift the plan's deployment independently of the wallet). A chainless
+  // viem client (`createPublicClient({ transport })`) can answer `getChainId()` but exposes
+  // no synchronous construction chain, so those paths have no stable anchor to validate
+  // against — reads would work (they re-resolve live) while writes/raw/eas would throw a
+  // confusing `DeploymentNotFound` on first use. Fail fast with an actionable error instead.
+  // (The `provider` config form always binds a chain, so this only catches a raw chainless
+  // `ViemConfig.publicClient`.)
+  if (publicClient.chain?.id === undefined) {
+    throw new EfsError(
+      'EFS: the supplied `publicClient` has no bound `chain`. Construct it with a chain (e.g. `createPublicClient({ chain, transport })`) so the SDK can resolve the EFS deployment and validate writes against it — or use the `{ provider, chain }` config form.',
+      { code: 'InvalidArgument' },
+    )
+  }
   const getDeployment = () => resolveDeployment(chainIdOf(publicClient), override)
   /**
    * Resolve the deployment from the wallet/provider's LIVE chain (`eth_chainId`), not the

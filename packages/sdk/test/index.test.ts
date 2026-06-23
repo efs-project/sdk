@@ -94,6 +94,18 @@ describe('namespaced client (Decision F)', () => {
     expect(efs.toJSON({ size: 1024n })).toBe('{"size":"1024"}')
   })
 
+  it('rejects a chainless ViemConfig public client at construction', () => {
+    // A viem client built from a bare transport (no `chain`) can answer getChainId() but
+    // exposes no synchronous construction chain. The write/raw/eas paths resolve the
+    // deployment sync from publicClient.chain.id and validate it against the live chain, so
+    // a chainless client has no stable anchor — fail fast at construction with a clear,
+    // actionable error instead of a confusing DeploymentNotFound on first write.
+    const chainless = createPublicClient({
+      transport: custom(createMockProvider({ chainId: 999_999 })),
+    })
+    expect(() => createEfsClient({ publicClient: chainless })).toThrow(/no bound `chain`/)
+  })
+
   it('accepts the EIP-1193 provider form (standard boundary), wallet-gated by `account`', async () => {
     // A minimal EIP-1193 provider — the durable, library-neutral input.
     const provider = {

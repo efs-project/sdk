@@ -127,6 +127,19 @@ export async function fetchRef(
     )
   }
 
+  // Validate the caller cap BEFORE it becomes the fetch limit. The downstream cap checks
+  // are all `>` comparisons, so a non-finite `maxBytes` slips the safety ceiling: `NaN`
+  // never trips a `>` (an over-cap body reads as in-bounds) and `Infinity` disables the
+  // 50 MB default outright — either lets an untrusted mirror buffer unbounded. A
+  // non-positive cap is equally meaningless. Reject up front (fail closed) rather than
+  // silently substituting a default that hides the caller bug.
+  if (opts?.maxBytes !== undefined && (!Number.isFinite(opts.maxBytes) || opts.maxBytes <= 0)) {
+    throw new EfsError(
+      `EFS read: \`maxBytes\` must be a finite positive number (got ${opts.maxBytes}). Omit it to use the ${DEFAULT_MAX_BYTES}-byte default ceiling.`,
+      { code: 'InvalidArgument' },
+    )
+  }
+
   const resolvedBy = ref.resolvedBy
   const verify = opts?.verify !== false
 
