@@ -608,14 +608,19 @@ describe('makePropsNs', () => {
   it('list enumerates key-ANCHORs, decodes names, reads values', async () => {
     const props = makePropsNs({
       getDeployment: () => deployment,
+      // In production the enumeration AND the per-key value reads go through ONE client
+      // (the chain-pinned `pc`); the mock serves the full set: enumeration + the
+      // resolveAnchor/getActivePinTarget/getAttestation the value read needs.
       publicClient: makeReadClient((fn, args) => {
         // CANONICAL, attester-independent enumeration (a flat bytes32[], not a cursor
         // tuple). The address-list variant must NOT be used (it would scope to the
         // binding attester and drop reused anchors).
         if (fn === 'getAnchorsBySchemaAndAddressList') throw new Error('used address-list variant')
         if (fn === 'getAnchorsBySchema') return [KEY_ANCHOR]
+        if (fn === 'resolveAnchor') return args[1] === KEY ? KEY_ANCHOR : uid(0)
+        if (fn === 'getActivePinTarget') return args[0] === KEY_ANCHOR ? PROP_UID : uid(0)
         if (fn === 'getAttestation') {
-          // The key-ANCHOR's attestation → decode the name.
+          // The key-ANCHOR's attestation → decode the name; the PROPERTY UID → decode value.
           if (args[0] === KEY_ANCHOR) return { data: anchorEnc.encodeData([KEY, SCHEMAS.property]) }
           return { data: propEnc.encodeData([VALUE]) }
         }
@@ -644,12 +649,16 @@ describe('makePropsNs', () => {
         // Canonical set under (DATA, PROPERTY) — returned regardless of which attester
         // (ALICE) minted the anchor.
         if (fn === 'getAnchorsBySchema') return [KEY_ANCHOR]
-        if (fn === 'getAttestation' && args[0] === KEY_ANCHOR) {
-          return { data: anchorEnc.encodeData([KEY, SCHEMAS.property]) }
+        // The value read (BOB's binding) goes through this same pinned client in production.
+        if (fn === 'resolveAnchor') return args[1] === KEY ? KEY_ANCHOR : uid(0)
+        if (fn === 'getActivePinTarget') return args[0] === KEY_ANCHOR ? PROP_UID : uid(0)
+        if (fn === 'getAttestation') {
+          if (args[0] === KEY_ANCHOR) return { data: anchorEnc.encodeData([KEY, SCHEMAS.property]) }
+          return { data: propEnc.encodeData([VALUE]) }
         }
         return uid(0)
       }) as never,
-      readContext, // resolves the lens's active binding by key (BOB's value)
+      readContext, // props.get (below) still resolves the lens's active binding via readContext
       submitContext: () => makeSubmitCtx().ctx,
       attester: () => BOB,
     })
@@ -677,8 +686,12 @@ describe('makePropsNs', () => {
           const start = args[2] as bigint
           return start === 0n ? page1 : []
         }
+        // Value read (one pinned client): only the KEY anchor resolves to a bound value.
+        if (fn === 'resolveAnchor') return args[1] === KEY ? KEY_ANCHOR : uid(0)
+        if (fn === 'getActivePinTarget') return args[0] === KEY_ANCHOR ? PROP_UID : uid(0)
         if (fn === 'getAttestation') {
           if (args[0] === KEY_ANCHOR) return { data: anchorEnc.encodeData([KEY, SCHEMAS.property]) }
+          if (args[0] === PROP_UID) return { data: propEnc.encodeData([VALUE]) }
           // Filler anchors decode to distinct keys the lens never bound.
           return { data: anchorEnc.encodeData([`k${String(args[0])}`, SCHEMAS.property]) }
         }
@@ -691,6 +704,38 @@ describe('makePropsNs', () => {
     const out = await props.list(DATA)
     expect(pageCalls).toBe(2) // advanced past the full first page to a short second page
     expect(out).toEqual([{ key: KEY, value: VALUE, propertyUID: PROP_UID }])
+  })
+
+  it('list routes ALL reads (enumeration + getAttestation + values) through the chain-pinned client', async () => {
+    // The TOCTOU fix: the anchor page, the name `getAttestation`, AND the per-key value reads
+    // must all go through the guarded `pc` pinned to the resolved deployment — never
+    // deps.publicClient directly nor a re-resolving deps.readContext(). Prove it by making
+    // both fallbacks throw and serving every read from the guarded client.
+    const full = makeReadClient((fn, args) => {
+      if (fn === 'getAnchorsBySchema') return [KEY_ANCHOR]
+      if (fn === 'resolveAnchor') return args[1] === KEY ? KEY_ANCHOR : uid(0)
+      if (fn === 'getActivePinTarget') return args[0] === KEY_ANCHOR ? PROP_UID : uid(0)
+      if (fn === 'getAttestation') {
+        if (args[0] === KEY_ANCHOR) return { data: anchorEnc.encodeData([KEY, SCHEMAS.property]) }
+        return { data: propEnc.encodeData([VALUE]) }
+      }
+      return uid(0)
+    })
+    const props = makePropsNs({
+      getDeployment: () => deployment,
+      liveDeployment: () => deployment,
+      guardReadClient: () => full as never,
+      // Both fallbacks must be UNUSED by list — they throw if touched.
+      publicClient: makeReadClient(() => {
+        throw new Error('unguarded publicClient used by list')
+      }) as never,
+      readContext: () => {
+        throw new Error('readContext re-resolved by list')
+      },
+      submitContext: () => makeSubmitCtx().ctx,
+      attester: () => ATTESTER,
+    })
+    expect(await props.list(DATA)).toEqual([{ key: KEY, value: VALUE, propertyUID: PROP_UID }])
   })
 })
 

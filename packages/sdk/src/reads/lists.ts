@@ -305,6 +305,17 @@ export async function listHas(
  */
 function identityKeyFor(kind: ListTargetType, target: Address | Hex): Hex {
   if (kind === 'addr') {
+    // `Address | Hex` is not runtime-distinguished, so without a width check a 32-byte UID
+    // whose trailing 20 bytes happen to match a listed address would be silently truncated +
+    // re-padded into a COLLIDING key — a false `true` for the wrong target kind. Reject
+    // non-address width before computing the key, mirroring the write-side
+    // `validateAddTarget('addr', …)` (a plain 20-byte-hex check, address(0) allowed).
+    if (!/^0x[0-9a-fA-F]{40}$/.test(target)) {
+      throw new EfsError(
+        `efs.lists.has: an 'addr'-mode list needs a 20-byte address target; got '${target}'.`,
+        { code: 'InvalidArgument' },
+      )
+    }
     // Right-align the 20-byte address in a 32-byte word.
     const addr = target.toLowerCase().replace(/^0x/, '')
     return `0x${addr.padStart(64, '0')}` as Hex

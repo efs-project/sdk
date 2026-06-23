@@ -501,6 +501,14 @@ describe('lists.length / lists.has', () => {
     expect(await listHas(ctx, LIST_UID, addr(0x999))).toBe(false)
   })
 
+  it('has rejects a 32-byte target on an addr-mode list (no width-collision false positive)', async () => {
+    const { ctx } = ctxWith()
+    // `addrKey(a1)` is the exact bytes32 membership key for a1 (24 zero bytes + a1). Under the
+    // old truncate+pad this 32-byte value passed through unchanged and falsely matched a1's
+    // entry. The width check now rejects a non-20-byte target before computing the key.
+    await expect(listHas(ctx, LIST_UID, addrKey(a1))).rejects.toThrow(/20-byte address/)
+  })
+
   it('length throws ListNotFound for an absent list', async () => {
     const { ctx } = makeCtx({})
     await expect(listLength(ctx, LIST_UID)).rejects.toBeInstanceOf(ListNotFound)

@@ -188,7 +188,7 @@ export function makePropsNs(deps: PropsNsDeps): PropsNs {
       // under the lens. Fan both passes (independent reads → multicall coalescing).
       const names = await Promise.all(
         anchorUIDs.map(async (anchorUID) => {
-          const att = await read<{ data: Hex }>(deps.publicClient, {
+          const att = await read<{ data: Hex }>(pc, {
             address: dep.contracts.eas,
             abi: easAbi,
             functionName: 'getAttestation',
@@ -198,9 +198,12 @@ export function makePropsNs(deps: PropsNsDeps): PropsNs {
         }),
       )
 
-      // Resolve the read context ONCE (it may query the live chain), then reuse it for
-      // every per-key value read below.
-      const rc = await deps.readContext()
+      // Pin the per-key value reads to the SAME resolved deployment + guarded client used for
+      // the enumeration above — do NOT call `deps.readContext()` here, which would RE-RESOLVE
+      // `liveDeployment()` and could read chain-A anchor UIDs against a drifted chain B
+      // (returning wrong/empty values instead of failing `WrongChain`). `readReservedProperty`
+      // only needs `publicClient` + `deployment` (the attester is passed explicitly).
+      const rc = { publicClient: pc, deployment: dep } as ReadContext
       const entries = await Promise.all(
         names.map(async (key) => {
           if (key === undefined) return undefined
