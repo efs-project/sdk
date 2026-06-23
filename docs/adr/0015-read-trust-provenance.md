@@ -41,33 +41,41 @@ Adopt the **hybrid** — extend the pattern the SDK already uses for content `ve
    `ReadResult` carry a required `trust: TrustDescriptor`, a sibling sub-object (never folded
    into `verification`, never mixed into the data). It is **orthogonal** to `verification`:
    `verification` = "are the bytes authentic?" (content); `trust` = "where did this answer
-   come from, and is existence/revocation current?" (provenance).
+   come from, and how fresh is it?" (provenance/freshness).
+
+   Modeled as a **discriminated union on `freshness`** (per the naming review), so the single
+   security-load-bearing axis has one name per state — the dangerous case is spelled `stale`
+   and cannot hide behind a reassuring sibling field, `asOf` exists only where it is
+   meaningful, and incoherent combinations are unrepresentable. `source` reuses the
+   `ReadSourceCapabilities.kind` vocabulary verbatim (one term per backend, SDK-wide):
 
    ```ts
-   type TrustDescriptor = {
-     source: 'live' | 'indexer' | 'cache' | (string & Record<never, never>)
-     existence: 'confirmed' | 'unconfirmed'        // on-chain existence checked against `source`?
-     revocation: 'live' | 'as-of' | 'unchecked'    // revocation currency of the winning record
-     asOf?: bigint                                 // snapshot time (epoch seconds) when revocation:'as-of'
-   }
+   type TrustDescriptor =
+     | { freshness: 'current'; source: 'live' | (string & Record<never, never>) }
+     | { freshness: 'as-of'; source: 'snapshot' | 'indexer' | (string & Record<never, never>); asOf: number }
+     | { freshness: 'stale'; source: 'snapshot' | (string & Record<never, never>) }
+   //  current = chain-head (existence + revocation current now)   — safe
+   //  as-of   = checked against a snapshot/indexer head at `asOf`  — bounded-stale
+   //  stale   = content-only cache: existence + revocation UNKNOWN — the footgun, named
    ```
 
    Content authenticity stays **verify-or-throw** at the boundary (unchanged); `trust` only
-   reports the genuinely-uncertain part (existence + revocation freshness).
+   reports the genuinely-uncertain part (freshness of existence + revocation).
 
 2. **The bare-value sugar stays fail-closed on trust**, exactly as it already is on
    `verification`. `readText`/`readBytes`/`readJson` throw on a trust problem, gated by a new
-   `require` option on `ReadOpts`:
-   - `'confirmed'` (default) — the source must confirm existence + current-or-snapshot
-     revocation; a content-only cache that cannot speak to revocation throws `StaleTrust`.
-     A live read and a fresh-indexer read both pass (so the sugar does **not** start throwing
-     the day a non-live source ships).
-   - `'live'` — additionally reject any non-chain-head answer (no `as-of`).
+   `requireTrust` option on `ReadOpts` — a minimum-freshness floor on the same lattice as the
+   descriptor (the key is `requireTrust`, not `require`, to avoid the CommonJS `require()`
+   collision):
+   - `'as-of'` (default) — accept `current` or `as-of`; reject `stale` (throws `StaleTrust`).
+     A live read and a fresh snapshot/indexer read both pass, so the sugar does **not** start
+     throwing the day a non-live source ships.
+   - `'current'` — additionally reject any non-chain-head answer (no `as-of`).
    - `'any'` — disable the gate (the trust analogue of `verify:false`).
 
 3. **Land now, populated trivially.** Every read today is live, so verbs stamp
-   `{ source:'live', existence:'confirmed', revocation:'live' }`. The surface is locked in
-   before offline/indexer sources land, so populating it richly later is purely additive.
+   `{ freshness:'current', source:'live' }`. The surface is locked in before offline/indexer
+   sources land, so populating it richly later is purely additive.
 
 Add one error code `StaleTrust` (beside `ContentHashMismatch`/`MalformedClaim`) and one
 `assertTrust(result, path, require)` helper beside the existing `assertVerified` — the sugar
@@ -93,6 +101,22 @@ calls both. `trust` is non-projectable (always present), matching `sourceUIDs`.
 - **Residual limit (honest).** Inline makes `trust` *inspectable* and the sugar gate makes it
   *enforceable*, but neither forces a dev who reads the rich object and opts down to actually
   check it — true of every inline-metadata system. We surface honestly; we cannot compel.
+- **Follow-up: `FileInfo.verified`.** Its current `VerificationStatus | 'revoked' | 'unchecked'`
+  union mixes the trust axis (`'revoked'`/`'unchecked'`) into the content-verification field —
+  the same fold this ADR rejects. In the behavioral slice, `FileInfo` should carry the `trust`
+  sibling and `verified` should narrow to pure `VerificationStatus`, consistent with `EfsFile`.
+
+## Naming review (2026-06-23)
+
+Two independent expert reviews of the field names converged. Adopted: the discriminated-union
+`freshness` model (was a flat `existence`/`revocation` record — which let the footgun state read
+as `existence:'confirmed'` and made two grid cells incoherent); `source` literals reconciled
+with `ReadSourceCapabilities.kind` (was `'cache'`, now `'snapshot'`); the `'live'` value
+collision removed (a `source` *and* a `revocation` value previously); one freshness vocabulary
+replacing the `unconfirmed`/`unchecked`/`as-of` synonym spread; and `require → requireTrust` over
+the same lattice (default `'as-of'`, the honest floor). The field key stays `trust` (agent-legible,
+the Fork-1 decision) with a doc note that authenticity lives in `verification`; `provenance` was
+the runner-up name.
 
 ## Alternatives considered
 
@@ -102,6 +126,9 @@ calls both. `trust` is non-projectable (always present), matching `sourceUIDs`.
 - **Fold `trust` into `verification`.** Collapses two orthogonal axes (authentic bytes vs
   live placement) into one union and re-creates the exact "green bytes ≠ live file" confusion
   the split exists to prevent. Rejected — keep them separate.
-- **Default the sugar to `require:'live'`.** Would make working hobbyist code throw the day an
-  indexer/cache source ships. Rejected for `'confirmed'` (the honest floor of what's
-  verifiable), with `'live'` available opt-in.
+- **Default the sugar to `requireTrust:'current'`.** Would make working hobbyist code throw the
+  day an indexer/snapshot source ships. Rejected for `'as-of'` (the honest floor — accept
+  bounded-stale, reject only the unknown-revocation `stale` cache), with `'current'` opt-in.
+- **Flat `{ existence, revocation }` record** (the pre-review shape). Let the footgun state read
+  as a reassuring `existence:'confirmed'`, allowed incoherent combinations, and overloaded the
+  `'live'` literal across two fields. Rejected for the `freshness` discriminated union.

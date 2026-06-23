@@ -703,28 +703,41 @@ export type SourceUIDs = {
  * authenticity of the BYTES (ADR-0015). `verification:'matches-author'` proves the bytes are
  * what the lens attester committed; `trust` says whether on-chain existence/revocation were
  * confirmed and how fresh that is. A cached read can be `matches-author` yet revoked — `trust`
- * is where that shows, so a cached read can never masquerade as a live one.
+ * is where that shows, so a cached read can never masquerade as a live one. (`trust` is the
+ * freshness/provenance verdict; cryptographic authenticity is `verification`.)
  *
- * RESERVED (ADR-0015): the type is exported now so the surface is stable; it becomes a
- * required field on the rich read results (`EfsFile`/`FileInfo`/`ReadResult`) in the behavioral
- * slice, where today every source is live and verbs stamp `{ source:'live',
- * existence:'confirmed', revocation:'live' }`. Adding it later would be a breaking change, so
- * the shape lands ahead of the offline/indexer sources that populate it richly.
+ * Modeled as a **discriminated union on `freshness`** (not a flat record) so the single
+ * security-load-bearing axis has one name per state — the dangerous `'stale'` case (authentic
+ * bytes, but existence + revocation UNKNOWN) is spelled `stale` and cannot hide behind a
+ * reassuring sibling field, and incoherent combinations are unrepresentable. `asOf` is
+ * structurally present only on the `'as-of'` variant. `source` reuses the
+ * {@link ReadSourceCapabilities} `kind` vocabulary verbatim (one term per backend, SDK-wide).
+ *
+ * RESERVED (ADR-0015): exported now so the surface is stable; becomes a required field on the
+ * rich read results (`EfsFile`/`FileInfo`/`ReadResult`) in the behavioral slice, where today
+ * every source is live and verbs stamp `{ freshness:'current', source:'live' }`. Adding it
+ * later would be a breaking change, so the shape lands ahead of the offline/indexer sources.
  */
-export type TrustDescriptor = {
-  /** Where the answer came from. Open union (matches the SDK's other open discriminants). */
-  source: 'live' | 'indexer' | 'cache' | (string & Record<never, never>)
-  /** Was on-chain EXISTENCE of the winning placement confirmed against `source`?
-   * `'unconfirmed'` for a content-only offline cache that cannot prove the record persists. */
-  existence: 'confirmed' | 'unconfirmed'
-  /** Revocation currency of the winning record.
-   *  - `'live'`      — checked against chain head now.
-   *  - `'as-of'`     — checked against a snapshot/indexer head; see `asOf`.
-   *  - `'unchecked'` — source cannot speak to revocation (a content-only cache). */
-  revocation: 'live' | 'as-of' | 'unchecked'
-  /** Snapshot/indexer head time (epoch seconds) when `revocation:'as-of'`. */
-  asOf?: bigint
-}
+export type TrustDescriptor =
+  | {
+      /** Chain-head read: existence + revocation are current NOW. The safe state. */
+      freshness: 'current'
+      source: 'live' | (string & Record<never, never>)
+    }
+  | {
+      /** Bounded-stale: existence + revocation checked against a head at {@link asOf}. */
+      freshness: 'as-of'
+      source: 'snapshot' | 'indexer' | (string & Record<never, never>)
+      /** Wall-clock head time (epoch seconds) the answer is current as of. Matches
+       * {@link ReadSourceCapabilities.snapshotAsOf}'s width. */
+      asOf: number
+    }
+  | {
+      /** Content-only cache: bytes are authentic, but on-chain existence AND revocation are
+       * UNKNOWN — the dangerous state, and the literal says so. */
+      freshness: 'stale'
+      source: 'snapshot' | (string & Record<never, never>)
+    }
 
 /**
  * Fetched bytes + trust-relative verification — the `efs.fs.read` result
