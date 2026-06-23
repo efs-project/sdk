@@ -450,6 +450,40 @@ describe('makeListsWriteNs.add', () => {
     expect(entry?.data).toBe(listEntryEnc.encodeData([LIST, target]))
   })
 
+  it('guards the live chain BEFORE the config read that routes the plan (WrongChain, no read, no submit)', async () => {
+    // With no `targetType` hint, add() reads the list config to route the plan — a drifted
+    // public client could read a different chain's config and build against the wrong mode.
+    // The guard must run BEFORE that read: assert the config read never fires and nothing submits.
+    const { ctx, calls } = makeSubmitCtx()
+    let readCalled = false
+    const lists = makeListsWriteNs({
+      getDeployment: () => deployment,
+      publicClient: { async readContract() {} } as never,
+      readContext: () =>
+        ({
+          publicClient: {
+            async readContract() {
+              readCalled = true
+              return ZERO_UID
+            },
+          },
+          deployment,
+          account: ATTESTER,
+        }) as never,
+      submitContext: () => ({
+        ...ctx,
+        assertChain: async () => {
+          throw Object.assign(new Error('wrong chain'), { code: 'WrongChain' })
+        },
+      }),
+      revoke: async () => uid(0),
+    })
+    const err = await lists.add(LIST, uid(0x777)).catch((e) => e)
+    expect((err as { code?: string }).code).toBe('WrongChain')
+    expect(readCalled).toBe(false) // config-routing read never ran
+    expect(calls).toHaveLength(0) // nothing submitted
+  })
+
   it('routes SCHEMA from the config (recipient 0, target UID in payload)', async () => {
     const { ctx, calls } = makeSubmitCtx()
     const target = uid(0x888)

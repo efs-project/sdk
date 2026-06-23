@@ -99,6 +99,13 @@ export function makePropsNs(deps: PropsNsDeps): PropsNs {
 
   return {
     set: async (dataUID, key, value) => {
+      const ctx = deps.submitContext()
+      // Fail closed on a wrong-chain provider BEFORE the planning read below — the
+      // key-anchor lookup FEEDS the plan, so a drifted public client could resolve an
+      // anchor that only exists on the wrong chain, making the plan reuse a UID absent on
+      // the deployment chain (layer-1 mints the PROPERTY, layer-2 PIN reverts referencing a
+      // non-existent anchor). Same guard the submit runs per layer, run before the read.
+      await ctx.assertChain?.()
       const dep = deps.getDeployment()
       // UPDATE detection (Bug-2 fix). EFS key-ANCHORs are keyed by
       // `(dataUID, key, PROPERTY_SCHEMA_UID)` and are PERMANENT/non-revocable, so
@@ -120,7 +127,7 @@ export function makePropsNs(deps: PropsNsDeps): PropsNs {
         value,
         existingKeyAnchorUID !== ZERO_UID ? existingKeyAnchorUID : undefined,
       )
-      return submitEdgePlan(plan, deps.submitContext())
+      return submitEdgePlan(plan, ctx)
     },
 
     get: async (dataUID, key, opts) => {

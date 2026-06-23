@@ -323,6 +323,33 @@ describe('makeTagsNs', () => {
     expect(reads.some((r) => r.fn === 'resolvePath')).toBe(true)
   })
 
+  it('add guards the live chain BEFORE the definition-resolution read (WrongChain, no read, no submit)', async () => {
+    // The /tags/<name> resolution FEEDS the plan, so a drifted public client could resolve
+    // it on the wrong chain. The guard must run BEFORE that read — a path definition would
+    // trigger a read if not guarded; assert it never fires and nothing submits.
+    const { ctx, calls } = makeSubmitCtx()
+    let readCalled = false
+    const tags = makeTagsNs({
+      getDeployment: () => deployment,
+      publicClient: makeReadClient(() => {
+        readCalled = true
+        return uid(0)
+      }) as never,
+      submitContext: () => ({
+        ...ctx,
+        assertChain: async () => {
+          throw Object.assign(new Error('wrong chain'), { code: 'WrongChain' })
+        },
+      }),
+      attester: () => ATTESTER,
+      revoke: async () => uid(0xfee),
+    })
+    const err = await tags.add(TARGET, 'nsfw').catch((e) => e)
+    expect((err as { code?: string }).code).toBe('WrongChain')
+    expect(readCalled).toBe(false) // definition-resolution read never ran
+    expect(calls).toHaveLength(0) // nothing submitted
+  })
+
   it('remove revokes the right UID under the TAG schema', async () => {
     let revokeCall: { schema: Hex; uid: Hex } | undefined
     const tags = makeTagsNs({
@@ -537,6 +564,33 @@ describe('makePropsNs', () => {
       pinReq?.data[0]?.data as Hex,
     ) as [Hex]
     expect(definition).toBe(KEY_ANCHOR)
+  })
+
+  it('set guards the live chain BEFORE the key-anchor planning read (WrongChain, no read, no submit)', async () => {
+    // The resolveAnchor lookup FEEDS the plan, so it must be guarded: a drifted public
+    // client could resolve a key-anchor that only exists on the wrong chain, poisoning the
+    // plan. The guard must run BEFORE the read — assert the read never fires and nothing submits.
+    const { ctx, calls } = makeSubmitCtx()
+    let readCalled = false
+    const props = makePropsNs({
+      getDeployment: () => deployment,
+      publicClient: makeReadClient(() => {
+        readCalled = true
+        return uid(0)
+      }) as never,
+      readContext,
+      submitContext: () => ({
+        ...ctx,
+        assertChain: async () => {
+          throw Object.assign(new Error('wrong chain'), { code: 'WrongChain' })
+        },
+      }),
+      attester: () => ATTESTER,
+    })
+    const err = await props.set(DATA, KEY, VALUE).catch((e) => e)
+    expect((err as { code?: string }).code).toBe('WrongChain')
+    expect(readCalled).toBe(false) // planning read never ran
+    expect(calls).toHaveLength(0) // nothing submitted
   })
 
   it('get reads the active value the lens attester bound', async () => {

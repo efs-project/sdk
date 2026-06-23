@@ -142,6 +142,11 @@ export function makeTagsNs(deps: TagsNsDeps): TagsNs {
 
   return {
     add: async (target, definition, opts) => {
+      const ctx = deps.submitContext()
+      // Fail closed BEFORE the definition-resolution read — it FEEDS the plan, so a drifted
+      // public client could resolve the tag definition on the wrong chain and poison the
+      // plan with a UID absent on the deployment chain. Same guard the submit runs per layer.
+      await ctx.assertChain?.()
       const dep = deps.getDeployment()
       const definitionUID = await resolveTagDefinition(
         deps.publicClient as unknown as ResolvePublicClient,
@@ -149,7 +154,7 @@ export function makeTagsNs(deps: TagsNsDeps): TagsNs {
         definition,
       )
       const plan = buildTagPlan(dep.schemas, target, definitionUID, opts?.weight)
-      return submitEdgePlan(plan, deps.submitContext())
+      return submitEdgePlan(plan, ctx)
     },
 
     remove: async (tagUID) => {

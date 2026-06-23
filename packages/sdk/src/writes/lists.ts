@@ -120,6 +120,11 @@ export function makeListsWriteNs(deps: ListsWriteNsDeps): ListsWriteNs {
     },
 
     add: async (listUID, target, opts) => {
+      const ctx = deps.submitContext()
+      // Fail closed BEFORE the config read — when no `targetType` hint is given it reads the
+      // list config to route the plan, so a drifted public client could read a different
+      // chain's config and build an entry against the wrong mode. Same guard the submit runs.
+      await ctx.assertChain?.()
       const dep = deps.getDeployment()
       // Route by targetType: use the explicit hint, else read the list config once.
       const targetType: ListTargetType =
@@ -127,7 +132,7 @@ export function makeListsWriteNs(deps: ListsWriteNsDeps): ListsWriteNs {
       // Validate the target shape vs the mode BEFORE submit (throws InvalidListConfig).
       const validated = validateAddTarget(targetType, target)
       const plan = buildAddEntryPlan(dep.schemas, listUID, targetType, validated)
-      return submitEdgePlan(plan, deps.submitContext())
+      return submitEdgePlan(plan, ctx)
     },
 
     remove: async (entryUID, opts) => {
@@ -136,6 +141,11 @@ export function makeListsWriteNs(deps: ListsWriteNsDeps): ListsWriteNs {
       // round-trip). A bare entryUID doesn't carry its list, so without the hint the
       // resolver enforces append-only on-chain.
       if (opts?.listUID !== undefined) {
+        // Guard the advisory config read before the append-only check — a drifted public
+        // client could read the wrong chain's config and skip/false-trigger the courtesy
+        // throw. The revoke itself is chain-guarded (easVerbs); this keeps the early check
+        // honest so it surfaces WrongChain rather than a misleading ListNotFound/AppendOnly.
+        await deps.submitContext().assertChain?.()
         const config = await requireConfig(opts.listUID)
         if (config.appendOnly) throw new ListAppendOnly(opts.listUID)
       }
