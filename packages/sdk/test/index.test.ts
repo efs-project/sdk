@@ -94,6 +94,21 @@ describe('namespaced client (Decision F)', () => {
     expect(efs.toJSON({ size: 1024n })).toBe('{"size":"1024"}')
   })
 
+  it('a read-only client TYPE-exposes the standalone READ namespaces (no wallet, no cast)', () => {
+    // `createEfsClient({ publicClient })` is typed `EfsReadClient`. The lens-scoped, wallet-free
+    // read verbs of graph/props/mirrors/redirects must be reachable WITHOUT a cast — these
+    // property accesses only typecheck because EfsReadClient now carries the read views. (The
+    // mutators add/set/place/remove are intentionally NOT on this type — write-client only.)
+    const efs = createEfsClient({ publicClient })
+    expect(typeof efs.graph.tags.active).toBe('function')
+    expect(typeof efs.graph.tags.list).toBe('function')
+    expect(typeof efs.graph.pins.active).toBe('function')
+    expect(typeof efs.props.get).toBe('function')
+    expect(typeof efs.props.list).toBe('function')
+    expect(typeof efs.mirrors.list).toBe('function')
+    expect(typeof efs.redirects.get).toBe('function')
+  })
+
   it('rejects a chainless ViemConfig public client at construction', () => {
     // A viem client built from a bare transport (no `chain`) can answer getChainId() but
     // exposes no synchronous construction chain. The write/raw/eas paths resolve the

@@ -394,8 +394,27 @@ export type EfsRawReadNs = EfsRawContracts & {
  * `.write.*` only when a wallet was supplied (viem's own getContract split). */
 export type EfsRawNs = EfsRawReadNs
 
+// Read-only VIEWS of the standalone graph/value namespaces. Their read verbs are lens-scoped
+// and need no wallet, so a read-only client exposes them; the write verbs (add/remove/set/
+// place/unplace) are added back only on the full `EfsClient`. Derived via `Pick` from the full
+// namespace types so the read signatures never drift from the implementations.
+/** Read-only `graph.tags`: `active`/`list` (no `add`/`remove`). */
+export type TagsReadNs = Pick<TagsNs, 'active' | 'list'>
+/** Read-only `graph.pins`: `active` (no `place`/`unplace`). */
+export type PinsReadNs = Pick<PinsNs, 'active'>
+/** Read-only `efs.graph.*` (no wallet): `tags.active/list` + `pins.active`. */
+export type EfsGraphReadNs = { tags: TagsReadNs; pins: PinsReadNs }
+/** Read-only `props`: `get`/`list` (no `set`). */
+export type PropsReadNs = Pick<PropsNs, 'get' | 'list'>
+/** Read-only `mirrors`: `list` (no `add`/`remove`). */
+export type MirrorsReadNs = Pick<MirrorsNs, 'list'>
+/** Read-only `redirects`: the literal active-record `get` (no `set`/`remove`). */
+export type RedirectsReadNs = Pick<RedirectsNs, 'get'>
+
 /** Read-capable client (no `walletClient`). The `eas`/`raw` escape hatches are
- * read-only here (no write verbs / no `.write.*` on the raw instances). */
+ * read-only here (no write verbs / no `.write.*` on the raw instances), and the standalone
+ * graph/value namespaces expose only their lens-scoped READ verbs (the mutators appear on
+ * the full {@link EfsClient}). */
 export type EfsReadClient = {
   fs: EfsFsRead
   lenses: EfsLensesNs
@@ -405,6 +424,14 @@ export type EfsReadClient = {
   sorts: EfsSortsNs
   eas: EfsEasReadNs
   raw: EfsRawReadNs
+  /** Standalone graph-edge READS (no wallet): `graph.tags.active/list`, `graph.pins.active`. */
+  graph: EfsGraphReadNs
+  /** Standalone PROPERTY READS (no wallet, lens-scoped): `props.get`/`props.list`. */
+  props: PropsReadNs
+  /** Standalone MIRROR READS (no wallet, lens-scoped): `mirrors.list`. */
+  mirrors: MirrorsReadNs
+  /** REDIRECT active-record READ (no wallet, lens-scoped): `redirects.get`. */
+  redirects: RedirectsReadNs
   /** Round-trip bridge: raw {@link Attestation} (or a UID) → the typed view. */
   decode: EfsDecodeNs
   /**

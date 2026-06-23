@@ -301,6 +301,20 @@ describe('followRedirectChain', () => {
     ).rejects.toBeInstanceOf(RedirectCycle)
   })
 
+  it('accepts a chain whose length EQUALS the cap and then terminates (no false hop-limit)', async () => {
+    // A→B with cap 1, and B has no onward redirect → a valid 1-hop chain. The cap counts
+    // FOLLOWED hops; consuming the last allowed hop and landing on a terminal is fine (the old
+    // code threw RedirectHopLimit here without checking whether B had a further redirect).
+    const chain = makeChain({
+      [A]: [{ attester: ATTESTER, redirectUID: uid(0xf1), target: B, kind: REDIRECT_KIND.sameAs }],
+      // B: no active redirect (terminal)
+    })
+    const out = await followRedirectChain(ctxWith(chain), A, [ATTESTER], 1)
+    expect(out.target).toBe(B)
+    expect(out.via).toHaveLength(1)
+    expect(out.via[0]?.to).toBe(B)
+  })
+
   it('throws RedirectHopLimit when the chain does not terminate within the cap', async () => {
     // A→B→C→… with C also redirecting onward past a tiny cap of 2.
     const D = uid(0x4)

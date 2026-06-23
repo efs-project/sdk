@@ -221,6 +221,13 @@ export async function followRedirectChain(
     current = record.to
   }
 
-  // Ran out of hops without terminating — the chain is too long (or unbounded).
+  // Consumed all `cap` followable hops. The chain is only OVER the cap if `current` (the
+  // destination of the last hop, not yet inspected) STILL has another followable redirect — a
+  // chain whose length EQUALS the cap and then terminates is valid (e.g. `followRedirects: 1`
+  // for `A → B` with no redirect from `B`). One final terminal check before failing closed:
+  const beyond = await readActiveRedirect(ctx, current, attesters, { requireFollowable: true })
+  if (beyond === undefined) return { target: current, via } // terminal exactly at the cap — valid
+  if (visited.has(beyond.to)) throw new RedirectCycle(beyond.to, [...visited])
+  // A genuine (cap+1)th followable hop exists — the chain is too long (or unbounded).
   throw new RedirectHopLimit(cap, [...visited])
 }
