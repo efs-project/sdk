@@ -172,9 +172,17 @@ export async function fetchRef(
   // verification. So the caller cap is `opts.maxBytes` when set, else the engine default;
   // `declaredSize` clamps DOWN from there (over-declared bytes are rejected mid-fetch, so
   // an oversized body can't slip through as `matches-author`).
+  // `declaredSize` lowers the cap only when POSITIVE. A legitimately empty file (size attested
+  // `0`, e.g. `fs.write('/empty', new Uint8Array())`) must NOT clamp the cap to `0` — the engine
+  // rejects a non-positive cap, so a default verified read of an empty file would fail before any
+  // mirror is tried. The empty body verifies against the empty-SHA-256 claim under any positive
+  // cap (and an over-declared non-empty body still fails the contentHash check), so fall through
+  // to the caller/engine default for size 0.
   const callerCap = opts?.maxBytes ?? DEFAULT_MAX_BYTES
   const effectiveMaxBytes =
-    declaredSize !== undefined ? Math.min(callerCap, declaredSize) : opts?.maxBytes
+    declaredSize !== undefined && declaredSize > 0
+      ? Math.min(callerCap, declaredSize)
+      : opts?.maxBytes
 
   const mirrors: Mirror[] = uris.map((uri) => ({ uri }))
   const engineOpts: FetchVerifiedOptions = {

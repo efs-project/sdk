@@ -150,14 +150,22 @@ export async function attestationsFor(
   items: readonly HasSourceUIDs[],
   opts?: { withSchema?: boolean },
 ): Promise<HydratedItem[]> {
-  // Flatten every (itemIndex, key, uid) so the whole set fans out in one tick.
+  // Flatten every (itemIndex, key, uid) so the whole set fans out in one tick. Collect BOTH
+  // the explicit `sourceUIDs` bag AND the top-level UID fields `HasSourceUIDs` accepts
+  // (`ref.uid` / `dataUID` / `anchorUID`) — so a `DirEntry`/`DataRef` DTO that carries only
+  // those (no bag) still hydrates instead of returning an empty map. The bag wins on a key
+  // collision (file bags use `placement`/`contentType`/`size`/`contentHash`/`name`, so the
+  // synthesized `data`/`anchor` keys are additive in practice).
   const flat: { item: number; key: string; uid: Hex }[] = []
   for (let i = 0; i < items.length; i++) {
-    const src = items[i]?.sourceUIDs
-    if (!src) {
-      continue
-    }
-    for (const [key, uid] of Object.entries(src)) {
+    const item = items[i]
+    if (!item) continue
+    const bag: Record<string, Hex | undefined> = { ...item.sourceUIDs }
+    // `ref.uid` and `dataUID` both name the DATA attestation → key `data`; `anchorUID` → `anchor`.
+    if (item.ref?.uid !== undefined && bag.data === undefined) bag.data = item.ref.uid
+    if (item.dataUID !== undefined && bag.data === undefined) bag.data = item.dataUID
+    if (item.anchorUID !== undefined && bag.anchor === undefined) bag.anchor = item.anchorUID
+    for (const [key, uid] of Object.entries(bag)) {
       if (uid !== undefined && uid !== ZERO_UID) flat.push({ item: i, key, uid })
     }
   }

@@ -638,6 +638,38 @@ describe('read + read(ref)', () => {
     await expect(read(ctx, '/docs/readme.md', { lens: LENS })).rejects.toThrow()
   })
 
+  it('read() returns a legitimately EMPTY file (declared size 0) — does not clamp the cap to 0', async () => {
+    const empty = new Uint8Array()
+    const emptyHash = hashContent(empty)
+    const hashAnchor = uid(0x4a54)
+    const hashProp = uid(0x4a51)
+    const sizeAnchor = uid(0x5102)
+    const sizeProp = uid(0x5170)
+    const ctx = makeCtx({
+      edges: README_EDGES,
+      files: [fileItem({})],
+      placementPins: README_PLACEMENT,
+      keyAnchors: {
+        [`${DATA_UID}|contentHash`]: hashAnchor,
+        [`${DATA_UID}|size`]: sizeAnchor,
+      },
+      pinTargets: {
+        [`${hashAnchor}|${LENS.toLowerCase()}`]: hashProp,
+        [`${sizeAnchor}|${LENS.toLowerCase()}`]: sizeProp,
+      },
+      attestations: {
+        [hashProp]: propertyData(emptyHash),
+        [sizeProp]: propertyData('0'), // legitimately empty (fs.write('/empty', new Uint8Array()))
+      },
+      mirrors: [{ uri: 'data:text/plain;base64,', attester: LENS }], // decodes to 0 bytes
+    })
+    // Before the fix, declared size 0 clamped the cap to 0 and the engine rejected the
+    // non-positive cap → empty files failed. Now the empty body verifies vs the empty-SHA-256.
+    const file = await read(ctx, '/docs/readme.md', { lens: LENS })
+    expect(file.bytes.byteLength).toBe(0)
+    expect(file.verification).toBe('matches-author')
+  })
+
   it('a HUGE declared size does NOT raise the cap above the engine default (P1)', async () => {
     // An untrusted attester declares size = 1 GB. With default opts (no maxBytes) the cap
     // must stay the 50 MB engine default — NOT become 1 GB. A mirror advertising a 60 MB
@@ -853,6 +885,30 @@ describe('attestationsFor', () => {
     // An absent UID (no table entry) hydrates to undefined, not a throw.
     expect(out[0]?.attestations.size).toBeUndefined()
     expect(out[1]?.attestations).toEqual({})
+  })
+
+  it('hydrates items carrying only TOP-LEVEL UIDs (DirEntry dataUID/anchorUID, DataRef ref.uid)', async () => {
+    // HasSourceUIDs accepts ref.uid / dataUID / anchorUID; a DirEntry from fs.list() or a
+    // DataRef carries those and NO sourceUIDs bag. They must still hydrate (not return {}).
+    const dataAtt = uid(0x201)
+    const anchorAtt = uid(0x202)
+    const refAtt = uid(0x203)
+    const ctx = makeCtx({
+      attestations: {
+        [dataAtt]: propertyData('d'),
+        [anchorAtt]: propertyData('a'),
+        [refAtt]: propertyData('r'),
+      },
+    })
+    const items = [
+      { dataUID: dataAtt }, // a file DirEntry
+      { anchorUID: anchorAtt }, // a dir DirEntry
+      { ref: { uid: refAtt } }, // a DataRef
+    ]
+    const out = await attestationsFor(ctx, items)
+    expect(out[0]?.attestations.data?.uid).toBe(dataAtt) // dataUID → `data`
+    expect(out[1]?.attestations.anchor?.uid).toBe(anchorAtt) // anchorUID → `anchor`
+    expect(out[2]?.attestations.data?.uid).toBe(refAtt) // ref.uid → `data`
   })
 })
 
