@@ -454,33 +454,50 @@ function chainIdOf(publicClient: PublicClient): number {
  * LIVE connected chain (`getChainId()` → `eth_chainId`) — NOT the bound `wallet.chain`,
  * which can go stale if an injected wallet switches networks after the client is built.
  */
-async function assertWalletOnDeploymentChain(
-  wallet: WalletClient,
+/**
+ * Throw `WrongChain` unless `client`'s LIVE chain (`getChainId()` → `eth_chainId`) matches
+ * the EFS deployment's chain. The deployment (addresses + UIDs) is resolved from the public
+ * client's chain, but the actual call lands on the provider's CURRENT chain — which a bound
+ * `chain` can't reflect after an injected wallet switches networks. Unlike
+ * {@link assertWalletOnDeploymentChain} there is NO bound-account early-return: the op can
+ * proceed regardless of a bound account (a raw `.write.*` with a per-call `account`, or a
+ * raw read), so the chain must be checked unconditionally.
+ */
+async function assertChainMatches(
+  client: { getChainId(): Promise<number> },
   deploymentChainId: number,
 ): Promise<void> {
-  // No bound account ⇒ the write fails closed with `WalletRequired` regardless of chain
-  // (the attester would be 0x0); skip the chain probe (there is nothing to send).
-  if (wallet.account === undefined) return
-  // Always ask the provider's CURRENT chain — the one the tx will actually land on. A
-  // bound `wallet.chain` is set at construction and is NOT updated when the user switches
-  // networks in their wallet, so trusting it would let a stale id pass this guard while
-  // the provider submits on a different network.
-  const walletChainId = await wallet.getChainId()
-  if (walletChainId !== deploymentChainId) {
+  const liveChainId = await client.getChainId()
+  if (liveChainId !== deploymentChainId) {
     throw new EfsError(
-      `EFS write: the wallet is on chain ${walletChainId} but the EFS deployment (resolved from the public client) is chain ${deploymentChainId}. The write would target the wrong chain's contracts. Use a wallet and public client on the same chain.`,
+      `EFS: the client is on chain ${liveChainId} but the EFS deployment is chain ${deploymentChainId}. The operation would target the wrong chain's contracts. Use a client on the deployment's chain.`,
       { code: 'WrongChain' },
     )
   }
 }
 
 /**
- * Wrap a wallet client so every `writeContract` runs the {@link assertWalletOnDeploymentChain}
- * preflight first. The `efs.raw.*` escape hatch builds viem `getContract` instances whose
- * `.write.*` methods call `walletClient.writeContract` directly — bypassing the per-verb
- * guard `fs.write`/`efs.eas.*`/the standalone namespaces have. Passing this proxied wallet
- * into the raw instances closes that gap (a wrong-chain `efs.raw.*.write.*` fails closed)
- * without a per-method wrapper. Only `writeContract` is intercepted; reads pass through.
+ * Fail closed when the wallet would write to a DIFFERENT chain than the EFS deployment
+ * (the higher-level write verbs: `fs.write`/`setOverview`/`efs.eas.*`/standalone namespaces).
+ * Those derive the attester from the BOUND account, so an unbound wallet fails closed with
+ * `WalletRequired` regardless of chain — hence the account early-return (also avoids an RPC
+ * on a doomed write). Raw writes differ (per-call account) and use {@link assertChainMatches}.
+ */
+async function assertWalletOnDeploymentChain(
+  wallet: WalletClient,
+  deploymentChainId: number,
+): Promise<void> {
+  if (wallet.account === undefined) return
+  await assertChainMatches(wallet, deploymentChainId)
+}
+
+/**
+ * Wrap a wallet client so every `writeContract` runs the {@link assertChainMatches} preflight
+ * first. The `efs.raw.*` escape hatch builds viem `getContract` instances whose `.write.*`
+ * methods call `walletClient.writeContract` directly — bypassing the per-verb guard. Checks
+ * the chain UNCONDITIONALLY (not the account-gated {@link assertWalletOnDeploymentChain}):
+ * viem raw writes accept a per-call `account`, so an UNBOUND wallet on a different chain can
+ * still broadcast — the guard must fire regardless of a bound account. Reads pass through.
  */
 function chainGuardedWallet(wallet: WalletClient, deploymentChainId: () => number): WalletClient {
   return new Proxy(wallet, {
@@ -488,13 +505,39 @@ function chainGuardedWallet(wallet: WalletClient, deploymentChainId: () => numbe
       if (prop === 'writeContract') {
         const write = target.writeContract.bind(target)
         return (async (args: Parameters<WalletClient['writeContract']>[0]) => {
-          await assertWalletOnDeploymentChain(target, deploymentChainId())
+          await assertChainMatches(target, deploymentChainId())
           return write(args)
         }) as WalletClient['writeContract']
       }
       return Reflect.get(target, prop, receiver)
     },
   }) as WalletClient
+}
+
+/**
+ * Wrap a public client so every `readContract` first validates the LIVE chain matches the
+ * deployment ({@link assertChainMatches}). The `efs.raw.*` read instances are `getContract`s
+ * bound to the construction-time deployment addresses; if a mutable provider switches
+ * networks, `readContract` goes to the new chain while the addresses are the old chain's —
+ * returning false misses / wrong-chain data. Validating fails closed on drift (rather than
+ * silently serving wrong-chain reads). Only `readContract` is intercepted.
+ */
+function chainGuardedPublicClient(
+  client: PublicClient,
+  deploymentChainId: () => number,
+): PublicClient {
+  return new Proxy(client, {
+    get(target, prop, receiver) {
+      if (prop === 'readContract') {
+        const readFn = target.readContract.bind(target)
+        return (async (args: Parameters<PublicClient['readContract']>[0]) => {
+          await assertChainMatches(target, deploymentChainId())
+          return readFn(args)
+        }) as PublicClient['readContract']
+      }
+      return Reflect.get(target, prop, receiver)
+    },
+  }) as PublicClient
 }
 
 // Type-level write gate: a write-capable config (an `account` in the provider form,
@@ -542,9 +585,10 @@ export function createEfsClient(config: EfsClientConfig): EfsClient {
   // to the resolved deployment addresses + vendored ABIs + the client(s). Built once
   // (the instances re-resolve the deployment lazily on each property access).
   const rawContracts = buildRawContracts(getDeployment, {
-    public: publicClient,
-    // Guard raw `.write.*` against a wrong-chain wallet (the escape hatch otherwise
-    // bypasses the preflight the higher-level write verbs run).
+    // Guard raw `.read.*`/`.write.*` against a wrong-chain (drifted) provider — the
+    // instances are bound to the construction-time deployment addresses, so a live chain
+    // mismatch must fail closed rather than read/broadcast on the wrong chain.
+    public: chainGuardedPublicClient(publicClient, () => getDeployment().chainId),
     wallet: walletClient
       ? chainGuardedWallet(walletClient, () => getDeployment().chainId)
       : undefined,

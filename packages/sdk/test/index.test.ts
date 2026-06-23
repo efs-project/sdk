@@ -156,6 +156,49 @@ describe('namespaced client (Decision F)', () => {
       .catch((e) => e)
     expect((err as { code?: string }).code).toBe('WrongChain')
   })
+
+  it('guards an UNBOUND raw wallet with a per-call account against a wrong chain', async () => {
+    // viem raw writes accept a per-call `account` even with no bound wallet account, so the
+    // chain guard must fire regardless of a bound account — else an unbound wallet on a
+    // different chain could broadcast `efs.raw.*.write.*(.., { account })` to the wrong chain.
+    const pub = createPublicClient({
+      chain: sepolia,
+      transport: custom(createMockProvider({ chainId: 11_155_111 })),
+    })
+    const wal = createWalletClient({
+      chain: sepolia, // NO bound account; live chain 999999 ≠ deployment (11155111)
+      transport: custom(createMockProvider({ chainId: 999_999 })),
+    }) as WalletClient
+    const efs = createEfsClient({ publicClient: pub, walletClient: wal })
+    const rawEasWrite = (
+      efs.raw.eas as unknown as { write: { revoke: (a: unknown, o: unknown) => Promise<unknown> } }
+    ).write
+    const err = await rawEasWrite
+      .revoke(
+        [{ schema: `0x${'0'.repeat(64)}`, data: { uid: `0x${'0'.repeat(64)}`, value: 0n } }],
+        {
+          account: addr(1), // per-call account on an unbound wallet
+        },
+      )
+      .catch((e) => e)
+    expect((err as { code?: string }).code).toBe('WrongChain')
+  })
+
+  it('guards raw READS against a wrong-chain (drifted) provider', async () => {
+    // The raw read instances are bound to the construction-time deployment addresses; a
+    // provider that switched networks must fail closed (WrongChain), not read the old
+    // addresses on the new chain. publicClient bound to Sepolia, live eth_chainId 999999.
+    const drifted = createPublicClient({
+      chain: sepolia,
+      transport: custom(createMockProvider({ chainId: 999_999 })),
+    })
+    const efs = createEfsClient({ publicClient: drifted })
+    const rawRead = (
+      efs.raw.indexer as unknown as { read: { rootAnchorUID: () => Promise<unknown> } }
+    ).read
+    const err = await rawRead.rootAnchorUID().catch((e) => e)
+    expect((err as { code?: string }).code).toBe('WrongChain')
+  })
 })
 
 describe('lenses', () => {
