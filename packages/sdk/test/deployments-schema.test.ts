@@ -193,3 +193,17 @@ describe('built-in registry — Sepolia (11155111)', () => {
     expect(Object.keys(schemas)).toHaveLength(9)
   })
 })
+
+describe('built-in registry — community devnet (26001993)', () => {
+  it('resolveDeployment(26001993) returns the devnet (a Sepolia fork — same addresses + UIDs)', () => {
+    const devnet = resolveDeployment(26_001_993)
+    const sepolia = resolveDeployment(11_155_111)
+    expect(devnet.chainId).toBe(26_001_993)
+    // The devnet is a Sepolia fork (contracts ADR-0062): CREATE/CREATE2 + EAS schema UIDs
+    // are chain-id-independent, so every contract address and schema UID is identical to
+    // Sepolia — only the network identity differs. A dev points their client at the devnet
+    // RPC and the SDK resolves this by chainId, no override.
+    expect(devnet.contracts).toEqual(sepolia.contracts)
+    expect(devnet.schemas).toEqual(sepolia.schemas)
+  })
+})

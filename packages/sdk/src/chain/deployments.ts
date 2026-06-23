@@ -120,12 +120,29 @@ export const SEPOLIA: EfsDeployment = {
 }
 
 /**
+ * The shared community **devnet** (chainId 26001993) — the frictionless place for devs to
+ * try EFS without burdening Sepolia or running a local node. It is a **Sepolia fork** on a
+ * VPS (contracts ADR-0062), so its contract addresses AND the 9 schema UIDs are
+ * BYTE-IDENTICAL to Sepolia — CREATE/CREATE2/CreateX and EAS schema UIDs are chain-id-
+ * independent, so only the network identity differs. (Earlier forks reused `31337`; the
+ * devnet now has its own id so a wallet can tell it apart from a contributor's local node.)
+ *
+ * Because the addresses/UIDs are the same frozen Sepolia record, this is as stable as
+ * Sepolia — devnet *state* (faucet balances, attestations) is ephemeral/drainable, but the
+ * deployment itself is not. A dev just points their viem `publicClient`/`walletClient` at
+ * the devnet RPC and the SDK resolves this by chainId — no `deployments` override needed.
+ */
+export const DEVNET: EfsDeployment = { ...SEPOLIA, chainId: 26001993 }
+
+/**
  * Built-in registry. Seeded from the contracts repo `docs/CHAINS.md` as EFS freezes on
  * a chain (addresses from the CREATE3 deploy, UIDs from the registered schemas — ADR-0005).
- * For a local fork (chainId 31337), pass `deployments` in the client config.
+ * Carries Sepolia + the community devnet (a Sepolia fork; see {@link DEVNET}). For a local
+ * fork (chainId 31337) or any custom chain, pass `deployments` in the client config.
  */
 export const deployments: DeploymentsMap = {
   [SEPOLIA.chainId]: SEPOLIA,
+  [DEVNET.chainId]: DEVNET,
 }
 
 /** Resolve the deployment for a chain, preferring a caller override. */
