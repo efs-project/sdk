@@ -155,6 +155,39 @@ describe('detectAccount', () => {
     expect(codeCalls).toBe(1)
     invalidateAccountProfile(addr(0xca11), CHAIN)
   })
+
+  it('does NOT serve a stale capability profile across connector scopes (same account+chain)', async () => {
+    // Capabilities are connector-dependent. Connector A has no EIP-5792 (not gasless); connector
+    // B advertises a paymaster (gasless). Same account + chain, but different connector scopes —
+    // B must NOT reuse A's stale `sponsorable:false`.
+    const account = addr(0xca21)
+    const noCaps: DetectClient = { getCode: async () => '0x' as Hex } // no getCapabilities
+    const withPaymaster: DetectClient = {
+      getCode: async () => '0x' as Hex,
+      getCapabilities: async () => ({ [String(CHAIN)]: { paymasterService: { supported: true } } }),
+    }
+    const connectorA = {}
+    const connectorB = {}
+    const a = await detectAccount(noCaps, account, CHAIN, connectorA)
+    const b = await detectAccount(withPaymaster, account, CHAIN, connectorB)
+    expect(a.sponsorable).toBe(false) // connector A: no 5792
+    expect(b.sponsorable).toBe(true) // connector B: paymaster — not the stale false
+  })
+
+  it('caches WITHIN a connector scope — one getCode across repeats', async () => {
+    let codeCalls = 0
+    const client: DetectClient = {
+      getCode: async () => {
+        codeCalls += 1
+        return '0x' as Hex
+      },
+    }
+    const scope = {}
+    const a = await detectAccount(client, addr(0xca22), CHAIN, scope)
+    const b = await detectAccount(client, addr(0xca22), CHAIN, scope)
+    expect(a).toBe(b)
+    expect(codeCalls).toBe(1)
+  })
 })
 
 // ── toCapabilities (curated public projection) ──────────────────────────────────

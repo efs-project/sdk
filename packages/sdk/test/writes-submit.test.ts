@@ -518,6 +518,51 @@ describe('submitWriteTier1 — progress-hook isolation', () => {
   })
 })
 
+describe('submitWriteTier1 — mid-write cancellation', () => {
+  it('a mid-write abort (after a layer landed) folds into the no-tx partial error', async () => {
+    const plan = buildFileWriteGraph(bytesInput) // 3 layers
+    const controller = new AbortController()
+    const { ctx, sent } = makeMockChain()
+    // Abort right after layer 1's multiAttest mines — the next layer's pre-send check bails.
+    let n = 0
+    const origWrite = ctx.walletClient.writeContract
+    const walletClient = {
+      ...ctx.walletClient,
+      writeContract: async (a: Parameters<typeof origWrite>[0]) => {
+        const h = await origWrite(a)
+        if (++n === 1)
+          controller.abort(Object.assign(new Error('user cancelled'), { name: 'AbortError' }))
+        return h
+      },
+    }
+    const err = await submitWriteTier1(plan, {
+      ...ctx,
+      walletClient,
+      signal: controller.signal,
+    }).catch((e) => e)
+    // Already partial (layer 1 landed) → WriteNotSentError carrying the landed map + the
+    // AbortError cause, NOT a bare AbortError that strips recovery context.
+    expect(err).toBeInstanceOf(WriteNotSentError)
+    const we = err as WriteNotSentError
+    expect(we.layer).toBe(2)
+    expect(we.landed.get('DATA')).toBe(uid(0xd000)) // layer 1 preserved
+    expect((we.cause as { name?: string })?.name).toBe('AbortError')
+    expect(sent).toHaveLength(1)
+  })
+
+  it('an abort before the FIRST layer escapes as a raw AbortError (nothing landed)', async () => {
+    const plan = buildFileWriteGraph(bytesInput)
+    const { ctx, sent } = makeMockChain()
+    const err = await submitWriteTier1(plan, {
+      ...ctx,
+      signal: AbortSignal.abort(),
+    }).catch((e) => e)
+    expect(err).not.toBeInstanceOf(WriteNotSentError) // no partial write to describe
+    expect((err as Error).name).toBe('AbortError')
+    expect(sent).toHaveLength(0)
+  })
+})
+
 describe('submitWriteTier1 — partial-write boundary: three distinct failure modes', () => {
   it('writeContract throw → WriteNotSentError (no tx sent, safe retry), prior layers preserved', async () => {
     const plan = buildFileWriteGraph(bytesInput)

@@ -1065,7 +1065,10 @@ export function createEfsClient(config: EfsClientConfig): EfsClient {
         // with the stale construction-time id would mix new-chain bytecode/capabilities into
         // an old-chain cache slot and return the wrong `kind`/gasless status after a switch.
         const liveChainId = await publicClient.getChainId()
-        const profile = await detectAccount(detectClient, address, liveChainId)
+        // Scope the cache by the CONNECTOR (the wallet client) — `getCapabilities` is
+        // connector-dependent, so a reconnect with a different wallet must not reuse another
+        // connector's cached `gasless`/batch profile for the same account+chain.
+        const profile = await detectAccount(detectClient, address, liveChainId, wallet)
         return toCapabilities(profile)
       },
     },

@@ -101,20 +101,47 @@ function chainCapsFor(raw: unknown, chainId: number): RawChainCaps | undefined {
 const cacheKey = (address: Address, chainId: number): string =>
   `${address.toLowerCase()}@${chainId}`
 
-const profileCache = new Map<string, Promise<AccountProfile>>()
+/** Process-global cache for callers that pass no `scope` (tests / no-connector paths). */
+const globalProfileCache = new Map<string, Promise<AccountProfile>>()
+
+/**
+ * Per-CONNECTOR caches. `computeProfile` derives `gasless`/`batchExecution` from
+ * `client.getCapabilities` (EIP-5792), which is **connector-dependent** — the same account on
+ * the same chain can have different capabilities across wallets (one without 5792/paymaster
+ * support, another with). Keying only by `address@chain` would reuse a stale profile across a
+ * connector switch. So cache per `scope` (the connector identity — the wallet client object):
+ * a different connector gets its own cache and never reuses another's capability profile. The
+ * map is GC'd with the connector (WeakMap). `kind` (from `getCode`) is connector-independent,
+ * but caching the whole profile per-connector is correct and simpler than splitting the axes.
+ */
+const scopedProfileCaches = new WeakMap<object, Map<string, Promise<AccountProfile>>>()
+
+/** The cache bucket for a `scope` (the connector/wallet object), or the global one. */
+function cacheFor(scope: object | undefined): Map<string, Promise<AccountProfile>> {
+  if (scope === undefined) return globalProfileCache
+  let m = scopedProfileCaches.get(scope)
+  if (m === undefined) {
+    m = new Map()
+    scopedProfileCaches.set(scope, m)
+  }
+  return m
+}
 
 /** Drop a cached profile (e.g. on `accountsChanged`/`chainChanged`). Exposed for
  * the AA slice's connector-switch invalidation; today nothing wires it, but the
  * cache is keyed so a stale profile is never reused across an account change. */
-export function invalidateAccountProfile(address: Address, chainId: number): void {
-  profileCache.delete(cacheKey(address, chainId))
+export function invalidateAccountProfile(address: Address, chainId: number, scope?: object): void {
+  cacheFor(scope).delete(cacheKey(address, chainId))
 }
 
 /**
  * Detect the {@link AccountProfile} for `address` on `chainId`. Reads `getCode`
  * (→ `kind`) and, when the client supports it, `getCapabilities`
  * (→ `batchExecution`/`sponsorable`). `canRunInAccountRoutine` is `false` until
- * in-account adapters land. Cached per `(address, chainId)`.
+ * in-account adapters land. Cached per `(address, chainId)` WITHIN a `scope` (the
+ * connector/wallet object) — since capabilities are connector-dependent, a different connector
+ * never reuses another's cached profile. Callers that pass no `scope` share a process-global
+ * cache (fine when capabilities aren't connector-dependent, e.g. tests).
  *
  * Tolerant of a wallet without `getCapabilities` (→ `batchExecution: undefined`),
  * and of a `getCapabilities` that throws (the EOA case — treated as no caps).
@@ -123,15 +150,17 @@ export function detectAccount(
   client: DetectClient,
   address: Address,
   chainId: number,
+  scope?: object,
 ): Promise<AccountProfile> {
+  const cache = cacheFor(scope)
   const key = cacheKey(address, chainId)
-  const cached = profileCache.get(key)
+  const cached = cache.get(key)
   if (cached !== undefined) return cached
 
   const pending = computeProfile(client, address, chainId)
-  profileCache.set(key, pending)
+  cache.set(key, pending)
   // On failure, evict so a later call retries rather than caching a rejection.
-  pending.catch(() => profileCache.delete(key))
+  pending.catch(() => cache.delete(key))
   return pending
 }
 

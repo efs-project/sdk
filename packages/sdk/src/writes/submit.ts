@@ -505,15 +505,22 @@ export async function submitLayeredTier1(
     const layerAtts = plan.attestations.filter((a) => a.layer === layer)
     if (layerAtts.length === 0) continue
 
-    // Cancellation boundary: bail BEFORE sending this layer's irreversible
-    // multiAttest. Never checked mid-flight — a tx already broadcast can't be unsent.
-    ctx.signal?.throwIfAborted()
-
     // Resolve symbols against prior layers' UIDs, group by schema, capture the
-    // flat ref order EAS will emit in. (Pure — no tx; the chain guard runs just before the
-    // broadcast below so a drift is a no-tx failure that still carries `flatRefs`.)
+    // flat ref order EAS will emit in. (Pure — no tx; the abort + chain guards run just
+    // before the broadcast below so a bail is a no-tx failure that still carries `flatRefs`.)
     const { requests, flatRefs } = buildLayerRequests(layerAtts, resolved)
     const call = buildMultiAttest(ctx.easAddress, requests)
+
+    // Cancellation boundary: bail BEFORE sending this layer's irreversible multiAttest (never
+    // mid-flight — a tx already broadcast can't be unsent). Once an earlier layer has landed
+    // (`resolved.size > 0`), a mid-write abort is a PARTIAL write — fold it into the no-tx
+    // WriteNotSentError (landed map + PartialBatchFailure, the AbortError as `cause`) so the
+    // caller can recover. On the first/only layer (nothing landed) let the raw AbortError
+    // escape (no partial write to describe). Mirrors the pre-send chain-guard handling below.
+    if (ctx.signal?.aborted) {
+      if (resolved.size === 0) ctx.signal.throwIfAborted()
+      throw new WriteNotSentError(layer, flatRefs, new Map(resolved), ctx.signal.reason)
+    }
 
     // Send the layer's single multiAttest. The three failure modes are kept
     // DISTINCT so a caller can tell safe-retry from possible-duplicate:
