@@ -991,7 +991,19 @@ export function createEfsClient(config: EfsClientConfig): EfsClient {
     },
     raw: {
       deployment: getDeployment,
-      verifyDeployment: async () => verifyDeployment(publicClient, await liveDeployment()),
+      verifyDeployment: async () => {
+        // Resolve the deployment from the live chain, then probe through a client GUARDED to
+        // that resolved chain — verifyDeployment's `getCode`/schema `readContract` checks run
+        // after resolution, so a provider that drifts in between would otherwise verify the
+        // resolved chain's addresses against the new chain (or falsely pass on a fork with
+        // matching addresses). Fail closed (`WrongChain`) on drift. (The guard covers both
+        // readContract and getCode.)
+        const dep = await liveDeployment()
+        return verifyDeployment(
+          chainGuardedPublicClient(publicClient, () => dep.chainId),
+          dep,
+        )
+      },
       // Spread the pre-wired contract instances (P1-4). They are lazy getters, so
       // spreading here would eagerly resolve them — instead expose the object so
       // each `efs.raw.<contract>` access re-resolves the deployment.

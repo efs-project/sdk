@@ -292,4 +292,27 @@ describe('createEfsClient — deployment resolution via chainId (ADR-0005)', () 
     const efs = createEfsClient({ provider, chain: localChain, deployments })
     await expect(efs.raw.verifyDeployment()).rejects.toThrow(SchemaMismatchError)
   })
+
+  it('verifyDeployment guards a post-resolution chain switch (TOCTOU → WrongChain)', async () => {
+    // liveDeployment() resolves at eth_chainId call 1; verifyDeployment's getCode/schema probes
+    // run after. A provider that drifts in between would verify the resolved chain's addresses
+    // against the new chain (or falsely pass on a fork with matching addresses). The probe now
+    // runs through a client guarded to the resolved chain → fails closed on drift. Code +
+    // schemas are set up to PASS absent drift, isolating the guard as the cause of the throw.
+    let chainIdCalls = 0
+    const provider = createMockProvider({
+      chainId: CHAIN_ID,
+      code: allCode(),
+      handlers: {
+        eth_call: matchingSchemaCall,
+        eth_chainId: () => {
+          chainIdCalls += 1
+          return chainIdCalls === 1 ? `0x${CHAIN_ID.toString(16)}` : '0xf423f' // CHAIN_ID then 999999
+        },
+      },
+    })
+    const efs = createEfsClient({ provider, chain: localChain, deployments })
+    const err = await efs.raw.verifyDeployment().catch((e) => e)
+    expect((err as { code?: string }).code).toBe('WrongChain')
+  })
 })
