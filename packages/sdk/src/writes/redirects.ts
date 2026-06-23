@@ -58,7 +58,7 @@ export interface RedirectsNs {
 export interface RedirectsNsDeps {
   readonly getDeployment: () => EfsDeployment
   /** The lens-scoped read context (for `get`). */
-  readonly readContext: () => ReadContext
+  readonly readContext: () => ReadContext | Promise<ReadContext>
   readonly submitContext: () => EdgeSubmitContext
   /** Revoke a UID under a schema (wired to `efs.eas.revoke`). */
   readonly revoke: (schema: Hex, uid: Hex) => Promise<Hex>
@@ -108,7 +108,7 @@ export function makeRedirectsNs(deps: RedirectsNsDeps): RedirectsNs {
     },
 
     get: async (from, opts) => {
-      const ctx = deps.readContext()
+      const ctx = await deps.readContext()
       const attesters = await resolveAttesters(ctx, opts)
       // Literal record (any kind, not chain-followed): requireFollowable stays false.
       return readActiveRedirect(ctx, from, attesters)

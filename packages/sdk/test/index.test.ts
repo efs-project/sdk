@@ -1,10 +1,10 @@
 import {
-  http,
   type Address,
   type EIP1193Provider,
   type WalletClient,
   createPublicClient,
   createWalletClient,
+  custom,
 } from 'viem'
 import { sepolia } from 'viem/chains'
 import { describe, expect, it } from 'vitest'
@@ -16,13 +16,20 @@ import {
   identity,
   lens,
 } from '../src/index.js'
+import { createMockProvider } from './helpers/mock-eip1193.js'
 
 // An UNREGISTERED chain — Sepolia (11155111) is now seeded in the built-in registry, so
 // these "the verb is wired" tests use a chain with no EFS deployment, where reaching
-// deployment resolution still surfaces DeploymentNotFound (the signal they rely on).
+// deployment resolution still surfaces DeploymentNotFound (the signal they rely on). The
+// transport is a mock that reports chainId 999999 for `eth_chainId` (reads now resolve the
+// deployment from the LIVE provider chain) — deterministic, no network.
 const noDeployChain = { ...sepolia, id: 999_999 } as const
-const publicClient = createPublicClient({ chain: noDeployChain, transport: http() })
-const walletClient = createWalletClient({ chain: noDeployChain, transport: http() }) as WalletClient
+const noDeployTransport = custom(createMockProvider({ chainId: 999_999 }))
+const publicClient = createPublicClient({ chain: noDeployChain, transport: noDeployTransport })
+const walletClient = createWalletClient({
+  chain: noDeployChain,
+  transport: noDeployTransport,
+}) as WalletClient
 const addr = (n: number) => `0x${n.toString(16).padStart(40, '0')}` as Address
 
 describe('namespaced client (Decision F)', () => {
@@ -90,7 +97,10 @@ describe('namespaced client (Decision F)', () => {
   it('accepts the EIP-1193 provider form (standard boundary), wallet-gated by `account`', async () => {
     // A minimal EIP-1193 provider — the durable, library-neutral input.
     const provider = {
-      request: async () => {
+      // Answer eth_chainId (reads resolve the deployment from the live chain) with the
+      // unregistered 999999; everything else throws (no deployment ⇒ short-circuits first).
+      request: async ({ method }: { method: string }) => {
+        if (method === 'eth_chainId') return `0x${(999_999).toString(16)}`
         throw new Error('mock')
       },
       on: () => {},
@@ -107,6 +117,44 @@ describe('namespaced client (Decision F)', () => {
     // with no registered EFS deployment) — not WalletRequired, not NotImplemented.
     const rw = createEfsClient({ provider, chain: noDeployChain, account: addr(1) })
     await expect(rw.fs.write('/x', new Uint8Array())).rejects.toThrow(DeploymentNotFound)
+  })
+
+  it('reads resolve the deployment from the LIVE provider chain, not the bound chain', async () => {
+    // The publicClient is BOUND to Sepolia (a seeded chain) but the provider's live
+    // eth_chainId reports 999999 (no deployment). A read must resolve from the LIVE chain
+    // → DeploymentNotFound, proving it doesn't trust the construction-time bound chain (a
+    // mutable provider that switched networks). With the old bound-chain resolution this
+    // would have resolved Sepolia and NOT thrown.
+    const drifted = createPublicClient({
+      chain: sepolia, // bound = 11155111 (seeded)
+      transport: custom(createMockProvider({ chainId: 999_999 })), // live = 999999 (unseeded)
+    })
+    const efs = createEfsClient({ publicClient: drifted })
+    await expect(efs.fs.info('/x')).rejects.toThrow(DeploymentNotFound)
+    await expect(efs.fs.read('/x')).rejects.toThrow(DeploymentNotFound)
+  })
+
+  it('efs.raw.*.write.* is guarded against a wrong-chain wallet (WrongChain)', async () => {
+    // The deployment resolves to Sepolia (publicClient bound there), but the wallet's live
+    // chain is 999999 — a raw `.write.*` must fail closed like the higher-level verbs,
+    // not broadcast to the wallet chain at the deployment's addresses.
+    const pub = createPublicClient({
+      chain: sepolia,
+      transport: custom(createMockProvider({ chainId: 11_155_111 })),
+    })
+    const wal = createWalletClient({
+      chain: sepolia,
+      account: addr(7),
+      transport: custom(createMockProvider({ chainId: 999_999 })), // live wallet chain ≠ deployment
+    }) as WalletClient
+    const efs = createEfsClient({ publicClient: pub, walletClient: wal })
+    const rawEasWrite = (
+      efs.raw.eas as unknown as { write: { revoke: (a: unknown) => Promise<unknown> } }
+    ).write
+    const err = await rawEasWrite
+      .revoke([{ schema: `0x${'0'.repeat(64)}`, data: { uid: `0x${'0'.repeat(64)}`, value: 0n } }])
+      .catch((e) => e)
+    expect((err as { code?: string }).code).toBe('WrongChain')
   })
 })
 

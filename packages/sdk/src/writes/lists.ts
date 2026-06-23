@@ -89,7 +89,7 @@ export interface ListsWriteNsDeps {
   readonly getDeployment: () => EfsDeployment
   readonly publicClient: ReadPublicClient
   /** Build the read context (for the `lists.get` config read used by add/remove). */
-  readonly readContext: () => ReadContext
+  readonly readContext: () => ReadContext | Promise<ReadContext>
   /** Build the submit context (wallet/public clients + EAS addr + attester). */
   readonly submitContext: () => EdgeSubmitContext
   /** Revoke a UID under a schema (wired to `efs.eas.revoke`). */
@@ -101,7 +101,7 @@ export function makeListsWriteNs(deps: ListsWriteNsDeps): ListsWriteNs {
   /** Resolve the list config or throw {@link ListNotFound} (a write against a
    * non-existent list is a caller error). */
   const requireConfig = async (listUID: Hex) => {
-    const config = await getList(deps.readContext(), listUID)
+    const config = await getList(await deps.readContext(), listUID)
     if (!config.exists) throw new ListNotFound(listUID)
     return config
   }

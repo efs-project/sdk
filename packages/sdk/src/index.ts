@@ -474,6 +474,29 @@ async function assertWalletOnDeploymentChain(
   }
 }
 
+/**
+ * Wrap a wallet client so every `writeContract` runs the {@link assertWalletOnDeploymentChain}
+ * preflight first. The `efs.raw.*` escape hatch builds viem `getContract` instances whose
+ * `.write.*` methods call `walletClient.writeContract` directly — bypassing the per-verb
+ * guard `fs.write`/`efs.eas.*`/the standalone namespaces have. Passing this proxied wallet
+ * into the raw instances closes that gap (a wrong-chain `efs.raw.*.write.*` fails closed)
+ * without a per-method wrapper. Only `writeContract` is intercepted; reads pass through.
+ */
+function chainGuardedWallet(wallet: WalletClient, deploymentChainId: () => number): WalletClient {
+  return new Proxy(wallet, {
+    get(target, prop, receiver) {
+      if (prop === 'writeContract') {
+        const write = target.writeContract.bind(target)
+        return (async (args: Parameters<WalletClient['writeContract']>[0]) => {
+          await assertWalletOnDeploymentChain(target, deploymentChainId())
+          return write(args)
+        }) as WalletClient['writeContract']
+      }
+      return Reflect.get(target, prop, receiver)
+    },
+  }) as WalletClient
+}
+
 // Type-level write gate: a write-capable config (an `account` in the provider form,
 // or a `walletClient` in the viem form) widens the return to `EfsClient`; otherwise
 // you get `EfsReadClient` (no write verbs).
@@ -484,6 +507,18 @@ export function createEfsClient(config: EfsClientConfig): EfsClient {
   const { publicClient, walletClient } = resolveClients(config)
   const override = config.deployments
   const getDeployment = () => resolveDeployment(chainIdOf(publicClient), override)
+  /**
+   * Resolve the deployment from the wallet/provider's LIVE chain (`eth_chainId`), not the
+   * construction-time `publicClient.chain.id`. A mutable EIP-1193 provider can switch
+   * networks after the client is built, and `readContract` goes to the provider's CURRENT
+   * chain — resolving from the bound chain would query the OLD deployment's addresses on
+   * the new chain (false misses / wrong-chain data). Reads use this so a chain switch is
+   * reflected (or surfaces `DeploymentNotFound`). One `getChainId()` per read op; a
+   * provider `chainChanged`-subscription cache is a future optimization. (Writes keep their
+   * own live-wallet guard, {@link assertWalletOnDeploymentChain}.)
+   */
+  const liveDeployment = async (): Promise<EfsDeployment> =>
+    resolveDeployment(await publicClient.getChainId(), override)
   const requireWallet = () => {
     if (!walletClient) throw new WalletRequired()
   }
@@ -496,9 +531,9 @@ export function createEfsClient(config: EfsClientConfig): EfsClient {
   // Assemble the lens-scoped read context the read verbs operate over. Built fresh
   // per call so a deployment override / account change is always reflected (cheap;
   // the narrow `readContract` surface is the only viem coupling).
-  const readContext = (): ReadContext => ({
+  const readContext = async (): Promise<ReadContext> => ({
     publicClient: publicClient as unknown as ReadContext['publicClient'],
-    deployment: getDeployment(),
+    deployment: await liveDeployment(),
     ...(config.defaultLens !== undefined ? { defaultLens: config.defaultLens } : {}),
     ...(account !== undefined ? { account } : {}),
   })
@@ -508,7 +543,11 @@ export function createEfsClient(config: EfsClientConfig): EfsClient {
   // (the instances re-resolve the deployment lazily on each property access).
   const rawContracts = buildRawContracts(getDeployment, {
     public: publicClient,
-    wallet: walletClient,
+    // Guard raw `.write.*` against a wrong-chain wallet (the escape hatch otherwise
+    // bypasses the preflight the higher-level write verbs run).
+    wallet: walletClient
+      ? chainGuardedWallet(walletClient, () => getDeployment().chainId)
+      : undefined,
   })
 
   // The `efs.eas.*` raw verb implementations (attest/multiAttest/revoke/getAttestation)
@@ -647,14 +686,14 @@ export function createEfsClient(config: EfsClientConfig): EfsClient {
       // the typed surface at this boundary (the narrowing is sound: when the token is
       // present the field IS populated; see `info`/`read` + `Expanded`).
       read: (async (pathOrRef: string | DataRef, opts?: ReadOpts & FetchOptions) =>
-        readFile(readContext(), pathOrRef, opts)) as EfsFsRead['read'],
-      readText: async (path, opts) => readTextFile(readContext(), path, opts),
-      readBytes: async (path, opts) => readBytesFile(readContext(), path, opts),
-      readJson: async (path, opts) => readJsonFile(readContext(), path, opts),
-      locate: async (path, opts) => locateRead(readContext(), path, opts),
+        readFile(await readContext(), pathOrRef, opts)) as EfsFsRead['read'],
+      readText: async (path, opts) => readTextFile(await readContext(), path, opts),
+      readBytes: async (path, opts) => readBytesFile(await readContext(), path, opts),
+      readJson: async (path, opts) => readJsonFile(await readContext(), path, opts),
+      locate: async (path, opts) => locateRead(await readContext(), path, opts),
       info: (async (path: string, opts?: ReadOpts) =>
-        infoRead(readContext(), path, opts)) as EfsFsRead['info'],
-      exists: async (path, opts) => existsRead(readContext(), path, opts),
+        infoRead(await readContext(), path, opts)) as EfsFsRead['info'],
+      exists: async (path, opts) => existsRead(await readContext(), path, opts),
       // `list` is synchronous (returns a lazy EfsList). Defer deployment + lens +
       // anchor resolution into the first read so the sync method never throws and a
       // bad deployment surfaces on `.byPage()`/iteration (consistent with the async
@@ -662,7 +701,7 @@ export function createEfsClient(config: EfsClientConfig): EfsClient {
       list: (path, opts) => listRead(readContext, path, opts),
       // Folder Overview (ADR-0011): the folder's README.md, resolved by EXACT path
       // (never a directory scan) and classified into a discriminated OverviewResult.
-      overview: async (path, opts) => overviewRead(readContext(), path, opts),
+      overview: async (path, opts) => overviewRead(await readContext(), path, opts),
       write: async (path, content, opts) => {
         requireWallet()
         // requireWallet() guarantees `walletClient` is defined here.
@@ -746,10 +785,10 @@ export function createEfsClient(config: EfsClientConfig): EfsClient {
     // EfsListsNs on EfsReadClient), like graph/props — a no-wallet runtime call to a
     // write verb throws via the wallet-bound submit/revoke.
     lists: {
-      get: (listUID, opts) => getListRead(readContext(), listUID, opts),
+      get: async (listUID, opts) => getListRead(await readContext(), listUID, opts),
       entries: (listUID, opts) => listEntriesRead(readContext, listUID, opts),
-      length: (listUID, opts) => listLengthRead(readContext(), listUID, opts),
-      has: (listUID, target, opts) => listHasRead(readContext(), listUID, target, opts),
+      length: async (listUID, opts) => listLengthRead(await readContext(), listUID, opts),
+      has: async (listUID, target, opts) => listHasRead(await readContext(), listUID, target, opts),
       create: (config) => listsWriteNs.create(config),
       add: (listUID, target, opts) => listsWriteNs.add(listUID, target, opts),
       remove: (entryUID, opts) => listsWriteNs.remove(entryUID, opts),
@@ -765,7 +804,8 @@ export function createEfsClient(config: EfsClientConfig): EfsClient {
       computeUID: computeAttestationUID,
       verifyUID: verifyAttestationUID,
       abi: { eas: easAbi, schemaRegistry: schemaRegistryAbi },
-      attestationsFor: (items, opts) => attestationsForItems(readContext(), items, opts),
+      attestationsFor: async (items, opts) =>
+        attestationsForItems(await readContext(), items, opts),
       // Raw EAS verbs (P1-4): reads available always, writes gated on the wallet.
       getAttestation: easVerbs.getAttestation,
       attest: easVerbs.attest,
@@ -774,7 +814,7 @@ export function createEfsClient(config: EfsClientConfig): EfsClient {
     },
     raw: {
       deployment: getDeployment,
-      verifyDeployment: () => verifyDeployment(publicClient, getDeployment()),
+      verifyDeployment: async () => verifyDeployment(publicClient, await liveDeployment()),
       // Spread the pre-wired contract instances (P1-4). They are lazy getters, so
       // spreading here would eagerly resolve them — instead expose the object so
       // each `efs.raw.<contract>` access re-resolves the deployment.

@@ -331,7 +331,7 @@ function identityKeyFor(kind: ListTargetType, target: Address | Hex): Hex {
  * snapshot-isolated).
  */
 export function listEntries(
-  ctxThunk: () => ReadContext,
+  ctxThunk: () => ReadContext | Promise<ReadContext>,
   listUID: Hex,
   opts?: ListReadOptions,
 ): EfsList<ListEntry> {
@@ -344,7 +344,7 @@ export function listEntries(
   const prime = () => {
     if (!primed) {
       primed = (async () => {
-        const ctx = ctxThunk()
+        const ctx = await ctxThunk()
         const config = await readConfig(
           ctx.publicClient,
           ctx.deployment.contracts.listReader,

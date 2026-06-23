@@ -76,7 +76,7 @@ export type PropSetOptions = Record<never, never>
 export interface PropsNsDeps {
   readonly getDeployment: () => EfsDeployment
   readonly publicClient: ReadPublicClient
-  readonly readContext: () => ReadContext
+  readonly readContext: () => ReadContext | Promise<ReadContext>
   readonly submitContext: () => EdgeSubmitContext
   /** The connected attester (default lens for reads). */
   readonly attester: () => Address | undefined
@@ -124,7 +124,7 @@ export function makePropsNs(deps: PropsNsDeps): PropsNs {
       // Reuse the read engine's reserved/custom property reader (same lookup for any
       // key: resolveAnchor(dataUID, key, PROPERTY) → getActivePinTarget → decode value).
       const prop = await readReservedProperty(
-        deps.readContext(),
+        await deps.readContext(),
         dataUID,
         attester,
         // `readReservedProperty` is typed to the reserved keys but the lookup is
@@ -179,15 +179,13 @@ export function makePropsNs(deps: PropsNsDeps): PropsNs {
         }),
       )
 
+      // Resolve the read context ONCE (it may query the live chain), then reuse it for
+      // every per-key value read below.
+      const rc = await deps.readContext()
       const entries = await Promise.all(
         names.map(async (key) => {
           if (key === undefined) return undefined
-          const prop = await readReservedProperty(
-            deps.readContext(),
-            dataUID,
-            attester,
-            key as 'contentType',
-          )
+          const prop = await readReservedProperty(rc, dataUID, attester, key as 'contentType')
           if (prop.value === undefined || prop.propertyUID === undefined) return undefined
           return { key, value: prop.value, propertyUID: prop.propertyUID }
         }),

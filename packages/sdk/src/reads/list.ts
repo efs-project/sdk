@@ -281,7 +281,7 @@ type PrimedList = {
  *   1-20, excludes ≤ 8, maxItems > 0).
  */
 export function list(
-  ctxThunk: () => ReadContext,
+  ctxThunk: () => ReadContext | Promise<ReadContext>,
   dir: string,
   opts?: ListOptions,
 ): EfsList<DirEntry> {
@@ -294,7 +294,7 @@ export function list(
   const prime = (): Promise<PrimedList> => {
     if (!primed) {
       primed = (async (): Promise<PrimedList> => {
-        const ctx = ctxThunk()
+        const ctx = await ctxThunk()
         const attesters = await resolveAttesters(ctx, opts)
         // Resolve the exclude labels → def UIDs BEFORE the anchor walk so a filtered
         // read never issues the unfiltered branch first (no leak window). For the
