@@ -560,12 +560,15 @@ function chainGuardedWallet(wallet: WalletClient, deploymentChainId: () => numbe
 }
 
 /**
- * Wrap a public client so every `readContract` first validates the LIVE chain matches the
- * deployment ({@link assertChainMatches}). The `efs.raw.*` read instances are `getContract`s
- * bound to the construction-time deployment addresses; if a mutable provider switches
- * networks, `readContract` goes to the new chain while the addresses are the old chain's —
- * returning false misses / wrong-chain data. Validating fails closed on drift (rather than
- * silently serving wrong-chain reads). Only `readContract` is intercepted.
+ * Wrap a public client so every chain-touching READ (`readContract` and `getCode`) first
+ * validates the LIVE chain matches `deploymentChainId()` ({@link assertChainMatches}). Two
+ * uses: (1) the `efs.raw.*` read instances bound to construction-time addresses, and (2) the
+ * `readContext` read engines, which resolve the deployment from the live chain and then issue
+ * reads — a mutable provider that switches networks between resolution and the read (or after
+ * construction) would otherwise hit the resolved chain's addresses on the new chain, returning
+ * false misses / wrong-chain data. Guarding fails closed on drift. `getCode` is included
+ * because the `web3://` (SSTORE2) read transport code-copies chunks by address. `getEnsAddress`
+ * is deliberately NOT guarded — ENS resolution is cross-chain by nature (mainnet registry).
  */
 function chainGuardedPublicClient(
   client: PublicClient,
@@ -579,6 +582,13 @@ function chainGuardedPublicClient(
           await assertChainMatches(target, deploymentChainId())
           return readFn(args)
         }) as PublicClient['readContract']
+      }
+      if (prop === 'getCode') {
+        const getCodeFn = target.getCode.bind(target)
+        return (async (args: Parameters<PublicClient['getCode']>[0]) => {
+          await assertChainMatches(target, deploymentChainId())
+          return getCodeFn(args)
+        }) as PublicClient['getCode']
       }
       return Reflect.get(target, prop, receiver)
     },
@@ -651,12 +661,26 @@ export function createEfsClient(config: EfsClientConfig): EfsClient {
   // Assemble the lens-scoped read context the read verbs operate over. Built fresh
   // per call so a deployment override / account change is always reflected (cheap;
   // the narrow `readContract` surface is the only viem coupling).
-  const readContext = async (): Promise<ReadContext> => ({
-    publicClient: publicClient as unknown as ReadContext['publicClient'],
-    deployment: await liveDeployment(),
-    ...(config.defaultLens !== undefined ? { defaultLens: config.defaultLens } : {}),
-    ...(account !== undefined ? { account } : {}),
-  })
+  //
+  // Resolve the deployment from the LIVE chain, then hand the read engines a publicClient
+  // GUARDED against that resolved chain. Closes a TOCTOU: `liveDeployment()` resolves at time
+  // T, but the engines' `readContract`/`getCode` run at T+1 — a mutable provider that switches
+  // chains in between would otherwise use the resolved chain's addresses on the new chain
+  // (false misses / wrong-chain data). The guard re-asserts `live === deployment.chainId`
+  // before each read, failing closed on drift. `deployment.chainId` is captured (constant for
+  // this read), so the guard pins to the chain we actually resolved against.
+  const readContext = async (): Promise<ReadContext> => {
+    const deployment = await liveDeployment()
+    return {
+      publicClient: chainGuardedPublicClient(
+        publicClient,
+        () => deployment.chainId,
+      ) as unknown as ReadContext['publicClient'],
+      deployment,
+      ...(config.defaultLens !== undefined ? { defaultLens: config.defaultLens } : {}),
+      ...(account !== undefined ? { account } : {}),
+    }
+  }
 
   // The `efs.raw.*` pre-wired contract instances (P1-4): viem `getContract`s bound
   // to the resolved deployment addresses + vendored ABIs + the client(s). Built once

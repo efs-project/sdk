@@ -146,6 +146,31 @@ describe('namespaced client (Decision F)', () => {
     await expect(efs.fs.read('/x')).rejects.toThrow(DeploymentNotFound)
   })
 
+  it('guards reads against a chain switch BETWEEN live-deployment resolution and the read (TOCTOU)', async () => {
+    // liveDeployment() resolves the deployment from getChainId() at time T; the read engines'
+    // readContract/getCode run at T+1. A provider that switches chains in between would use the
+    // resolved chain's addresses on the new chain (false misses / wrong-chain data). The read
+    // client is guarded against the RESOLVED chain, so it fails closed. eth_chainId returns the
+    // seeded Sepolia chain on the FIRST call (resolution) then drifts to 999999 (the read).
+    let chainIdCalls = 0
+    const drifting = createPublicClient({
+      chain: sepolia,
+      transport: custom(
+        createMockProvider({
+          handlers: {
+            eth_chainId: () => {
+              chainIdCalls += 1
+              return chainIdCalls === 1 ? '0xaa36a7' : '0xf423f' // 11155111 (resolve) → 999999 (read)
+            },
+          },
+        }),
+      ),
+    })
+    const efs = createEfsClient({ publicClient: drifting })
+    const err = await efs.fs.info('/x').catch((e) => e)
+    expect((err as { code?: string }).code).toBe('WrongChain') // not a false miss on Sepolia addresses
+  })
+
   it('efs.raw.*.write.* is guarded against a wrong-chain wallet (WrongChain)', async () => {
     // The deployment resolves to Sepolia (publicClient bound there), but the wallet's live
     // chain is 999999 — a raw `.write.*` must fail closed like the higher-level verbs,
