@@ -440,24 +440,44 @@ describe('submitWriteTier1 — single-layer plan is one tx (one signature)', () 
 })
 
 describe('submitWriteTier1 — per-layer wrong-chain guard', () => {
-  it('re-runs assertChain before EACH layer; a mid-write switch stops the dependent layer', async () => {
+  it('re-runs assertChain before EACH layer send; a mid-write switch stops the dependent layer', async () => {
     const plan = buildFileWriteGraph(bytesInput) // 3 dependency layers
     const { ctx, sent } = makeMockChain()
     let checks = 0
-    // The wallet switched networks after layer 1 mined: the assertChain run before layer 2
-    // fails closed, so the dependent layer never broadcasts to the new chain while layer 1's
-    // receipt was awaited on the deployment chain (the partial-write the guard prevents).
+    // Two checks run per layer (before the send, before the receipt wait). Layer 1 completes
+    // (send-check 1, wait-check 2); the wallet then switches networks, so layer 2's PRE-SEND
+    // check (3) fails closed — the dependent layer never broadcasts to the new chain.
+    const assertChain = async () => {
+      checks += 1
+      if (checks >= 3) throw Object.assign(new Error('wrong chain'), { code: 'WrongChain' })
+    }
+    const err = await submitWriteTier1(plan, { ...ctx, assertChain }).catch((e) => e)
+    expect((err as { code?: string }).code).toBe('WrongChain') // raw — thrown before the send
+    expect(checks).toBe(3)
+    expect(sent).toHaveLength(1) // only layer 1 broadcast; the dependent layer 2 did NOT
+  })
+
+  it('re-checks the chain before the receipt wait; a post-send switch is outcome-unknown (mined:false) with the txHash', async () => {
+    const plan = buildFileWriteGraph(bytesInput)
+    const { ctx, sent } = makeMockChain()
+    let checks = 0
+    // Layer 1's send-check (1) passes and the tx broadcasts; the provider then drifts, so the
+    // PRE-WAIT check (2) fails closed. Inside the receipt-wait try, the drift surfaces as the
+    // honest "may still mine" outcome carrying the in-flight txHash — never a false revert —
+    // so recovery can re-bind and check the hash.
     const assertChain = async () => {
       checks += 1
       if (checks >= 2) throw Object.assign(new Error('wrong chain'), { code: 'WrongChain' })
     }
     const err = await submitWriteTier1(plan, { ...ctx, assertChain }).catch((e) => e)
-    expect((err as { code?: string }).code).toBe('WrongChain')
-    expect(checks).toBe(2) // before layer 1 (passed) and before layer 2 (threw)
-    expect(sent).toHaveLength(1) // only layer 1 broadcast; the dependent layer 2 did NOT
+    expect(err).toBeInstanceOf(WriteRevertedError)
+    const we = err as WriteRevertedError
+    expect(we.mined).toBe(false) // outcome unknown — the tx may still mine on the deployment chain
+    expect(we.txHash).toBe(uid(1)) // layer 1's in-flight hash preserved for recovery
+    expect(sent).toHaveLength(1) // layer 1 WAS broadcast
   })
 
-  it('runs assertChain exactly once per layer on the happy path', async () => {
+  it('runs assertChain before each layer send AND each receipt wait (2 per layer)', async () => {
     const plan = buildFileWriteGraph(bytesInput) // 3 layers
     const { ctx, sent } = makeMockChain()
     let checks = 0
@@ -468,7 +488,7 @@ describe('submitWriteTier1 — per-layer wrong-chain guard', () => {
       },
     })
     expect(sent).toHaveLength(3)
-    expect(checks).toBe(3) // one re-check per layer, none skipped
+    expect(checks).toBe(6) // before the send + before the receipt wait, per layer
   })
 })
 

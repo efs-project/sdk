@@ -311,6 +311,15 @@ export async function writeFileTier1(
     }
   }
 
+  // Re-assert the live chain AFTER the caller's entry preflight (index.ts) and BEFORE the
+  // planning reads below (parent-anchor resolution, visibility tags, transport definitions).
+  // A mutable public provider that switched chains for these reads — then back before
+  // storage/submit — would otherwise bake wrong-chain anchor/transport UIDs into the plan,
+  // so the DATA layer mines on the deployment chain and the dependent anchor/MIRROR layer
+  // reverts. Fail closed before any planning read informs the plan. (storeOnchain + the
+  // layered submitter re-assert again before each of their own txs.)
+  await ctx.assertChain?.()
+
   // 1. Content identity (ADR-0006: bare SHA-256) + size.
   const contentHash = hashContent(content)
   const size = BigInt(content.byteLength)

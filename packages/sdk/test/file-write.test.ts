@@ -500,6 +500,30 @@ describe('writeFileTier1 — read-only planning before irreversible storage', ()
     expect(deploys).toHaveLength(0) // storage never deployed
     expect(sent).toHaveLength(0) // no attestations
   })
+
+  it('re-asserts the live chain BEFORE the planning reads — a mid-write drift reads nothing, deploys nothing', async () => {
+    const { ctx, sent, deploys } = makeCtx()
+    let readCalled = false
+    const origRead = ctx.publicClient.readContract.bind(ctx.publicClient)
+    ;(ctx.publicClient as { readContract: unknown }).readContract = async (a: unknown) => {
+      readCalled = true
+      return (origRead as (x: unknown) => Promise<unknown>)(a)
+    }
+    // The public provider drifted after the caller's entry preflight: the in-routine guard
+    // fails closed BEFORE any planning read (parent-anchor / visibility / transport) can bake
+    // a wrong-chain UID into the plan. Nothing reads, nothing deploys, nothing attests.
+    const guarded = {
+      ...ctx,
+      assertChain: async () => {
+        throw Object.assign(new Error('wrong chain'), { code: 'WrongChain' })
+      },
+    } as unknown as FileWriteContext
+    const err = await writeFileTier1('/docs/readme.md', CONTENT, guarded).catch((e) => e)
+    expect((err as { code?: string }).code).toBe('WrongChain')
+    expect(readCalled).toBe(false) // no planning read ran
+    expect(deploys).toHaveLength(0) // storage never deployed
+    expect(sent).toHaveLength(0) // no attestations
+  })
 })
 
 describe('writeFileTier1 — abort signal', () => {

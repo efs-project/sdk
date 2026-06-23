@@ -214,12 +214,13 @@ describe('storeOnchain', () => {
     expect(calls.filter((c) => c.kind === 'manager')).toHaveLength(0) // manager never sent
   })
 
-  it('re-asserts the live chain between deploys — a switch after the chunk stops the manager', async () => {
+  it('re-checks the chain before each receipt wait — a switch after the chunk send stops at the chunk wait', async () => {
     const { ctx, calls } = makeCtx()
     let checks = 0
-    // The wallet switched networks after the chunk landed: the SECOND assertChain (run
-    // before the manager deploy) fails closed, so the manager never broadcasts to the
-    // new chain while the chunk's receipt was awaited on the deployment chain.
+    // assertChain runs before BOTH the deploy AND the receipt wait, per deploy. The chunk
+    // deploy guard (1) passes and the chunk broadcasts; the provider then drifts, so the
+    // chunk's PRE-WAIT guard (2) fails closed — the wait never queries the wrong chain (which
+    // would falsely report "no contract address"), and the manager step is never reached.
     const assertChain = async () => {
       checks += 1
       if (checks >= 2) throw new EfsError('wrong chain', { code: 'WrongChain' })
@@ -227,7 +228,25 @@ describe('storeOnchain', () => {
     const guarded = { ...ctx, assertChain } as unknown as OnchainStoreContext
     const err = await storeOnchain(new Uint8Array([1, 2, 3]), guarded).catch((e) => e)
     expect((err as { code?: string }).code).toBe('WrongChain')
-    expect(checks).toBe(2) // checked before the chunk (passed) and before the manager (threw)
+    expect(checks).toBe(2) // before the chunk deploy (passed), before the chunk wait (threw)
+    expect(calls.filter((c) => c.kind === 'chunk')).toHaveLength(1) // chunk did deploy
+    expect(calls.filter((c) => c.kind === 'manager')).toHaveLength(0) // manager never sent
+  })
+
+  it('re-asserts between deploys — a switch before the manager deploy stops it', async () => {
+    const { ctx, calls } = makeCtx()
+    let checks = 0
+    // The chunk deploy + wait both pass (checks 1, 2); the provider then drifts, so the
+    // manager's PRE-DEPLOY guard (3) fails closed — the manager never broadcasts to the new
+    // chain while the chunk's receipt was awaited on the deployment chain.
+    const assertChain = async () => {
+      checks += 1
+      if (checks >= 3) throw new EfsError('wrong chain', { code: 'WrongChain' })
+    }
+    const guarded = { ...ctx, assertChain } as unknown as OnchainStoreContext
+    const err = await storeOnchain(new Uint8Array([1, 2, 3]), guarded).catch((e) => e)
+    expect((err as { code?: string }).code).toBe('WrongChain')
+    expect(checks).toBe(3) // chunk deploy + chunk wait passed; manager deploy guard threw
     expect(calls.filter((c) => c.kind === 'chunk')).toHaveLength(1) // chunk did deploy
     expect(calls.filter((c) => c.kind === 'manager')).toHaveLength(0) // manager never sent
   })

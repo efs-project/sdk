@@ -551,6 +551,12 @@ export async function submitLayeredTier1(
 
     let receipt: TransactionReceipt
     try {
+      // The public client can drift to another chain AFTER the tx is broadcast and BEFORE
+      // this wait; waiting on the wrong chain would surface a tx that is mining on the
+      // deployment chain as not-found (a FALSE mined:false / partial failure). Re-assert
+      // INSIDE the try so a drift is reported as the honest (b) outcome — "may still mine,
+      // here's the in-flight txHash" — not a misleading revert, and recovery keeps the hash.
+      await ctx.assertChain?.()
       receipt = await ctx.publicClient.waitForTransactionReceipt({ hash: txHash })
     } catch (cause) {
       // (b) Tx sent, receipt unknown — may still mine; carry the txHash, mined:false.

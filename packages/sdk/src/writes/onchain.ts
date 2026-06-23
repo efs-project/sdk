@@ -309,6 +309,12 @@ async function requireContractAddress(
   hash: Hex,
   what: string,
 ): Promise<Address> {
+  // The provider can drift AFTER the deploy tx is broadcast and BEFORE this wait; waiting on
+  // the wrong chain would surface a deploy that mined on the deployment chain as "no contract
+  // address", aborting the default no-mirror write even though the chunk/manager landed.
+  // Re-assert the live chain before waiting (outside the classify funnel, like the signal
+  // checks) so a drift fails closed with WrongChain rather than a misleading no-address error.
+  await ctx.assertChain?.()
   const receipt = await classified(() => ctx.publicClient.waitForTransactionReceipt({ hash }))
   const addr = receipt.contractAddress
   if (addr === undefined || addr === null) {
