@@ -699,6 +699,34 @@ export type SourceUIDs = {
 }
 
 /**
+ * **Provenance + freshness of a read's ANSWER** — orthogonal to `verification`, which is the
+ * authenticity of the BYTES (ADR-0015). `verification:'matches-author'` proves the bytes are
+ * what the lens attester committed; `trust` says whether on-chain existence/revocation were
+ * confirmed and how fresh that is. A cached read can be `matches-author` yet revoked — `trust`
+ * is where that shows, so a cached read can never masquerade as a live one.
+ *
+ * RESERVED (ADR-0015): the type is exported now so the surface is stable; it becomes a
+ * required field on the rich read results (`EfsFile`/`FileInfo`/`ReadResult`) in the behavioral
+ * slice, where today every source is live and verbs stamp `{ source:'live',
+ * existence:'confirmed', revocation:'live' }`. Adding it later would be a breaking change, so
+ * the shape lands ahead of the offline/indexer sources that populate it richly.
+ */
+export type TrustDescriptor = {
+  /** Where the answer came from. Open union (matches the SDK's other open discriminants). */
+  source: 'live' | 'indexer' | 'cache' | (string & Record<never, never>)
+  /** Was on-chain EXISTENCE of the winning placement confirmed against `source`?
+   * `'unconfirmed'` for a content-only offline cache that cannot prove the record persists. */
+  existence: 'confirmed' | 'unconfirmed'
+  /** Revocation currency of the winning record.
+   *  - `'live'`      — checked against chain head now.
+   *  - `'as-of'`     — checked against a snapshot/indexer head; see `asOf`.
+   *  - `'unchecked'` — source cannot speak to revocation (a content-only cache). */
+  revocation: 'live' | 'as-of' | 'unchecked'
+  /** Snapshot/indexer head time (epoch seconds) when `revocation:'as-of'`. */
+  asOf?: bigint
+}
+
+/**
  * Fetched bytes + trust-relative verification — the `efs.fs.read` result
  * (sdk-read-surface). `.text()`/`.json()` are **pure** (no I/O — they decode the
  * in-hand `bytes`); a live re-fetch is never hidden behind a result method. The

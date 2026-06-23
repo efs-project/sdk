@@ -133,6 +133,30 @@ type CommonConfig = {
    * a `web3://` mirror); over it throws `PayloadTooLarge`. Default 16 KB.
    */
   write?: WriteConfig
+  /**
+   * RESERVED (ADR-0014, Fork 2) — an injected `fetch` for runtimes with no global `fetch`
+   * (Ring-3 sandboxed apps) or that need a proxy/auth/rate-limit wrapper. **Not yet honored
+   * at the client level** — passing it throws `NotImplemented` (an explicit "reserved" signal,
+   * never a silent no-op). The shape is reserved so future work plugs in here rather than
+   * hardcoding `globalThis.fetch`. (Per-call `FetchOptions.fetchImpl` already exists for the
+   * off-chain fetch engine.) */
+  fetch?: typeof fetch
+  /**
+   * RESERVED (ADR-0014, Fork 2) — a pluggable signature {@link SignatureVerifier} for
+   * non-ECDSA attester keys (firmware/PGP/ed25519) and Ring-3 brokered crypto. **Not yet
+   * honored** — passing it throws `NotImplemented`. Reserved so a verifier registry plugs in
+   * here instead of the read path hardcoding ECDSA recovery. */
+  verifier?: SignatureVerifier
+}
+
+/**
+ * RESERVED (ADR-0014, Fork 2): a pluggable signature verifier. Not yet honored — see
+ * {@link CommonConfig.verifier}. The shape is fixed so future non-ECDSA / brokered-crypto
+ * work has a stable seam.
+ */
+export type SignatureVerifier = {
+  /** Verify an attester's signature over a digest. */
+  verify(args: { attester: Address; digest: Hex; signature: Hex }): boolean | Promise<boolean>
 }
 
 /** Standard form: an EIP-1193 provider + the chain. Pass an `account` to enable writes. */
@@ -568,6 +592,22 @@ export function createEfsClient(config: ProviderConfig & { account: Address | Ac
 export function createEfsClient(config: ViemConfig & { walletClient: WalletClient }): EfsClient
 export function createEfsClient(config: EfsClientConfig): EfsReadClient
 export function createEfsClient(config: EfsClientConfig): EfsClient {
+  // RESERVED config seams (ADR-0014, Fork 2): the shapes exist so future runtimes (Ring-3,
+  // non-ECDSA verticals) plug in here, but they're not yet wired. Fail loudly rather than
+  // silently ignore a passed value — an accidental no-op on a security-relevant slot is worse
+  // than an explicit "not yet".
+  if (config.fetch !== undefined) {
+    throw new NotImplemented('createEfsClient({ fetch })', {
+      alternative:
+        'client-level fetch injection is a reserved seam (ADR-0014); use per-call FetchOptions.fetchImpl for now.',
+    })
+  }
+  if (config.verifier !== undefined) {
+    throw new NotImplemented('createEfsClient({ verifier })', {
+      alternative:
+        'a pluggable signature verifier is a reserved seam (ADR-0014); ECDSA is assumed today.',
+    })
+  }
   const { publicClient, walletClient } = resolveClients(config)
   const override = config.deployments
   // Require a chain-bound public client at construction. The write/raw/eas paths resolve
@@ -1219,3 +1259,14 @@ export {
   type RedirectGetOptions,
 } from './writes/redirects.js'
 export type { RedirectKind, RedirectRecord } from './types.js'
+
+// ── Pluggable read source (ADR-0014) + read-trust provenance (ADR-0015) ────────
+// The `ReadSource` seam decouples reads from a live chain-bound viem client; `ViemReadSource`
+// is the only live impl today, the snapshot/indexer sources are reserved stubs. `TrustDescriptor`
+// is the reserved provenance shape (becomes a required field on the rich read results in the
+// behavioral slice). These are the seams future runtimes (offline, indexer, Ring-3) plug into.
+export type { ReadSource, ReadSourceCapabilities } from './reads/source.js'
+export { viemReadSource } from './reads/sources/viem.js'
+export { snapshotReadSource, type ReadSnapshot } from './reads/sources/snapshot.js'
+export { indexerReadSource, type IndexerConfig } from './reads/sources/indexer.js'
+export type { TrustDescriptor } from './types.js'
