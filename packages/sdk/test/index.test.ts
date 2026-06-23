@@ -253,6 +253,38 @@ describe('namespaced client (Decision F)', () => {
     )
     expect(((await efs.decode(uid).catch((e) => e)) as { code?: string }).code).toBe('WrongChain')
   })
+
+  it('efs.account.capabilities() keys the probe by the LIVE chain, not the construction chain', async () => {
+    // `getCode` (which classifies `kind`) lands on the provider's CURRENT chain, so the
+    // detection cache must be keyed by the LIVE chain too. Both clients are BOUND to the
+    // same chain (Sepolia) but their providers report different live chains, with the SAME
+    // address resolving to different bytecode per network. Under the old construction-time
+    // keying both would share one cache slot and the second would report the first's stale
+    // `kind`; keying by the live chain gives each its own correct profile.
+    const probeAddr = addr(0xca9a) // unique to this test (detect cache is module-level)
+    const mkPublic = (liveChainId: number, code: string) =>
+      createPublicClient({
+        chain: sepolia, // identical construction-time bound chain for both
+        transport: custom(createMockProvider({ chainId: liveChainId, code })),
+      })
+    const mkWallet = (liveChainId: number, code: string) =>
+      createWalletClient({
+        chain: sepolia,
+        account: probeAddr,
+        transport: custom(createMockProvider({ chainId: liveChainId, code })),
+      }) as WalletClient
+    const cap = (liveChainId: number, code: string) =>
+      (
+        createEfsClient({
+          publicClient: mkPublic(liveChainId, code),
+          walletClient: mkWallet(liveChainId, code),
+        }) as unknown as { account: { capabilities(): Promise<{ kind: string }> } }
+      ).account.capabilities()
+
+    // Live chain 1: no code → EOA. Live chain 2: same address, deployed bytecode → smart.
+    expect((await cap(1, '0x')).kind).toBe('eoa')
+    expect((await cap(2, '0x6080604052')).kind).toBe('smart-account')
+  })
 })
 
 describe('lenses', () => {

@@ -948,7 +948,14 @@ export function createEfsClient(config: EfsClientConfig): EfsClient {
               }
             : {}),
         }
-        const profile = await detectAccount(detectClient, address, chainIdOf(publicClient))
+        // Key the probe by the LIVE chain, not the construction-time `publicClient.chain.id`.
+        // A mutable EIP-1193 provider can switch networks after the client is built; the
+        // `getCode` call above already lands on the provider's CURRENT chain, and EIP-5792
+        // `getCapabilities` is reported per the live chain too. Keying detectAccount's cache
+        // with the stale construction-time id would mix new-chain bytecode/capabilities into
+        // an old-chain cache slot and return the wrong `kind`/gasless status after a switch.
+        const liveChainId = await publicClient.getChainId()
+        const profile = await detectAccount(detectClient, address, liveChainId)
         return toCapabilities(profile)
       },
     },
