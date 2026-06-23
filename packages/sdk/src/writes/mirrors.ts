@@ -219,6 +219,13 @@ export function makeMirrorsNs(deps: MirrorsNsDeps): MirrorsNs {
 
   return {
     add: async (dataUID, opts) => {
+      const ctx = deps.submitContext()
+      // Fail closed BEFORE the transport-resolution read — when the deployment map lacks the
+      // URI's scheme, `resolveMirrorTransport` falls back to an on-chain `/transports/<scheme>`
+      // lookup whose result FEEDS the plan. A drifted public client could resolve it on the
+      // wrong chain, building a MIRROR plan with a wrong-chain transport UID. Same guard the
+      // submit runs per layer, run before the read.
+      await ctx.assertChain?.()
       const dep = deps.getDeployment()
       const transportDefinition = await resolveMirrorTransport(
         deps.publicClient as unknown as ResolvePublicClient,
@@ -227,7 +234,7 @@ export function makeMirrorsNs(deps: MirrorsNsDeps): MirrorsNs {
         opts.transport,
       )
       const plan = buildMirrorPlan(dep.schemas, dataUID, transportDefinition, opts.uri)
-      return submitEdgePlan(plan, deps.submitContext())
+      return submitEdgePlan(plan, ctx)
     },
 
     remove: async (mirrorUID) => {

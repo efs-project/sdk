@@ -437,4 +437,23 @@ describe('setOverview — orchestrator (ADR-0011)', () => {
     expect((err as EfsError).code).toBe('InvalidArgument')
     expect((err as EfsError).message).toMatch(/tags\/system/)
   })
+
+  it('guards the live chain BEFORE resolving /tags/system (WrongChain, no resolution)', async () => {
+    // The /tags/system resolution feeds the marker TAG into the plan, so it must be guarded:
+    // a drifted public client could resolve a non-canonical `system` anchor. The guard runs
+    // BEFORE the resolution — assert it never runs and setOverview fails closed.
+    let resolveCalled = false
+    const ctx = {
+      resolveAnchorPath: async () => {
+        resolveCalled = true
+        return ZERO
+      },
+      assertChain: async () => {
+        throw Object.assign(new Error('wrong chain'), { code: 'WrongChain' })
+      },
+    } as unknown as OverviewWriteContext
+    const err = await setOverview('/docs', '# hi', ctx).catch((e) => e)
+    expect((err as { code?: string }).code).toBe('WrongChain')
+    expect(resolveCalled).toBe(false) // /tags/system resolution never ran
+  })
 })

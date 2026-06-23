@@ -356,6 +356,34 @@ describe('makeMirrorsNs', () => {
     })
   })
 
+  it('add guards the live chain BEFORE the transport-resolution read (WrongChain, no read, no submit)', async () => {
+    // The on-chain transport fallback (resolveMirrorTransport → /transports/<scheme>) FEEDS
+    // the plan, so a drifted public client could resolve it on the wrong chain. The guard must
+    // run BEFORE that read — a scheme NOT in the deployment map forces the on-chain fallback;
+    // assert the read never fires and nothing submits.
+    const { ctx, calls } = makeSubmitCtx()
+    let readCalled = false
+    const mirrors = makeMirrorsNs({
+      getDeployment: () => deployment,
+      publicClient: makeReadClient(() => {
+        readCalled = true
+        return uid(0)
+      }) as never,
+      submitContext: () => ({
+        ...ctx,
+        assertChain: async () => {
+          throw Object.assign(new Error('wrong chain'), { code: 'WrongChain' })
+        },
+      }),
+      attester: () => ATTESTER,
+      revoke: async () => uid(0xfee),
+    })
+    const err = await mirrors.add(DATA, { uri: 'https://example.com/x' }).catch((e) => e)
+    expect((err as { code?: string }).code).toBe('WrongChain')
+    expect(readCalled).toBe(false) // transport-resolution read never ran
+    expect(calls).toHaveLength(0) // nothing submitted
+  })
+
   it('remove revokes the right UID under the MIRROR schema', async () => {
     let revokeCall: { schema: Hex; uid: Hex } | undefined
     const mirrors = makeMirrorsNs({

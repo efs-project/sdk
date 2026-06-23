@@ -69,6 +69,12 @@ export async function setOverview(
   ctx: OverviewWriteContext,
   opts?: WriteOptions,
 ): Promise<WriteReceipt> {
+  // Re-assert the live chain AFTER the caller's entry preflight and BEFORE this
+  // `/tags/system` resolution — its result is embedded in the plan as the marker TAG
+  // definition, and `writeFileTier1` only re-asserts AFTER this value is already baked in.
+  // A drifted public provider could otherwise resolve a non-canonical `system` anchor (so
+  // SAFETY_EXCLUDES won't hide the README) or fail after earlier work. Fail closed first.
+  await ctx.assertChain?.()
   const overviewSystemTagDef = await ctx.resolveAnchorPath(SYSTEM_TAG_PATH)
   if (overviewSystemTagDef === ZERO_UID) {
     throw new EfsError(
