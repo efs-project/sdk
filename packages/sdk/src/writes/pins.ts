@@ -42,6 +42,10 @@ export interface PinsNs {
 /** Dependencies the `pins` namespace binds to (built once by the client). */
 export interface PinsNsDeps {
   readonly getDeployment: () => EfsDeployment
+  /** Resolve the deployment from the LIVE provider chain for the `active` READ (a mutable
+   * provider can switch chains after construction). Falls back to {@link PinsNsDeps.getDeployment}
+   * when omitted (unit tests). Write methods keep `getDeployment`. */
+  readonly liveDeployment?: () => EfsDeployment | Promise<EfsDeployment>
   readonly publicClient: ReadPublicClient
   readonly submitContext: () => EdgeSubmitContext
   /** The connected attester (default lens for the active read). */
@@ -65,7 +69,7 @@ export function makePinsNs(deps: PinsNsDeps): PinsNs {
     },
 
     active: async (anchor, attester) => {
-      const dep = deps.getDeployment()
+      const dep = await (deps.liveDeployment ?? deps.getDeployment)()
       const who = attester ?? deps.attester()
       if (who === undefined) return undefined
       const target = await read<Hex>(deps.publicClient, {

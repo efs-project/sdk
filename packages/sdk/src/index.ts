@@ -653,8 +653,13 @@ export function createEfsClient(config: EfsClientConfig): EfsClient {
   // The standalone graph-edge / value namespaces (completeness P1-1). Built once,
   // bound to the lazy deployment + the clients; the deps re-resolve on each call.
   // Revokes go through the `efs.eas.revoke` verb (the same typed funnel).
+  // The standalone namespaces' READ methods resolve the deployment from the LIVE provider
+  // chain (`liveDeployment`) — like `fs.*` reads — so a mutable provider that switched
+  // networks doesn't query old-chain addresses; their WRITE methods keep the sync
+  // `getDeployment` (the submit context's chain guard is what fails a drifted write closed).
   const tagsNs = makeTagsNs({
     getDeployment,
+    liveDeployment,
     publicClient: publicClient as unknown as ReadContext['publicClient'],
     submitContext: edgeSubmitContext,
     attester: () => account,
@@ -662,6 +667,7 @@ export function createEfsClient(config: EfsClientConfig): EfsClient {
   })
   const pinsNs = makePinsNs({
     getDeployment,
+    liveDeployment,
     publicClient: publicClient as unknown as ReadContext['publicClient'],
     submitContext: edgeSubmitContext,
     attester: () => account,
@@ -669,6 +675,7 @@ export function createEfsClient(config: EfsClientConfig): EfsClient {
   })
   const propsNs = makePropsNs({
     getDeployment,
+    liveDeployment,
     publicClient: publicClient as unknown as ReadContext['publicClient'],
     readContext,
     submitContext: edgeSubmitContext,
@@ -680,6 +687,7 @@ export function createEfsClient(config: EfsClientConfig): EfsClient {
   // public client (deployment map → /transports/<scheme> path fallback).
   const mirrorsNs = makeMirrorsNs({
     getDeployment,
+    liveDeployment,
     publicClient: publicClient as unknown as ReadContext['publicClient'],
     submitContext: edgeSubmitContext,
     attester: () => account,

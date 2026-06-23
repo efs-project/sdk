@@ -75,6 +75,10 @@ export type PropSetOptions = Record<never, never>
 /** Dependencies the `props` namespace binds to (built once by the client). */
 export interface PropsNsDeps {
   readonly getDeployment: () => EfsDeployment
+  /** Resolve the deployment from the LIVE provider chain for the `list` enumeration READ
+   * (a mutable provider can switch chains after construction). Falls back to
+   * {@link PropsNsDeps.getDeployment} when omitted (unit tests). `set` keeps `getDeployment`. */
+  readonly liveDeployment?: () => EfsDeployment | Promise<EfsDeployment>
   readonly publicClient: ReadPublicClient
   readonly readContext: () => ReadContext | Promise<ReadContext>
   readonly submitContext: () => EdgeSubmitContext
@@ -135,7 +139,7 @@ export function makePropsNs(deps: PropsNsDeps): PropsNs {
     },
 
     list: async (dataUID, opts) => {
-      const dep = deps.getDeployment()
+      const dep = await (deps.liveDeployment ?? deps.getDeployment)()
       const attester = lensAttester(opts?.lens)
 
       // Enumerate the key-ANCHORs under the DATA typed as PROPERTY (each property key is

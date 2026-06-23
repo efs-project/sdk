@@ -199,6 +199,23 @@ describe('namespaced client (Decision F)', () => {
     const err = await rawRead.rootAnchorUID().catch((e) => e)
     expect((err as { code?: string }).code).toBe('WrongChain')
   })
+
+  it('standalone-namespace reads resolve the deployment from the LIVE chain', async () => {
+    // graph.tags/pins, props, mirrors reads must follow the live provider chain like fs.*
+    // (not the construction-time bound chain). Bound to Sepolia (seeded) but live = 999999
+    // (no deployment) → DeploymentNotFound, proving the read used `liveDeployment`.
+    const drifted = createPublicClient({
+      chain: sepolia,
+      transport: custom(createMockProvider({ chainId: 999_999 })),
+    })
+    const efs = createEfsClient({ publicClient: drifted }) as unknown as {
+      mirrors: { list(data: string): Promise<unknown> }
+      props: { list(data: string): Promise<unknown> }
+    }
+    const data = `0x${'1'.repeat(64)}`
+    await expect(efs.mirrors.list(data)).rejects.toThrow(DeploymentNotFound)
+    await expect(efs.props.list(data)).rejects.toThrow(DeploymentNotFound)
+  })
 })
 
 describe('lenses', () => {

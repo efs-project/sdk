@@ -112,6 +112,11 @@ export interface TagsNs {
 /** Dependencies the `tags` namespace binds to (built once by the client). */
 export interface TagsNsDeps {
   readonly getDeployment: () => EfsDeployment
+  /** Resolve the deployment from the LIVE provider chain for READ methods (a mutable
+   * provider can switch chains after construction; reads go to the current chain). Falls
+   * back to {@link TagsNsDeps.getDeployment} when omitted (unit tests). Write methods keep
+   * `getDeployment` (aligned with the wallet/submit chain guard). */
+  readonly liveDeployment?: () => EfsDeployment | Promise<EfsDeployment>
   readonly publicClient: ReadPublicClient
   /** Build the submit context (wallet/public clients + EAS addr + attester). */
   readonly submitContext: () => EdgeSubmitContext
@@ -153,7 +158,7 @@ export function makeTagsNs(deps: TagsNsDeps): TagsNs {
     },
 
     active: async (attester, target, definition, opts) => {
-      const dep = deps.getDeployment()
+      const dep = await (deps.liveDeployment ?? deps.getDeployment)()
       const definitionUID = await resolveTagDefinition(
         deps.publicClient as unknown as ResolvePublicClient,
         dep.contracts.indexer,
@@ -171,7 +176,7 @@ export function makeTagsNs(deps: TagsNsDeps): TagsNs {
     },
 
     list: async (target, definition, opts) => {
-      const dep = deps.getDeployment()
+      const dep = await (deps.liveDeployment ?? deps.getDeployment)()
       const definitionUID = await resolveTagDefinition(
         deps.publicClient as unknown as ResolvePublicClient,
         dep.contracts.indexer,

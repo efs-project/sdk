@@ -181,6 +181,10 @@ export interface MirrorsNs {
 /** Dependencies the `mirrors` namespace binds to (built once by the client). */
 export interface MirrorsNsDeps {
   readonly getDeployment: () => EfsDeployment
+  /** Resolve the deployment from the LIVE provider chain for the `list` READ (a mutable
+   * provider can switch chains after construction). Falls back to {@link MirrorsNsDeps.getDeployment}
+   * when omitted (unit tests). Write methods keep `getDeployment`. */
+  readonly liveDeployment?: () => EfsDeployment | Promise<EfsDeployment>
   readonly publicClient: ReadPublicClient
   /** Build the submit context (wallet/public clients + EAS addr + attester). */
   readonly submitContext: () => EdgeSubmitContext
@@ -232,7 +236,7 @@ export function makeMirrorsNs(deps: MirrorsNsDeps): MirrorsNs {
     },
 
     list: async (dataUID, opts) => {
-      const dep = deps.getDeployment()
+      const dep = await (deps.liveDeployment ?? deps.getDeployment)()
       const attesters = lensList(opts?.lens)
       // One lens-scoped scan per attester (independent → multicall coalescing). Each
       // scan pages through `getDataMirrors` until a short window (end of list) or the
