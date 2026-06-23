@@ -111,7 +111,8 @@ async function schemaRecordFor(
 /**
  * Hydrate many attestation UIDs in one coalesced batch (positional — result `[i]`
  * maps to `uids[i]`). A revoked/absent/failing UID degrades to `undefined` for that
- * slot (`allowFailure:true` posture), never throwing the whole batch.
+ * slot (`allowFailure:true` posture), never throwing the whole batch — EXCEPT a
+ * systemic `WrongChain` rejection, which escapes (see below).
  */
 export async function attestationsForUIDs(
   ctx: ReadContext,
@@ -119,6 +120,16 @@ export async function attestationsForUIDs(
   opts?: { withSchema?: boolean },
 ): Promise<(Attestation | undefined)[]> {
   const settled = await Promise.allSettled(uids.map((uid) => attestationFor(ctx, uid, opts)))
+  // A `WrongChain` rejection is SYSTEMIC, not per-UID degradation: the chain-guarded read
+  // client fails closed when the provider drifted after `readContext()` resolved. Swallowing
+  // it to `undefined` would hand the caller empty/missing attestations that look like genuine
+  // absence — the opposite of fail-closed. Re-throw it; only true per-UID
+  // absence/revocation/transient-read failures degrade to `undefined`.
+  const wrongChain = settled.find(
+    (s): s is PromiseRejectedResult =>
+      s.status === 'rejected' && (s.reason as { code?: string } | undefined)?.code === 'WrongChain',
+  )
+  if (wrongChain) throw wrongChain.reason
   return settled.map((s) => (s.status === 'fulfilled' ? s.value : undefined))
 }
 

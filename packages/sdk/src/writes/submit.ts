@@ -509,23 +509,18 @@ export async function submitLayeredTier1(
     // multiAttest. Never checked mid-flight — a tx already broadcast can't be unsent.
     ctx.signal?.throwIfAborted()
 
-    // Wrong-chain boundary: re-assert the live wallet/public chain BEFORE each layer's
-    // multiAttest, not just at the caller's preflight. A multi-layer write prompts once
-    // per layer, so a wallet that switched networks after an earlier layer mined must not
-    // broadcast this dependent layer to the new chain while receipts await on the
-    // deployment chain (a partial write). Fails closed (WrongChain) before the tx.
-    await ctx.assertChain?.()
-
     // Resolve symbols against prior layers' UIDs, group by schema, capture the
-    // flat ref order EAS will emit in.
+    // flat ref order EAS will emit in. (Pure — no tx; the chain guard runs just before the
+    // broadcast below so a drift is a no-tx failure that still carries `flatRefs`.)
     const { requests, flatRefs } = buildLayerRequests(layerAtts, resolved)
     const call = buildMultiAttest(ctx.easAddress, requests)
 
     // Send the layer's single multiAttest. The three failure modes are kept
     // DISTINCT so a caller can tell safe-retry from possible-duplicate:
     //
-    //   (a) writeContract throws → NO tx was broadcast: nothing landed in this layer,
-    //       a retry is safe → WriteNotSentError (no txHash).
+    //   (a) writeContract throws (or the pre-send chain guard fails AFTER an earlier layer
+    //       landed) → NO tx was broadcast: nothing landed in this layer, a retry is safe →
+    //       WriteNotSentError (no txHash), carrying the landed-UID map for recovery.
     //   (b) the receipt wait throws after a txHash exists → the tx may still mine
     //       later: outcome UNKNOWN, naive retry risks a duplicate →
     //       WriteRevertedError(mined:false) carrying the in-flight txHash.
@@ -533,6 +528,21 @@ export async function submitLayeredTier1(
     //       WriteRevertedError(mined:true) carrying the txHash.
     //
     // All three preserve the prior-layer landed refs.
+    // Wrong-chain boundary (pre-send): re-assert the live wallet/public chain BEFORE
+    // broadcasting — a multi-layer write prompts once per layer, so a switch after an earlier
+    // layer mined must not broadcast this dependent layer to the new chain. When earlier layers
+    // already landed (`resolved.size > 0`), a drift here is a PARTIAL write: fold it into the
+    // no-tx WriteNotSentError so the caller keeps the landed-UID map + PartialBatchFailure
+    // context (the WrongChain rides as `cause`). When NOTHING has landed yet (first/only layer),
+    // let WrongChain escape raw — there's no partial write to describe, and a bare WrongChain is
+    // the honest signal (matches the standalone single-layer write contract).
+    try {
+      await ctx.assertChain?.()
+    } catch (cause) {
+      if (resolved.size === 0) throw cause
+      throw new WriteNotSentError(layer, flatRefs, new Map(resolved), cause)
+    }
+
     let txHash: Hex
     try {
       txHash = await ctx.walletClient.writeContract({

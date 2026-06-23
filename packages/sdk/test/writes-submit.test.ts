@@ -440,7 +440,7 @@ describe('submitWriteTier1 — single-layer plan is one tx (one signature)', () 
 })
 
 describe('submitWriteTier1 — per-layer wrong-chain guard', () => {
-  it('re-runs assertChain before EACH layer send; a mid-write switch stops the dependent layer', async () => {
+  it('re-runs assertChain before EACH layer send; a mid-write switch folds into the no-tx partial error', async () => {
     const plan = buildFileWriteGraph(bytesInput) // 3 dependency layers
     const { ctx, sent } = makeMockChain()
     let checks = 0
@@ -452,7 +452,15 @@ describe('submitWriteTier1 — per-layer wrong-chain guard', () => {
       if (checks >= 3) throw Object.assign(new Error('wrong chain'), { code: 'WrongChain' })
     }
     const err = await submitWriteTier1(plan, { ...ctx, assertChain }).catch((e) => e)
-    expect((err as { code?: string }).code).toBe('WrongChain') // raw — thrown before the send
+    // The pre-send wrong-chain drift is a NO-TX failure for layer 2: it folds into
+    // WriteNotSentError (PartialBatchFailure) carrying the landed-UID map + the WrongChain
+    // CAUSE — not a bare WrongChain that strips the partial-write recovery context.
+    expect(err).toBeInstanceOf(WriteNotSentError)
+    const we = err as WriteNotSentError
+    expect(we.layer).toBe(2)
+    expect(we.code).toBe('PartialBatchFailure')
+    expect(we.landed.get('DATA')).toBe(uid(0xd000)) // layer 1 already landed, preserved for recovery
+    expect((we.cause as { code?: string })?.code).toBe('WrongChain')
     expect(checks).toBe(3)
     expect(sent).toHaveLength(1) // only layer 1 broadcast; the dependent layer 2 did NOT
   })

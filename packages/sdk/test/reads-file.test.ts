@@ -32,6 +32,7 @@ import { hashContent } from '../src/content/hash.js'
 import {
   ContentHashMismatch,
   CursorInvalid,
+  EfsError,
   FileNotFoundError,
   LensRequired,
   MalformedClaim,
@@ -885,6 +886,24 @@ describe('attestationsFor', () => {
     // An absent UID (no table entry) hydrates to undefined, not a throw.
     expect(out[0]?.attestations.size).toBeUndefined()
     expect(out[1]?.attestations).toEqual({})
+  })
+
+  it('escapes a systemic WrongChain instead of swallowing it to empty attestations', async () => {
+    // A drift after readContext() resolved makes the guarded client reject every getAttestation
+    // with WrongChain. That is systemic, not per-UID absence — it must fail closed, not return
+    // an empty/missing map that looks like genuine absence.
+    const ctx = {
+      publicClient: {
+        readContract: async () => {
+          throw new EfsError('provider drifted', { code: 'WrongChain' })
+        },
+      },
+      deployment: deployment(), // `deployment` is a factory in this file
+    } as unknown as ReadContext
+    const err = await attestationsFor(ctx, [{ sourceUIDs: { contentType: uid(0x7001) } }]).catch(
+      (e) => e,
+    )
+    expect((err as { code?: string }).code).toBe('WrongChain')
   })
 
   it('hydrates items carrying only TOP-LEVEL UIDs (DirEntry dataUID/anchorUID, DataRef ref.uid)', async () => {
