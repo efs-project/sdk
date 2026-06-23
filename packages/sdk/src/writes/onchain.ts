@@ -156,6 +156,13 @@ export interface OnchainStoreContext {
   /** Optional cancellation signal, checked before each of the two irreversible
    *  deploys (chunk, then manager) — never mid-flight (a sent tx can't be unsent). */
   readonly signal?: AbortSignal
+  /** Optional live-chain assertion, re-run BEFORE each of the two deploys (chunk, then
+   *  manager). The store is two separate wallet confirmations; an injected wallet can
+   *  switch networks between them, so the manager deploy must not broadcast to the new
+   *  chain while the chunk's receipt was awaited on the deployment chain (a wasted chunk +
+   *  orphaned storage step). Wired to the same wallet-vs-deployment guard as the EAS layers
+   *  (fails closed with `WrongChain`). Omitted ⇒ no check (unit tests). */
+  readonly assertChain?: () => Promise<void>
 }
 
 /**
@@ -244,6 +251,9 @@ export async function storeOnchain(
 
   // 1. Deploy the SSTORE2 chunk (raw init-code deploy; throws on multi-chunk).
   ctx.signal?.throwIfAborted()
+  // Re-assert the live chain before the chunk deploy — the wallet may have switched
+  // networks since the caller's fs.write preflight (parent reads happen in between).
+  await ctx.assertChain?.()
   const initCode = buildSstore2InitCode(bytes)
   const chunkTx = await classified(() =>
     ctx.walletClient.sendTransaction({ data: initCode, ...fwd }),
@@ -254,6 +264,10 @@ export async function storeOnchain(
   //    Re-check the signal BETWEEN the two irreversible deploys — an abort after the
   //    chunk landed must not still send the manager tx.
   ctx.signal?.throwIfAborted()
+  // Re-assert the live chain BETWEEN the two deploys — the wallet prompt for the chunk
+  // is the user's chance to switch networks; the manager must not land on the new chain
+  // while the chunk's receipt was awaited on the deployment chain (orphaned storage).
+  await ctx.assertChain?.()
   const managerTx = await classified(() =>
     ctx.walletClient.deployContract({
       abi: EFS_BYTES_STORE_ABI,

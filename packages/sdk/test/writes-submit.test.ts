@@ -439,6 +439,39 @@ describe('submitWriteTier1 — single-layer plan is one tx (one signature)', () 
   })
 })
 
+describe('submitWriteTier1 — per-layer wrong-chain guard', () => {
+  it('re-runs assertChain before EACH layer; a mid-write switch stops the dependent layer', async () => {
+    const plan = buildFileWriteGraph(bytesInput) // 3 dependency layers
+    const { ctx, sent } = makeMockChain()
+    let checks = 0
+    // The wallet switched networks after layer 1 mined: the assertChain run before layer 2
+    // fails closed, so the dependent layer never broadcasts to the new chain while layer 1's
+    // receipt was awaited on the deployment chain (the partial-write the guard prevents).
+    const assertChain = async () => {
+      checks += 1
+      if (checks >= 2) throw Object.assign(new Error('wrong chain'), { code: 'WrongChain' })
+    }
+    const err = await submitWriteTier1(plan, { ...ctx, assertChain }).catch((e) => e)
+    expect((err as { code?: string }).code).toBe('WrongChain')
+    expect(checks).toBe(2) // before layer 1 (passed) and before layer 2 (threw)
+    expect(sent).toHaveLength(1) // only layer 1 broadcast; the dependent layer 2 did NOT
+  })
+
+  it('runs assertChain exactly once per layer on the happy path', async () => {
+    const plan = buildFileWriteGraph(bytesInput) // 3 layers
+    const { ctx, sent } = makeMockChain()
+    let checks = 0
+    await submitWriteTier1(plan, {
+      ...ctx,
+      assertChain: async () => {
+        checks += 1
+      },
+    })
+    expect(sent).toHaveLength(3)
+    expect(checks).toBe(3) // one re-check per layer, none skipped
+  })
+})
+
 describe('submitWriteTier1 — partial-write boundary: three distinct failure modes', () => {
   it('writeContract throw → WriteNotSentError (no tx sent, safe retry), prior layers preserved', async () => {
     const plan = buildFileWriteGraph(bytesInput)

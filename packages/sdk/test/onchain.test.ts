@@ -213,4 +213,22 @@ describe('storeOnchain', () => {
     expect(calls.filter((c) => c.kind === 'chunk')).toHaveLength(1) // chunk did deploy
     expect(calls.filter((c) => c.kind === 'manager')).toHaveLength(0) // manager never sent
   })
+
+  it('re-asserts the live chain between deploys — a switch after the chunk stops the manager', async () => {
+    const { ctx, calls } = makeCtx()
+    let checks = 0
+    // The wallet switched networks after the chunk landed: the SECOND assertChain (run
+    // before the manager deploy) fails closed, so the manager never broadcasts to the
+    // new chain while the chunk's receipt was awaited on the deployment chain.
+    const assertChain = async () => {
+      checks += 1
+      if (checks >= 2) throw new EfsError('wrong chain', { code: 'WrongChain' })
+    }
+    const guarded = { ...ctx, assertChain } as unknown as OnchainStoreContext
+    const err = await storeOnchain(new Uint8Array([1, 2, 3]), guarded).catch((e) => e)
+    expect((err as { code?: string }).code).toBe('WrongChain')
+    expect(checks).toBe(2) // checked before the chunk (passed) and before the manager (threw)
+    expect(calls.filter((c) => c.kind === 'chunk')).toHaveLength(1) // chunk did deploy
+    expect(calls.filter((c) => c.kind === 'manager')).toHaveLength(0) // manager never sent
+  })
 })

@@ -211,6 +211,9 @@ export async function resolveMirrors(
     contentType: opts?.contentType ?? '',
     // So an abort between the chunk and chunk-manager deploys stops the manager tx.
     ...(opts?.signal !== undefined ? { signal: opts.signal } : {}),
+    // Re-assert the live chain before each deploy (the wallet may switch networks between
+    // the chunk and manager prompts) — same guard the EAS layers use.
+    ...(ctx.assertChain !== undefined ? { assertChain: ctx.assertChain } : {}),
   })
   // The on-chain store sent `txHashes.length` wallet txs (chunk + manager) before any
   // EAS layer — fold them into the receipt's signatureCount via the orchestrator.
@@ -243,6 +246,15 @@ export interface FileWriteContext {
    * `WriteOptions`; only the `setOverview` orchestrator sets it.
    */
   readonly overviewSystemTagDef?: Hex
+  /**
+   * Optional live-chain assertion, re-run before EACH wallet transaction in the write
+   * (the two on-chain storage deploys AND every EAS layer's multiAttest) — not just at
+   * the caller's preflight. A file write fires many wallet confirmations; an injected
+   * wallet that switches networks mid-write would otherwise broadcast a later step to the
+   * new chain while receipts await on the deployment chain, leaving a partial write. The
+   * client wires this to the wallet-vs-deployment guard (fails closed with `WrongChain`).
+   */
+  readonly assertChain?: () => Promise<void>
 }
 
 /**
@@ -455,6 +467,9 @@ export async function writeFileTier1(
     // Forwarded so the layered submitter bails between layers (before each
     // irreversible multiAttest) if the caller aborts mid-write.
     ...(opts?.signal !== undefined ? { signal: opts.signal } : {}),
+    // Re-assert the live chain before each layer's multiAttest (the submitter prompts
+    // once per layer; a wallet that switches chains mid-write fails the next layer closed).
+    ...(ctx.assertChain !== undefined ? { assertChain: ctx.assertChain } : {}),
     ...(onProgress !== undefined
       ? {
           onLayer: (event: LayerResult) =>

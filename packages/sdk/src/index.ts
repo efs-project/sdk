@@ -797,14 +797,20 @@ export function createEfsClient(config: EfsClientConfig): EfsClient {
         // satisfy those calls at runtime, but their broadly-generic method
         // signatures don't structurally unify with the narrow interfaces at the
         // type level — so cast through `FileWriteContext` at this boundary.
+        const dep = getDeployment()
         const ctx = {
           publicClient,
           walletClient: wallet,
-          deployment: getDeployment(),
+          deployment: dep,
           // viem binds `account`/`chain` on a wallet client built from the
           // provider/account config; forward them so `writeContract` has them.
           account: wallet.account,
           chain: wallet.chain,
+          // Re-assert the live chain before EACH wallet tx in the write (the storage
+          // deploys + every EAS layer), not just this entry preflight — a wallet that
+          // switches networks between prompts fails the next step closed (WrongChain)
+          // rather than orphaning a partial write on the deployment chain.
+          assertChain: () => assertWriteChain(wallet, publicClient, dep.chainId),
           // Client-level on-chain auto-store cap (default applied in resolveMirrors).
           ...(config.write?.onchainAutoLimit !== undefined
             ? { onchainAutoLimit: config.write.onchainAutoLimit }
@@ -835,6 +841,9 @@ export function createEfsClient(config: EfsClientConfig): EfsClient {
           deployment: dep,
           account: wallet.account,
           chain: wallet.chain,
+          // Re-assert the live chain before each wallet tx (storage deploys + EAS layers),
+          // same as `fs.write` — a mid-write network switch fails the next step closed.
+          assertChain: () => assertWriteChain(wallet, publicClient, dep.chainId),
           ...(config.write?.onchainAutoLimit !== undefined
             ? { onchainAutoLimit: config.write.onchainAutoLimit }
             : {}),

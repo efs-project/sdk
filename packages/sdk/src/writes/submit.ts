@@ -152,6 +152,16 @@ export interface SubmitContext {
    * Aborting between layers leaves a partial write (same boundary as a revert).
    */
   readonly signal?: AbortSignal
+  /**
+   * Optional live-chain assertion, re-run BEFORE each layer's `multiAttest` (not just
+   * once at preflight). A multi-layer write fires one wallet confirmation per layer, so
+   * an injected wallet can switch networks AFTER an earlier layer mined; without a
+   * per-layer recheck the dependent layer would broadcast to the new chain while receipts
+   * are still awaited on the deployment chain, leaving a partial write. The client wires
+   * this to the wallet-vs-deployment chain guard (fails closed with `WrongChain`). Omitted
+   * ⇒ no check (unit tests with a pre-validated mock).
+   */
+  readonly assertChain?: () => Promise<void>
 }
 
 /** What one layer's `multiAttest` produced. */
@@ -498,6 +508,13 @@ export async function submitLayeredTier1(
     // Cancellation boundary: bail BEFORE sending this layer's irreversible
     // multiAttest. Never checked mid-flight — a tx already broadcast can't be unsent.
     ctx.signal?.throwIfAborted()
+
+    // Wrong-chain boundary: re-assert the live wallet/public chain BEFORE each layer's
+    // multiAttest, not just at the caller's preflight. A multi-layer write prompts once
+    // per layer, so a wallet that switched networks after an earlier layer mined must not
+    // broadcast this dependent layer to the new chain while receipts await on the
+    // deployment chain (a partial write). Fails closed (WrongChain) before the tx.
+    await ctx.assertChain?.()
 
     // Resolve symbols against prior layers' UIDs, group by schema, capture the
     // flat ref order EAS will emit in.

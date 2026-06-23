@@ -29,11 +29,9 @@ export interface EdgeSubmitContext extends SubmitContext {
   readonly chainId: number
   /** The attester the write authors under (the connected wallet). */
   readonly attester: Address
-  /** Optional pre-flight assertion run BEFORE any tx (the client wires this to the
-   * wallet-vs-deployment chain guard, same as `fs.write`). Fails closed on a wrong-chain
-   * wallet so a standalone write can't send EAS txs to the deployment addresses on a
-   * different chain. Omitted ⇒ no check (e.g. unit tests with a pre-validated mock). */
-  readonly assertChain?: () => Promise<void>
+  // `assertChain` is inherited from {@link SubmitContext} — `submitLayeredTier1` re-runs
+  // it before EACH layer's multiAttest (not just once), so a wallet that switches chains
+  // between a 2-layer PROPERTY write's two prompts fails the dependent layer closed.
 }
 
 /**
@@ -48,8 +46,9 @@ export async function submitEdgePlan(
   plan: FileWriteGraph,
   ctx: EdgeSubmitContext,
 ): Promise<WriteReceipt> {
-  // Fail closed on a wrong-chain wallet BEFORE any tx (parity with `fs.write`).
-  await ctx.assertChain?.()
+  // The wrong-chain guard (`ctx.assertChain`) is enforced by `submitLayeredTier1` before
+  // EACH layer's multiAttest — including the first — so it fails closed even if the wallet
+  // switches chains between a multi-layer write's prompts. No separate preflight needed.
   const result: LayeredWriteResult = await submitLayeredTier1(plan, ctx)
   return toEdgeReceipt(result)
 }
@@ -67,8 +66,8 @@ export async function submitEdgePlanWithUID(
   ctx: EdgeSubmitContext,
   mintedRef: string,
 ): Promise<{ receipt: WriteReceipt; uid: Hex }> {
-  // Fail closed on a wrong-chain wallet BEFORE any tx (parity with `fs.write`).
-  await ctx.assertChain?.()
+  // The wrong-chain guard is enforced per-layer inside `submitLayeredTier1` (see
+  // {@link submitEdgePlan}) — no separate preflight needed.
   const result: LayeredWriteResult = await submitLayeredTier1(plan, ctx)
   const uid = result.uids.get(mintedRef)
   if (uid === undefined) {
