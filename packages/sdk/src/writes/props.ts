@@ -80,6 +80,11 @@ export interface PropsNsDeps {
    * {@link PropsNsDeps.getDeployment} when omitted (unit tests). `set` keeps `getDeployment`. */
   readonly liveDeployment?: () => EfsDeployment | Promise<EfsDeployment>
   readonly publicClient: ReadPublicClient
+  /** Wrap {@link PropsNsDeps.publicClient} with a guard pinned to the LIVE-resolved deployment
+   * chain, so `list`'s anchor-enumeration reads fail closed (`WrongChain`) if the provider
+   * drifts between `liveDeployment()` and the reads (TOCTOU). Falls back to the unguarded
+   * client when omitted. (The per-key value reads route through `readContext`, already guarded.) */
+  readonly guardReadClient?: (chainId: number) => ReadPublicClient
   readonly readContext: () => ReadContext | Promise<ReadContext>
   readonly submitContext: () => EdgeSubmitContext
   /** The connected attester (default lens for reads). */
@@ -147,6 +152,9 @@ export function makePropsNs(deps: PropsNsDeps): PropsNs {
 
     list: async (dataUID, opts) => {
       const dep = await (deps.liveDeployment ?? deps.getDeployment)()
+      // Guard against a chain switch between resolving `dep` and the enumeration reads below
+      // (TOCTOU). The per-key value reads use `readContext` (already guarded client-side).
+      const pc = deps.guardReadClient?.(dep.chainId) ?? deps.publicClient
       const attester = lensAttester(opts?.lens)
 
       // Enumerate the key-ANCHORs under the DATA typed as PROPERTY (each property key is
@@ -165,7 +173,7 @@ export function makePropsNs(deps: PropsNsDeps): PropsNs {
       const anchorUIDs: Hex[] = []
       let start = 0n
       for (;;) {
-        const page = await read<readonly Hex[]>(deps.publicClient, {
+        const page = await read<readonly Hex[]>(pc, {
           address: dep.contracts.indexer,
           abi: indexerAbi,
           functionName: 'getAnchorsBySchema',

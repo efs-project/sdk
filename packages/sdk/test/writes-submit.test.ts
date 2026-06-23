@@ -492,6 +492,24 @@ describe('submitWriteTier1 — per-layer wrong-chain guard', () => {
   })
 })
 
+describe('submitWriteTier1 — progress-hook isolation', () => {
+  it('a throwing onLayer callback does NOT abort the write (all layers still sent)', async () => {
+    const plan = buildFileWriteGraph(bytesInput) // 3 layers
+    const { ctx, sent } = makeMockChain()
+    let fired = 0
+    // A reporting-callback bug throwing AFTER a layer mined must not interrupt the remaining
+    // irreversible layers — that would manufacture a partial write from UI code.
+    const onLayer = () => {
+      fired += 1
+      throw new Error('progress callback blew up')
+    }
+    // Resolves (does not reject) and sends every layer despite the throwing hook.
+    await expect(submitWriteTier1(plan, { ...ctx, onLayer })).resolves.toBeDefined()
+    expect(sent).toHaveLength(3) // all layers broadcast
+    expect(fired).toBe(3) // the hook fired (and threw) on each layer, swallowed each time
+  })
+})
+
 describe('submitWriteTier1 — partial-write boundary: three distinct failure modes', () => {
   it('writeContract throw → WriteNotSentError (no tx sent, safe retry), prior layers preserved', async () => {
     const plan = buildFileWriteGraph(bytesInput)

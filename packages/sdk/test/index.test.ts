@@ -171,6 +171,32 @@ describe('namespaced client (Decision F)', () => {
     expect((err as { code?: string }).code).toBe('WrongChain') // not a false miss on Sepolia addresses
   })
 
+  it('standalone-namespace reads (graph.tags/pins, props, mirrors) guard the same TOCTOU', async () => {
+    // These namespaces resolve liveDeployment() then read; they now route the read through a
+    // guard pinned to the resolved chain, like readContext. mirrors.list: Sepolia at resolve
+    // (call 1) → 999999 at the read (call 2) → WrongChain, not a false-empty on Sepolia addresses.
+    let chainIdCalls = 0
+    const drifting = createPublicClient({
+      chain: sepolia,
+      transport: custom(
+        createMockProvider({
+          handlers: {
+            eth_chainId: () => {
+              chainIdCalls += 1
+              return chainIdCalls === 1 ? '0xaa36a7' : '0xf423f'
+            },
+          },
+        }),
+      ),
+    })
+    const efs = createEfsClient({ publicClient: drifting }) as unknown as {
+      mirrors: { list(data: string, opts?: { lens?: Address }): Promise<unknown> }
+    }
+    const data = `0x${'1'.repeat(64)}` as const
+    const err = await efs.mirrors.list(data, { lens: addr(9) }).catch((e) => e)
+    expect((err as { code?: string }).code).toBe('WrongChain')
+  })
+
   it('efs.raw.*.write.* is guarded against a wrong-chain wallet (WrongChain)', async () => {
     // The deployment resolves to Sepolia (publicClient bound there), but the wallet's live
     // chain is 999999 — a raw `.write.*` must fail closed like the higher-level verbs,

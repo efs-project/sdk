@@ -268,6 +268,20 @@ describe('checkSsrf - host guard', () => {
   })
 })
 
+describe('fetchVerified - maxBytes validation (public surface)', () => {
+  // The downstream cap checks are `>` comparisons: NaN never rejects an oversized payload and
+  // Infinity disables the hard ceiling. A direct caller passing a non-finite/non-positive cap
+  // must be rejected up front (the higher-level fetchRef validates too, but the engine is also
+  // public and must be safe on its own).
+  for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, 0, -1]) {
+    it(`rejects a non-finite/non-positive maxBytes (${bad})`, async () => {
+      await expect(
+        fetchVerified(['data:text/plain;base64,aGVsbG8='], undefined, { maxBytes: bad }),
+      ).rejects.toThrow(/maxBytes/)
+    })
+  }
+})
+
 describe('fetchVerified - happy paths per transport', () => {
   it('https happy path returns matches-author + declared content-type (informational)', async () => {
     const bytes = enc('the bytes')

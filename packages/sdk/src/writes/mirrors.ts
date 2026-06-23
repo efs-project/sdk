@@ -186,6 +186,10 @@ export interface MirrorsNsDeps {
    * when omitted (unit tests). Write methods keep `getDeployment`. */
   readonly liveDeployment?: () => EfsDeployment | Promise<EfsDeployment>
   readonly publicClient: ReadPublicClient
+  /** Wrap {@link MirrorsNsDeps.publicClient} with a guard pinned to the LIVE-resolved
+   * deployment chain, so `list` fails closed (`WrongChain`) if the provider drifts between
+   * `liveDeployment()` and the read (TOCTOU). Falls back to the unguarded client when omitted. */
+  readonly guardReadClient?: (chainId: number) => ReadPublicClient
   /** Build the submit context (wallet/public clients + EAS addr + attester). */
   readonly submitContext: () => EdgeSubmitContext
   /** The connected attester (default lens for reads). */
@@ -244,6 +248,8 @@ export function makeMirrorsNs(deps: MirrorsNsDeps): MirrorsNs {
 
     list: async (dataUID, opts) => {
       const dep = await (deps.liveDeployment ?? deps.getDeployment)()
+      // Guard against a chain switch between resolving `dep` and the reads below (TOCTOU).
+      const pc = deps.guardReadClient?.(dep.chainId) ?? deps.publicClient
       const attesters = lensList(opts?.lens)
       // One lens-scoped scan per attester (independent → multicall coalescing). Each
       // scan pages through `getDataMirrors` until a short window (end of list) or the
@@ -252,7 +258,7 @@ export function makeMirrorsNs(deps: MirrorsNsDeps): MirrorsNs {
         attesters.map(async (attester) => {
           const out: MirrorRecord[] = []
           for (let start = 0n; start < MAX_MIRRORS; start += MIRROR_PAGE) {
-            const rows = await read<readonly MirrorItemRaw[]>(deps.publicClient, {
+            const rows = await read<readonly MirrorItemRaw[]>(pc, {
               address: dep.contracts.fileView,
               abi: fileViewAbi,
               functionName: 'getDataMirrors',

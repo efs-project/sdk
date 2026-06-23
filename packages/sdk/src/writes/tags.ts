@@ -118,6 +118,10 @@ export interface TagsNsDeps {
    * `getDeployment` (aligned with the wallet/submit chain guard). */
   readonly liveDeployment?: () => EfsDeployment | Promise<EfsDeployment>
   readonly publicClient: ReadPublicClient
+  /** Wrap {@link TagsNsDeps.publicClient} with a guard pinned to the LIVE-resolved deployment
+   * chain, so `active`/`list` fail closed (`WrongChain`) if the provider drifts between
+   * `liveDeployment()` and the reads (TOCTOU). Falls back to the unguarded client when omitted. */
+  readonly guardReadClient?: (chainId: number) => ReadPublicClient
   /** Build the submit context (wallet/public clients + EAS addr + attester). */
   readonly submitContext: () => EdgeSubmitContext
   /** The connected attester (default lens for reads). */
@@ -164,13 +168,15 @@ export function makeTagsNs(deps: TagsNsDeps): TagsNs {
 
     active: async (attester, target, definition, opts) => {
       const dep = await (deps.liveDeployment ?? deps.getDeployment)()
+      // Guard against a chain switch between resolving `dep` and the reads below (TOCTOU).
+      const pc = deps.guardReadClient?.(dep.chainId) ?? deps.publicClient
       const definitionUID = await resolveTagDefinition(
-        deps.publicClient as unknown as ResolvePublicClient,
+        pc as unknown as ResolvePublicClient,
         dep.contracts.indexer,
         definition,
       )
       const targetSchema = opts?.targetSchema ?? dep.schemas.anchor
-      const [exists, weight] = await read<readonly [boolean, bigint]>(deps.publicClient, {
+      const [exists, weight] = await read<readonly [boolean, bigint]>(pc, {
         address: dep.contracts.edgeResolver,
         abi: edgeResolverAbi,
         functionName: 'getActiveTagWeight',
@@ -182,8 +188,10 @@ export function makeTagsNs(deps: TagsNsDeps): TagsNs {
 
     list: async (target, definition, opts) => {
       const dep = await (deps.liveDeployment ?? deps.getDeployment)()
+      // Guard against a chain switch between resolving `dep` and the reads below (TOCTOU).
+      const pc = deps.guardReadClient?.(dep.chainId) ?? deps.publicClient
       const definitionUID = await resolveTagDefinition(
-        deps.publicClient as unknown as ResolvePublicClient,
+        pc as unknown as ResolvePublicClient,
         dep.contracts.indexer,
         definition,
       )
@@ -194,7 +202,7 @@ export function makeTagsNs(deps: TagsNsDeps): TagsNs {
       // with an active TAG on this (target, definition) slot is returned.
       const results = await Promise.all(
         attesters.map(async (attester) => {
-          const [exists, weight] = await read<readonly [boolean, bigint]>(deps.publicClient, {
+          const [exists, weight] = await read<readonly [boolean, bigint]>(pc, {
             address: dep.contracts.edgeResolver,
             abi: edgeResolverAbi,
             functionName: 'getActiveTagWeight',

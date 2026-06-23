@@ -47,6 +47,11 @@ export interface PinsNsDeps {
    * when omitted (unit tests). Write methods keep `getDeployment`. */
   readonly liveDeployment?: () => EfsDeployment | Promise<EfsDeployment>
   readonly publicClient: ReadPublicClient
+  /** Wrap {@link PinsNsDeps.publicClient} with a guard pinned to the LIVE-resolved deployment
+   * chain, so a read fails closed (`WrongChain`) if the provider drifts between
+   * `liveDeployment()` and the `readContract` below (TOCTOU). Falls back to the unguarded
+   * client when omitted (unit tests). */
+  readonly guardReadClient?: (chainId: number) => ReadPublicClient
   readonly submitContext: () => EdgeSubmitContext
   /** The connected attester (default lens for the active read). */
   readonly attester: () => Address | undefined
@@ -72,7 +77,9 @@ export function makePinsNs(deps: PinsNsDeps): PinsNs {
       const dep = await (deps.liveDeployment ?? deps.getDeployment)()
       const who = attester ?? deps.attester()
       if (who === undefined) return undefined
-      const target = await read<Hex>(deps.publicClient, {
+      // Guard against a chain switch between resolving `dep` and this read (TOCTOU).
+      const pc = deps.guardReadClient?.(dep.chainId) ?? deps.publicClient
+      const target = await read<Hex>(pc, {
         address: dep.contracts.edgeResolver,
         abi: edgeResolverAbi,
         functionName: 'getActivePinTarget',

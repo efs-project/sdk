@@ -592,7 +592,16 @@ export async function submitLayeredTier1(
     layerTxHashes.push(txHash)
     const result: LayerResult = { layer, txHash, minted }
     layers.push(result)
-    ctx.onLayer?.(result)
+    // The progress hook is best-effort UI/reporting. A throw here — AFTER this layer mined —
+    // must NOT propagate and abort the remaining (irreversible, dependent) layers: that would
+    // manufacture a partial write from reporting code, with none of the structured
+    // partial-write error a real tx failure carries. Cancellation has its own AbortSignal
+    // (checked before each send); a callback bug is swallowed so it can't corrupt the write.
+    try {
+      ctx.onLayer?.(result)
+    } catch {
+      // best-effort progress only — a reporting-callback exception never interrupts the write
+    }
   }
 
   return { uids: resolved, layerTxHashes, layers }

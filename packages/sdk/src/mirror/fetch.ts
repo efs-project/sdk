@@ -321,6 +321,16 @@ export async function fetchVerified(
   expectedHash: ContentHash | string | undefined,
   opts: FetchVerifiedOptions = {},
 ): Promise<FetchVerifiedResult> {
+  // `fetchVerified` is public SDK surface, so a direct caller can pass a non-finite or
+  // non-positive `maxBytes`. Every downstream cap check is a `>` comparison, so `NaN` never
+  // rejects an oversized `data:`/HTTP/web3 payload and `Infinity` disables the hard ceiling.
+  // Reject up front. (The higher-level `fetchRef` validates too — this keeps the engine safe
+  // on its own.)
+  if (opts.maxBytes !== undefined && (!Number.isFinite(opts.maxBytes) || opts.maxBytes <= 0)) {
+    throw new RangeError(
+      `fetchVerified: \`maxBytes\` must be a finite positive number (got ${opts.maxBytes}). Omit it for the ${DEFAULT_MAX_BYTES}-byte default ceiling.`,
+    )
+  }
   const attempts: AttemptError[] = []
 
   for (const mirror of mirrors) {

@@ -764,10 +764,16 @@ export function createEfsClient(config: EfsClientConfig): EfsClient {
   // chain (`liveDeployment`) — like `fs.*` reads — so a mutable provider that switched
   // networks doesn't query old-chain addresses; their WRITE methods keep the sync
   // `getDeployment` (the submit context's chain guard is what fails a drifted write closed).
+  // Guard a standalone namespace's READ against a chain switch between its `liveDeployment()`
+  // resolution and the subsequent `readContract` (TOCTOU) — the same fix `readContext` uses,
+  // pinned to the chain the read resolved against (passed in by each read method).
+  const guardReadClient = (chainId: number) =>
+    chainGuardedPublicClient(publicClient, () => chainId) as unknown as ReadContext['publicClient']
   const tagsNs = makeTagsNs({
     getDeployment,
     liveDeployment,
     publicClient: publicClient as unknown as ReadContext['publicClient'],
+    guardReadClient,
     submitContext: edgeSubmitContext,
     attester: () => account,
     revoke: (schema, uid) => easVerbs.revoke({ schema, uid }),
@@ -776,6 +782,7 @@ export function createEfsClient(config: EfsClientConfig): EfsClient {
     getDeployment,
     liveDeployment,
     publicClient: publicClient as unknown as ReadContext['publicClient'],
+    guardReadClient,
     submitContext: edgeSubmitContext,
     attester: () => account,
     revoke: (schema, uid) => easVerbs.revoke({ schema, uid }),
@@ -784,6 +791,7 @@ export function createEfsClient(config: EfsClientConfig): EfsClient {
     getDeployment,
     liveDeployment,
     publicClient: publicClient as unknown as ReadContext['publicClient'],
+    guardReadClient,
     readContext,
     submitContext: edgeSubmitContext,
     attester: () => account,
@@ -796,6 +804,7 @@ export function createEfsClient(config: EfsClientConfig): EfsClient {
     getDeployment,
     liveDeployment,
     publicClient: publicClient as unknown as ReadContext['publicClient'],
+    guardReadClient,
     submitContext: edgeSubmitContext,
     attester: () => account,
     revoke: (schema, uid) => easVerbs.revoke({ schema, uid }),
