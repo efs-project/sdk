@@ -1,8 +1,15 @@
 /**
- * REDIRECT (alias) primitive — ADR-0050. Covers the pure plan builder, the
- * `efs.redirects.*` write/read verbs (over mock clients), and the read-time
- * resolution engine: single + multi-hop following, the opt-out default, cycle
- * detection, the hop cap, never-auto-followed kinds, and lens scoping. No live chain.
+ * REDIRECT (alias) primitive — the RATIFIED read semantics (contracts specs/09,
+ * Accepted / ADR-0067). Covers the pure plan builder, the `efs.redirects.*`
+ * verbs, and the read engine: the spec §9 conformance vectors (symlink-only
+ * navigation with surfaced-node statuses), selection (first-attester-wins,
+ * lowest-UID tie-break, the revoked-newest pagination regression), `sameAs`
+ * SCC canonicalization, and the deliberate `supersededBy` walk. No live chain.
+ *
+ * The mock chain models the indexer FAITHFULLY: `getReferencingBySchemaAndAttester`
+ * slices the PHYSICAL window first and filters revoked WITHIN it (mirroring
+ * `EFSIndexer._sliceUIDsFiltered`) — the previous mock filtered-then-sliced,
+ * which masked the revoked-newest bug the ratified engine fixes.
  */
 
 import {
@@ -14,19 +21,21 @@ import {
   encodeAbiParameters,
   encodeEventTopics,
 } from 'viem'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, expectTypeOf, it } from 'vitest'
 import type { EfsDeployment, EfsSchemaUIDs } from '../src/chain/deployments.js'
 import { attestedEventAbi } from '../src/eas/abi.js'
 import { SchemaEncoder } from '../src/eas/schema-encoder.js'
 import { EFS_SCHEMA_FIELDS } from '../src/eas/schemas.js'
-import { RedirectCycle, RedirectHopLimit } from '../src/errors.js'
 import type { ReadContext } from '../src/reads/context.js'
 import {
   DEFAULT_REDIRECT_HOPS,
   MAX_REDIRECT_HOPS,
-  followRedirectChain,
-  readActiveRedirect,
+  type RedirectWalkStatus,
+  canonicalizeSameAs,
   resolveHopCap,
+  selectLensRedirect,
+  walkSupersededBy,
+  walkSymlinks,
 } from '../src/reads/redirects.js'
 import type { EdgeSubmitContext } from '../src/writes/edge-submit.js'
 import { REDIRECT_KIND, buildRedirectPlan } from '../src/writes/edge.js'
@@ -77,36 +86,71 @@ function redirectData(target: Hex, kind: number): Hex {
   return redirectEnc.encodeData([target, kind])
 }
 
-// ── A mock chain modeling the lens-scoped referencing index + EAS getAttestation ──
+// ── The honest mock chain ───────────────────────────────────────────────────────
 //
-// `edges`: source UID → list of { attester, redirectUID, target, kind, revoked }.
-// Mirrors getReferencingBySchemaAndAttester(source, REDIRECT, attester, …, reverse,
-// showRevoked=false) returning that attester's most-recent active redirect, and
-// getAttestation(redirectUID) returning its encoded data.
+// `edges[source]` is the PHYSICAL append-ordered redirect list out of `source`
+// (revoked entries stay in the array — the kernel index is append-only).
+// `nodes[uid]` types the non-redirect attestations (anchors/DATA) the walker's
+// dangling check reads. Unknown getAttestation UIDs return the empty struct
+// (uid 0), like EAS.
 
 type Edge = { attester: Address; redirectUID: Hex; target: Hex; kind: number; revoked?: boolean }
+type Node = { schema: Hex; revoked?: boolean }
 
-function makeChain(edges: Record<string, Edge[]>): ReadContext['publicClient'] {
-  // Index each redirectUID → its decoded payload for getAttestation.
-  const byUID = new Map<Hex, { target: Hex; kind: number }>()
+function makeChain(
+  edges: Record<string, Edge[]>,
+  nodes: Record<string, Node> = {},
+): ReadContext['publicClient'] {
+  const byUID = new Map<string, Edge>()
   for (const list of Object.values(edges)) {
-    for (const e of list) byUID.set(e.redirectUID, { target: e.target, kind: e.kind })
+    for (const e of list) byUID.set(e.redirectUID.toLowerCase(), e)
   }
   return {
     async readContract(a: { functionName: string; args?: readonly unknown[] }) {
       const args = a.args ?? []
-      if (a.functionName === 'getReferencingBySchemaAndAttester') {
+      if (a.functionName === 'getReferencingBySchemaAndAttesterCount') {
         const [source, , attester] = args as [Hex, Hex, Address]
-        const list = (edges[source] ?? []).filter((e) => e.attester === attester && !e.revoked)
-        // reverseOrder=true → most recent first; the namespace asks for length 1.
-        const top = list[list.length - 1]
-        return top ? [top.redirectUID] : []
+        // PHYSICAL count — includes revoked (append-only index).
+        return BigInt((edges[source] ?? []).filter((e) => e.attester === attester).length)
+      }
+      if (a.functionName === 'getReferencingBySchemaAndAttester') {
+        const [source, , attester, start, length, reverseOrder, showRevoked] = args as [
+          Hex,
+          Hex,
+          Address,
+          bigint,
+          bigint,
+          boolean,
+          boolean,
+        ]
+        const physical = (edges[source] ?? []).filter((e) => e.attester === attester)
+        const ordered = reverseOrder ? [...physical].reverse() : physical
+        // _sliceUIDsFiltered: slice the PHYSICAL window FIRST, then filter
+        // within it — a page may return fewer than `length` items.
+        const window = ordered.slice(Number(start), Number(start + length))
+        return window.filter((e) => showRevoked || !e.revoked).map((e) => e.redirectUID)
       }
       if (a.functionName === 'getAttestation') {
         const [u] = args as [Hex]
-        const rec = byUID.get(u)
-        if (!rec) return { data: '0x' as Hex }
-        return { data: redirectData(rec.target, rec.kind) }
+        const edge = byUID.get(u.toLowerCase())
+        if (edge) {
+          return {
+            uid: u,
+            schema: SCHEMAS.redirect,
+            revocationTime: edge.revoked ? 1n : 0n,
+            data: redirectData(edge.target, edge.kind),
+          }
+        }
+        const node = nodes[u]
+        if (node) {
+          return {
+            uid: u,
+            schema: node.schema,
+            revocationTime: node.revoked ? 1n : 0n,
+            data: '0x' as Hex,
+          }
+        }
+        return { uid: uid(0), schema: uid(0), revocationTime: 0n, data: '0x' as Hex }
       }
       return uid(0)
     },
@@ -117,7 +161,25 @@ function ctxWith(client: ReadContext['publicClient']): ReadContext {
   return { publicClient: client, deployment, account: ATTESTER }
 }
 
-// ── Pure builder ────────────────────────────────────────────────────────────────
+/** Symlink edge sugar. */
+const sym = (attester: Address, redirectUID: Hex, target: Hex, revoked = false): Edge => ({
+  attester,
+  redirectUID,
+  target,
+  kind: REDIRECT_KIND.symlink,
+  revoked,
+})
+const anchorNode = (): Node => ({ schema: SCHEMAS.anchor })
+const dataNode = (): Node => ({ schema: SCHEMAS.data })
+
+const walk = (
+  client: ReadContext['publicClient'],
+  entry: Hex,
+  attesters: readonly Address[] = [ATTESTER],
+  cap = DEFAULT_REDIRECT_HOPS,
+) => walkSymlinks(ctxWith(client), { uid: entry, isData: false }, attesters, { remaining: cap })
+
+// ── Pure builder (unchanged write-time shape) ───────────────────────────────────
 
 describe('buildRedirectPlan', () => {
   const FROM = uid(0x100)
@@ -133,7 +195,6 @@ describe('buildRedirectPlan', () => {
     expect(r?.revocable).toBe(true) // AliasResolver requires revocable
     expect(r?.refUID).toBe(FROM) // SOURCE rides in refUID
     expect(r?.dataRefs).toEqual([])
-    // data = (target, kind)
     const [target, k] = decodeAbiParameters(
       [{ type: 'bytes32' }, { type: 'uint16' }],
       r?.data as Hex,
@@ -152,7 +213,7 @@ describe('buildRedirectPlan', () => {
   })
 })
 
-// ── resolveHopCap (option normalization) ──────────────────────────────────────────
+// ── resolveHopCap (ratified numbers: D_MAX 16, ceiling 32) ──────────────────────
 
 describe('resolveHopCap', () => {
   it('treats undefined / false / 0 as no-follow (cap 0)', () => {
@@ -160,26 +221,29 @@ describe('resolveHopCap', () => {
     expect(resolveHopCap(false)).toBe(0)
     expect(resolveHopCap(0)).toBe(0)
   })
-  it('maps true to the default cap', () => {
-    expect(resolveHopCap(true)).toBe(DEFAULT_REDIRECT_HOPS)
+  it('maps true to the ratified default D_MAX = 16', () => {
+    expect(resolveHopCap(true)).toBe(16)
+    expect(DEFAULT_REDIRECT_HOPS).toBe(16)
   })
-  it('passes an explicit positive number, clamped to the hard ceiling', () => {
+  it('passes an explicit positive number, clamped to the hard ceiling 32', () => {
     expect(resolveHopCap(3)).toBe(3)
-    expect(resolveHopCap(999)).toBe(MAX_REDIRECT_HOPS)
+    expect(resolveHopCap(17)).toBe(17) // between D_MAX and the ceiling is legal policy
+    expect(resolveHopCap(999)).toBe(32)
+    expect(MAX_REDIRECT_HOPS).toBe(32)
   })
 })
 
-// ── readActiveRedirect (lens-scoped, single record) ───────────────────────────────
+// ── Selection: firstInLensRedirect (specs/09 §5/§8) ─────────────────────────────
 
-describe('readActiveRedirect', () => {
+describe('selectLensRedirect', () => {
   const A = uid(0x1)
   const B = uid(0x2)
 
-  it('reads the active redirect from a source under the lens', async () => {
+  it('reads the selected redirect from a source under the lens', async () => {
     const chain = makeChain({
       [A]: [{ attester: ATTESTER, redirectUID: uid(0xf1), target: B, kind: REDIRECT_KIND.sameAs }],
     })
-    const rec = await readActiveRedirect(ctxWith(chain), A, [ATTESTER])
+    const rec = await selectLensRedirect(ctxWith(chain), A, [ATTESTER])
     expect(rec).toEqual({
       from: A,
       to: B,
@@ -192,10 +256,10 @@ describe('readActiveRedirect', () => {
 
   it('returns undefined when no lens member asserts one', async () => {
     const chain = makeChain({})
-    expect(await readActiveRedirect(ctxWith(chain), A, [ATTESTER])).toBeUndefined()
+    expect(await selectLensRedirect(ctxWith(chain), A, [ATTESTER])).toBeUndefined()
   })
 
-  it('is first-attester-wins across the lens (ADR-0031)', async () => {
+  it('is first-attester-wins across the lens (§5)', async () => {
     const ALICE = addr(0xa11ce)
     const BOB = addr(0xb0b)
     const chain = makeChain({
@@ -204,132 +268,362 @@ describe('readActiveRedirect', () => {
         { attester: ALICE, redirectUID: uid(0xa0), target: B, kind: 0 },
       ],
     })
-    // Lens order [ALICE, BOB] → Alice's redirect wins.
-    const rec = await readActiveRedirect(ctxWith(chain), A, [ALICE, BOB])
+    const rec = await selectLensRedirect(ctxWith(chain), A, [ALICE, BOB])
     expect(rec?.attester).toBe(ALICE)
     expect(rec?.to).toBe(B)
   })
 
-  it('excludes revoked redirects (showRevoked=false)', async () => {
+  it('ties within one attester break by LOWEST redirect UID, not newest (§5)', async () => {
+    const chain = makeChain({
+      [A]: [
+        // Physically-newest has the HIGHER uid — the old newest-first read
+        // would have picked 0xf9; the ratified rule picks 0xf1.
+        { attester: ATTESTER, redirectUID: uid(0xf1), target: B, kind: 0 },
+        { attester: ATTESTER, redirectUID: uid(0xf9), target: uid(0x99), kind: 0 },
+      ],
+    })
+    const rec = await selectLensRedirect(ctxWith(chain), A, [ATTESTER])
+    expect(rec?.redirectUID).toBe(uid(0xf1))
+  })
+
+  it('REGRESSION: a revoked newest record neither hides an older active one nor falls through to a lower-priority attester', async () => {
+    const ALICE = addr(0xa11ce)
+    const BOB = addr(0xb0b)
+    const chain = makeChain({
+      [A]: [
+        // Alice's older redirect is ACTIVE; her newest is REVOKED. The old
+        // length=1 newest-first read returned an empty page for Alice and fell
+        // through to Bob — a wrong absence AND a first-attester-wins violation.
+        { attester: ALICE, redirectUID: uid(0xa1), target: B, kind: 0 },
+        { attester: ALICE, redirectUID: uid(0xa9), target: uid(0x98), kind: 0, revoked: true },
+        { attester: BOB, redirectUID: uid(0xb0), target: uid(0x99), kind: 0 },
+      ],
+    })
+    const rec = await selectLensRedirect(ctxWith(chain), A, [ALICE, BOB])
+    expect(rec?.attester).toBe(ALICE)
+    expect(rec?.redirectUID).toBe(uid(0xa1))
+  })
+
+  it('excludes revoked redirects entirely (all revoked ⇒ undefined)', async () => {
     const chain = makeChain({
       [A]: [{ attester: ATTESTER, redirectUID: uid(0xf1), target: B, kind: 0, revoked: true }],
     })
-    expect(await readActiveRedirect(ctxWith(chain), A, [ATTESTER])).toBeUndefined()
+    expect(await selectLensRedirect(ctxWith(chain), A, [ATTESTER])).toBeUndefined()
   })
 
-  it('with requireFollowable, a discovery-hint kind (relatedVersion) does NOT resolve', async () => {
-    const chain = makeChain({
-      [A]: [
-        {
-          attester: ATTESTER,
-          redirectUID: uid(0xf1),
-          target: B,
-          kind: REDIRECT_KIND.relatedVersion,
-        },
-      ],
-    })
-    expect(
-      await readActiveRedirect(ctxWith(chain), A, [ATTESTER], { requireFollowable: true }),
-    ).toBeUndefined()
-    // But the literal read (get path) DOES surface it.
-    const lit = await readActiveRedirect(ctxWith(chain), A, [ATTESTER])
-    expect(lit?.kind).toBe('relatedVersion')
+  it('paginates past a full page of revoked records (physical-window fidelity)', async () => {
+    // 40 physical slots: 39 revoked then 1 active — the active one sits past
+    // the first 32-slot page.
+    const list: Edge[] = []
+    for (let i = 0; i < 39; i++) {
+      list.push({
+        attester: ATTESTER,
+        redirectUID: uid(0xe00 + i),
+        target: uid(0x99),
+        kind: 0,
+        revoked: true,
+      })
+    }
+    list.push({ attester: ATTESTER, redirectUID: uid(0xf1), target: B, kind: 0 })
+    const chain = makeChain({ [A]: list })
+    // 0xe00-range revoked UIDs are LOWER than 0xf1 — but revoked never wins.
+    const rec = await selectLensRedirect(ctxWith(chain), A, [ATTESTER])
+    expect(rec?.redirectUID).toBe(uid(0xf1))
   })
 })
 
-// ── followRedirectChain (multi-hop, opt-out, cycle, cap) ──────────────────────────
+// ── The navigational follower — specs/09 §9 conformance vectors ─────────────────
 
-describe('followRedirectChain', () => {
+describe('walkSymlinks — specs/09 §9 vectors', () => {
+  const Ax = uid(0xa0)
+  const Ay = uid(0xa1)
+  const D1 = uid(0xd1)
+
+  it('V1 — simple symlink: Anchor → DATA resolves that DATA (1 hop)', async () => {
+    const chain = makeChain({ [Ax]: [sym(ATTESTER, uid(0xf1), D1)] }, { [D1]: dataNode() })
+    const out = await walk(chain, Ax)
+    expect(out).toMatchObject({ uid: D1, isData: true, status: 'Resolved' })
+    expect(out.via).toHaveLength(1)
+  })
+
+  it('V2 — symlink to an ANCHOR surfaces it for continued descent', async () => {
+    const chain = makeChain({ [Ax]: [sym(ATTESTER, uid(0xf1), Ay)] }, { [Ay]: anchorNode() })
+    const out = await walk(chain, Ax)
+    expect(out).toMatchObject({ uid: Ay, isData: false, status: 'Resolved' })
+  })
+
+  it('V3 — supersededBy is a NON-followed terminal (0 hops, Resolved)', async () => {
+    const D2 = uid(0xd2)
+    const chain = makeChain(
+      {
+        [D1]: [{ attester: ATTESTER, redirectUID: uid(0xf1), target: D2, kind: 1 }],
+        [D2]: [{ attester: ATTESTER, redirectUID: uid(0xf2), target: uid(0xd3), kind: 1 }],
+      },
+      { [D2]: dataNode() },
+    )
+    const out = await walkSymlinks(ctxWith(chain), { uid: D1, isData: true }, [ATTESTER], {
+      remaining: DEFAULT_REDIRECT_HOPS,
+    })
+    expect(out).toMatchObject({ uid: D1, isData: true, status: 'Resolved' })
+    expect(out.via).toHaveLength(0)
+  })
+
+  it('V4 — 17-symlink chain at D_MAX 16 surfaces the node at depth 16 as DepthExceeded', async () => {
+    const anchors = Array.from({ length: 18 }, (_, i) => uid(0xa00 + i)) // A0..A17
+    const edges: Record<string, Edge[]> = {}
+    const nodes: Record<string, Node> = {}
+    for (let i = 0; i < 17; i++) {
+      edges[anchors[i] as Hex] = [sym(ATTESTER, uid(0xf00 + i), anchors[i + 1] as Hex)]
+      nodes[anchors[i + 1] as Hex] = anchorNode()
+    }
+    const out = await walk(makeChain(edges, nodes), anchors[0] as Hex)
+    expect(out.status).toBe('DepthExceeded')
+    expect(out.uid).toBe(anchors[16]) // A16, not A17
+    expect(out.via).toHaveLength(16)
+  })
+
+  it('V5 — direct two-attester symlink cycle stops at the node before the repeat', async () => {
+    const alpha = addr(0xa1fa)
+    const beta = addr(0xbe7a)
+    const A1 = uid(0xa1a)
+    const A2 = uid(0xa2a)
+    const chain = makeChain(
+      {
+        [A1]: [sym(alpha, uid(0xf1), A2)],
+        [A2]: [sym(beta, uid(0xf2), A1)],
+      },
+      { [A1]: anchorNode(), [A2]: anchorNode() },
+    )
+    const out = await walk(chain, A1, [alpha, beta])
+    expect(out).toMatchObject({ uid: A2, status: 'CycleStopped' })
+    expect(out.via).toHaveLength(1)
+  })
+
+  it('V6 — multi-hop cycle A1→A2→A3→A1 stops at A3', async () => {
+    const A1 = uid(0xa1a)
+    const A2 = uid(0xa2a)
+    const A3 = uid(0xa3a)
+    const chain = makeChain(
+      {
+        [A1]: [sym(ATTESTER, uid(0xf1), A2)],
+        [A2]: [sym(ATTESTER, uid(0xf2), A3)],
+        [A3]: [sym(ATTESTER, uid(0xf3), A1)],
+      },
+      { [A1]: anchorNode(), [A2]: anchorNode(), [A3]: anchorNode() },
+    )
+    const out = await walk(chain, A1)
+    expect(out).toMatchObject({ uid: A3, status: 'CycleStopped' })
+  })
+
+  it('V7 — dangling target (revoked) surfaces the last good node', async () => {
+    const A1 = uid(0xa1a)
+    const A2 = uid(0xa2a)
+    const A3 = uid(0xa3a)
+    const chain = makeChain(
+      {
+        [A1]: [sym(ATTESTER, uid(0xf1), A2)],
+        [A2]: [sym(ATTESTER, uid(0xf2), A3)],
+      },
+      { [A2]: anchorNode(), [A3]: { schema: SCHEMAS.anchor, revoked: true } },
+    )
+    const out = await walk(chain, A1)
+    expect(out).toMatchObject({ uid: A2, status: 'Dangling' })
+  })
+
+  it('V7b — dangling read-time TYPING: an unrevoked target that is neither ANCHOR nor DATA', async () => {
+    const A1 = uid(0xa1a)
+    const P1 = uid(0x9b1)
+    const chain = makeChain(
+      { [A1]: [sym(ATTESTER, uid(0xf1), P1)] },
+      { [P1]: { schema: SCHEMAS.property } }, // exists, unrevoked, wrong type
+    )
+    const out = await walk(chain, A1)
+    expect(out).toMatchObject({ uid: A1, status: 'Dangling' })
+  })
+
+  it('V8 — a foreign (cross-lens) symlink is invisible: Resolved, 0 hops', async () => {
+    const gamma = addr(0x6a3a)
+    const A1 = uid(0xa1a)
+    const chain = makeChain(
+      { [A1]: [sym(gamma, uid(0xf1), uid(0xa2a))] },
+      { [uid(0xa2a)]: anchorNode() },
+    )
+    const out = await walk(chain, A1, [ATTESTER])
+    expect(out).toMatchObject({ uid: A1, status: 'Resolved' })
+    expect(out.via).toHaveLength(0)
+  })
+
+  it('V9 — supersededBy fork across two lens members: still 0 hops, Resolved', async () => {
+    const alpha = addr(0xa1fa)
+    const beta = addr(0xbe7a)
+    const chain = makeChain({
+      [D1]: [
+        { attester: alpha, redirectUID: uid(0xf1), target: uid(0xd2), kind: 1 },
+        { attester: beta, redirectUID: uid(0xf9), target: uid(0xd9), kind: 1 },
+      ],
+    })
+    const out = await walkSymlinks(ctxWith(chain), { uid: D1, isData: true }, [alpha, beta], {
+      remaining: DEFAULT_REDIRECT_HOPS,
+    })
+    expect(out).toMatchObject({ uid: D1, status: 'Resolved' })
+    expect(out.via).toHaveLength(0)
+  })
+
+  it('V10 — sameAs is not navigated', async () => {
+    const chain = makeChain({
+      [D1]: [{ attester: ATTESTER, redirectUID: uid(0xf1), target: uid(0xd2), kind: 0 }],
+    })
+    const out = await walkSymlinks(ctxWith(chain), { uid: D1, isData: true }, [ATTESTER], {
+      remaining: DEFAULT_REDIRECT_HOPS,
+    })
+    expect(out).toMatchObject({ uid: D1, status: 'Resolved' })
+  })
+
+  it('V12 — no redirect input yields suppression: kind ≥ 3 is an inert Resolved terminal; the status union has no Suppressed member', async () => {
+    const A1 = uid(0xa1a)
+    const chain = makeChain({
+      [A1]: [{ attester: ATTESTER, redirectUID: uid(0xf1), target: uid(0xa2a), kind: 7 }],
+    })
+    const out = await walk(chain, A1)
+    expect(out).toMatchObject({ uid: A1, status: 'Resolved' })
+    // Type-level: the follower can never produce a suppression status (§7).
+    expectTypeOf<RedirectWalkStatus>().toEqualTypeOf<
+      'Resolved' | 'Dangling' | 'CycleStopped' | 'DepthExceeded'
+    >()
+  })
+
+  it('check ORDER: a dangling edge pending at the depth cap is Dangling, not DepthExceeded (§8)', async () => {
+    // A0 →(1 hop)→ A1, whose next edge dangles, with cap 1: the dangling check
+    // precedes the depth check.
+    const A0 = uid(0xa0a)
+    const A1 = uid(0xa1a)
+    const chain = makeChain(
+      {
+        [A0]: [sym(ATTESTER, uid(0xf1), A1)],
+        [A1]: [sym(ATTESTER, uid(0xf2), uid(0xdead))],
+      },
+      { [A1]: anchorNode() }, // 0xdead unknown ⇒ dangling
+    )
+    const out = await walk(chain, A0, [ATTESTER], 1)
+    expect(out).toMatchObject({ uid: A1, status: 'Dangling' })
+  })
+
+  it("no-fall-through: a trusted attester's non-navigational winner is terminal even when a lower lens member has a symlink", async () => {
+    const ALICE = addr(0xa11ce)
+    const BOB = addr(0xb0b)
+    const A1 = uid(0xa1a)
+    const chain = makeChain(
+      {
+        [A1]: [
+          { attester: ALICE, redirectUID: uid(0xf1), target: uid(0xd9), kind: 3 }, // hint
+          sym(BOB, uid(0xf2), uid(0xa2a)),
+        ],
+      },
+      { [uid(0xa2a)]: anchorNode() },
+    )
+    const out = await walk(chain, A1, [ALICE, BOB])
+    // Alice wins selection; her non-symlink stance is NOT overridden by Bob's symlink.
+    expect(out).toMatchObject({ uid: A1, status: 'Resolved' })
+  })
+})
+
+// ── V11: sameAs canonicalization (client/indexer layer, §4.2) ───────────────────
+
+describe('canonicalizeSameAs', () => {
   const A = uid(0x1)
   const B = uid(0x2)
   const C = uid(0x3)
 
-  it('cap 0 short-circuits to the start with an empty chain (opt-out)', async () => {
-    const chain = makeChain({
+  it('V11 — the canonical representative is the lowest UID in the SCC, entry-independent', async () => {
+    // A↔B, B↔C — one SCC {A,B,C}; canonical = A from any entry.
+    const edges: Record<string, Edge[]> = {
       [A]: [{ attester: ATTESTER, redirectUID: uid(0xf1), target: B, kind: 0 }],
-    })
-    const out = await followRedirectChain(ctxWith(chain), A, [ATTESTER], 0)
-    expect(out).toEqual({ target: A, via: [] })
-  })
-
-  it('follows a single hop to the canonical', async () => {
-    const chain = makeChain({
-      [A]: [{ attester: ATTESTER, redirectUID: uid(0xf1), target: B, kind: REDIRECT_KIND.sameAs }],
-    })
-    const out = await followRedirectChain(ctxWith(chain), A, [ATTESTER], DEFAULT_REDIRECT_HOPS)
-    expect(out.target).toBe(B)
-    expect(out.via).toHaveLength(1)
-    expect(out.via[0]?.from).toBe(A)
-    expect(out.via[0]?.to).toBe(B)
-  })
-
-  it('follows a multi-hop chain A→B→C to the terminal', async () => {
-    const chain = makeChain({
-      [A]: [{ attester: ATTESTER, redirectUID: uid(0xf1), target: B, kind: 1 }],
-      [B]: [{ attester: ATTESTER, redirectUID: uid(0xf2), target: C, kind: 1 }],
-    })
-    const out = await followRedirectChain(ctxWith(chain), A, [ATTESTER], DEFAULT_REDIRECT_HOPS)
-    expect(out.target).toBe(C)
-    expect(out.via.map((v) => v.to)).toEqual([B, C])
-  })
-
-  it('stops at a hint kind mid-chain (relatedVersion is not auto-followed)', async () => {
-    const chain = makeChain({
-      [A]: [{ attester: ATTESTER, redirectUID: uid(0xf1), target: B, kind: REDIRECT_KIND.sameAs }],
       [B]: [
-        {
-          attester: ATTESTER,
-          redirectUID: uid(0xf2),
-          target: C,
-          kind: REDIRECT_KIND.relatedVersion,
-        },
+        { attester: ATTESTER, redirectUID: uid(0xf2), target: A, kind: 0 },
+        { attester: ATTESTER, redirectUID: uid(0xf3), target: C, kind: 0 },
       ],
-    })
-    const out = await followRedirectChain(ctxWith(chain), A, [ATTESTER], DEFAULT_REDIRECT_HOPS)
-    // Followed A→B (sameAs), then stopped — B's outgoing edge is a hint.
-    expect(out.target).toBe(B)
-    expect(out.via.map((v) => v.to)).toEqual([B])
+      [C]: [{ attester: ATTESTER, redirectUID: uid(0xf4), target: B, kind: 0 }],
+    }
+    for (const entry of [A, B, C]) {
+      const out = await canonicalizeSameAs(ctxWith(makeChain(edges)), entry, [ATTESTER])
+      expect(out.canonical, `entry ${entry}`).toBe(A)
+      expect(out.members).toEqual([A, B, C])
+      expect(out.complete).toBe(true)
+    }
   })
 
-  it('throws RedirectCycle on a multi-hop cycle (fail-closed; no SCC guess)', async () => {
-    const chain = makeChain({
-      [A]: [{ attester: ATTESTER, redirectUID: uid(0xf1), target: B, kind: 0 }],
-      [B]: [{ attester: ATTESTER, redirectUID: uid(0xf2), target: A, kind: 0 }],
-    })
-    await expect(
-      followRedirectChain(ctxWith(chain), A, [ATTESTER], DEFAULT_REDIRECT_HOPS),
-    ).rejects.toBeInstanceOf(RedirectCycle)
+  it("is lens-scoped: a foreign attester's edge never canonicalizes (§5)", async () => {
+    const gamma = addr(0x6a3a)
+    const edges: Record<string, Edge[]> = {
+      [B]: [
+        { attester: gamma, redirectUID: uid(0xf1), target: A, kind: 0 }, // foreign B→A
+      ],
+    }
+    const out = await canonicalizeSameAs(ctxWith(makeChain(edges)), B, [ATTESTER])
+    expect(out.canonical).toBe(B) // the foreign edge is invisible
+    expect(out.members).toEqual([B])
   })
 
-  it('accepts a chain whose length EQUALS the cap and then terminates (no false hop-limit)', async () => {
-    // A→B with cap 1, and B has no onward redirect → a valid 1-hop chain. The cap counts
-    // FOLLOWED hops; consuming the last allowed hop and landing on a terminal is fine (the old
-    // code threw RedirectHopLimit here without checking whether B had a further redirect).
-    const chain = makeChain({
-      [A]: [{ attester: ATTESTER, redirectUID: uid(0xf1), target: B, kind: REDIRECT_KIND.sameAs }],
-      // B: no active redirect (terminal)
-    })
-    const out = await followRedirectChain(ctxWith(chain), A, [ATTESTER], 1)
-    expect(out.target).toBe(B)
-    expect(out.via).toHaveLength(1)
-    expect(out.via[0]?.to).toBe(B)
-  })
-
-  it('throws RedirectHopLimit when the chain does not terminate within the cap', async () => {
-    // A→B→C→… with C also redirecting onward past a tiny cap of 2.
-    const D = uid(0x4)
-    const chain = makeChain({
-      [A]: [{ attester: ATTESTER, redirectUID: uid(0xf1), target: B, kind: 0 }],
-      [B]: [{ attester: ATTESTER, redirectUID: uid(0xf2), target: C, kind: 0 }],
-      [C]: [{ attester: ATTESTER, redirectUID: uid(0xf3), target: D, kind: 0 }],
-    })
-    await expect(followRedirectChain(ctxWith(chain), A, [ATTESTER], 2)).rejects.toBeInstanceOf(
-      RedirectHopLimit,
-    )
+  it('one-way sameAs (not an SCC): the start is its own component', async () => {
+    const edges: Record<string, Edge[]> = {
+      [B]: [{ attester: ATTESTER, redirectUID: uid(0xf1), target: A, kind: 0 }],
+      // A has no edge back — {B} alone is B's SCC.
+    }
+    const out = await canonicalizeSameAs(ctxWith(makeChain(edges)), B, [ATTESTER])
+    expect(out.canonical).toBe(B)
+    expect(out.members).toEqual([B])
   })
 })
 
-// ── efs.redirects.* write/read verbs ──────────────────────────────────────────────
+// ── The deliberate supersededBy walk (§2 breadcrumb) ────────────────────────────
+
+describe('walkSupersededBy', () => {
+  const D1 = uid(0xd1)
+  const D2 = uid(0xd2)
+  const D3 = uid(0xd3)
+
+  it('walks a healthy chain to the latest version (complete)', async () => {
+    const chain = makeChain(
+      {
+        [D1]: [{ attester: ATTESTER, redirectUID: uid(0xf1), target: D2, kind: 1 }],
+        [D2]: [{ attester: ATTESTER, redirectUID: uid(0xf2), target: D3, kind: 1 }],
+      },
+      { [D2]: dataNode(), [D3]: dataNode() },
+    )
+    const out = await walkSupersededBy(ctxWith(chain), D1, [ATTESTER])
+    expect(out.latest).toBe(D3)
+    expect(out.chain.map((c) => c.to)).toEqual([D2, D3])
+    expect(out.complete).toBe(true)
+  })
+
+  it('a broken pointer stops at the last GOOD version (complete: false)', async () => {
+    const chain = makeChain(
+      {
+        [D1]: [{ attester: ATTESTER, redirectUID: uid(0xf1), target: D2, kind: 1 }],
+        [D2]: [{ attester: ATTESTER, redirectUID: uid(0xf2), target: uid(0xdead), kind: 1 }],
+      },
+      { [D2]: dataNode() }, // 0xdead unknown ⇒ broken
+    )
+    const out = await walkSupersededBy(ctxWith(chain), D1, [ATTESTER])
+    expect(out.latest).toBe(D2)
+    expect(out.complete).toBe(false)
+  })
+
+  it('a malformed looping chain stops via the visited-set (complete: false)', async () => {
+    const chain = makeChain(
+      {
+        [D1]: [{ attester: ATTESTER, redirectUID: uid(0xf1), target: D2, kind: 1 }],
+        [D2]: [{ attester: ATTESTER, redirectUID: uid(0xf2), target: D1, kind: 1 }],
+      },
+      { [D1]: dataNode(), [D2]: dataNode() },
+    )
+    const out = await walkSupersededBy(ctxWith(chain), D1, [ATTESTER])
+    expect(out.latest).toBe(D2)
+    expect(out.complete).toBe(false)
+  })
+})
+
+// ── efs.redirects.* verbs ───────────────────────────────────────────────────────
 
 /** An EAS `Attested` log (full Log fields so the submitter's `parseEventLogs` can
  * decode it). Mirrors the proven mock in `writes-edge.test.ts`. */
@@ -411,14 +705,17 @@ describe('makeRedirectsNs', () => {
   const FROM = uid(0x100)
   const TO = uid(0x200)
 
-  it('set authors a REDIRECT (refUID = from, data = (to, kind)) — one signature', async () => {
-    const { ctx, calls } = makeSubmitCtx()
-    const ns = makeRedirectsNs({
+  const nsWith = (chain: ReadContext['publicClient'], ctx = makeSubmitCtx().ctx) =>
+    makeRedirectsNs({
       getDeployment: () => deployment,
-      readContext: () => ctxWith(makeChain({})),
+      readContext: () => ctxWith(chain),
       submitContext: () => ctx,
       revoke: async () => uid(0xfee),
     })
+
+  it('set authors a REDIRECT (refUID = from, data = (to, kind)) — one signature', async () => {
+    const { ctx, calls } = makeSubmitCtx()
+    const ns = nsWith(makeChain({}), ctx)
     const receipt = await ns.set(FROM, TO, { kind: 'supersededBy' })
     expect(receipt.signatureCount).toBe(1)
     const request = calls[0]?.[0]
@@ -436,13 +733,7 @@ describe('makeRedirectsNs', () => {
 
   it('set defaults kind to sameAs', async () => {
     const { ctx, calls } = makeSubmitCtx()
-    const ns = makeRedirectsNs({
-      getDeployment: () => deployment,
-      readContext: () => ctxWith(makeChain({})),
-      submitContext: () => ctx,
-      revoke: async () => uid(0xfee),
-    })
-    await ns.set(FROM, TO)
+    await nsWith(makeChain({}), ctx).set(FROM, TO)
     const [, k] = decodeAbiParameters(
       [{ type: 'bytes32' }, { type: 'uint16' }],
       calls[0]?.[0]?.data[0]?.data as Hex,
@@ -451,15 +742,9 @@ describe('makeRedirectsNs', () => {
   })
 
   it('set rejects an unrecognized kind name (InvalidArgument)', async () => {
-    const ns = makeRedirectsNs({
-      getDeployment: () => deployment,
-      readContext: () => ctxWith(makeChain({})),
-      submitContext: () => makeSubmitCtx().ctx,
-      revoke: async () => uid(0xfee),
-    })
-    await expect(ns.set(FROM, TO, { kind: 'bogus' as never })).rejects.toMatchObject({
-      code: 'InvalidArgument',
-    })
+    await expect(
+      nsWith(makeChain({})).set(FROM, TO, { kind: 'bogus' as never }),
+    ).rejects.toMatchObject({ code: 'InvalidArgument' })
   })
 
   it('remove revokes the right UID under the REDIRECT schema', async () => {
@@ -478,7 +763,7 @@ describe('makeRedirectsNs', () => {
     expect(revokeCall).toEqual({ schema: SCHEMAS.redirect, uid: uid(0xabc) })
   })
 
-  it('get reads the active record (literal, any kind) under the default lens', async () => {
+  it('get returns the SELECTED record (any kind, ratified selection) under the default lens', async () => {
     const chain = makeChain({
       [FROM]: [
         {
@@ -489,16 +774,9 @@ describe('makeRedirectsNs', () => {
         },
       ],
     })
-    const ns = makeRedirectsNs({
-      getDeployment: () => deployment,
-      readContext: () => ctxWith(chain),
-      submitContext: () => makeSubmitCtx().ctx,
-      revoke: async () => uid(0xfee),
-    })
-    const rec = await ns.get(FROM)
-    // The literal get surfaces the hint kind (not chain-followed, not kind-filtered).
+    const rec = await nsWith(chain).get(FROM)
     expect(rec?.to).toBe(TO)
-    expect(rec?.kind).toBe('relatedVersion')
+    expect(rec?.kind).toBe('relatedVersion') // surfaces the literal record, any kind
   })
 
   it('get scopes to the explicit lens', async () => {
@@ -506,14 +784,42 @@ describe('makeRedirectsNs', () => {
     const chain = makeChain({
       [FROM]: [{ attester: ALICE, redirectUID: uid(0xa0), target: TO, kind: 0 }],
     })
-    const ns = makeRedirectsNs({
-      getDeployment: () => deployment,
-      readContext: () => ctxWith(chain),
-      submitContext: () => makeSubmitCtx().ctx,
-      revoke: async () => uid(0xfee),
-    })
-    // Default account lens (ATTESTER) finds nothing; an explicit [ALICE] lens does.
+    const ns = nsWith(chain)
     expect(await ns.get(FROM)).toBeUndefined()
     expect((await ns.get(FROM, { lens: ALICE }))?.attester).toBe(ALICE)
+  })
+
+  it('list surfaces EVERY active lens-visible redirect (ascending UID; revoked excluded)', async () => {
+    const ALICE = addr(0xa11ce)
+    const chain = makeChain({
+      [FROM]: [
+        { attester: ATTESTER, redirectUID: uid(0xf9), target: uid(0x99), kind: 3 },
+        { attester: ATTESTER, redirectUID: uid(0xf1), target: TO, kind: 0 },
+        { attester: ATTESTER, redirectUID: uid(0xf5), target: uid(0x98), kind: 0, revoked: true },
+        { attester: ALICE, redirectUID: uid(0xa0), target: uid(0x97), kind: 2 },
+      ],
+    })
+    const out = await nsWith(chain).list(FROM, { lens: ATTESTER })
+    expect(out.map((r) => r.redirectUID)).toEqual([uid(0xf1), uid(0xf9)]) // active only, sorted
+  })
+
+  it('canonical + history delegate to the ratified engines', async () => {
+    const A = uid(0x1)
+    const B = uid(0x2)
+    const chain = makeChain(
+      {
+        [A]: [{ attester: ATTESTER, redirectUID: uid(0xf1), target: B, kind: 0 }],
+        [B]: [
+          { attester: ATTESTER, redirectUID: uid(0xf2), target: A, kind: 0 },
+          { attester: ATTESTER, redirectUID: uid(0xf3), target: uid(0x3), kind: 1 },
+        ],
+      },
+      { [uid(0x3)]: dataNode() },
+    )
+    const ns = nsWith(chain)
+    expect((await ns.canonical(B)).canonical).toBe(A)
+    const history = await ns.history(B)
+    expect(history.latest).toBe(uid(0x3))
+    expect(history.complete).toBe(true)
   })
 })

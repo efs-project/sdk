@@ -60,8 +60,13 @@ import {
   read,
   resolveAttesters,
 } from './context.js'
-import { type RedirectFollowResult, followRedirectChain, resolveHopCap } from './redirects.js'
-import { ParentNotFoundError, resolveFilePathToAnchor } from './resolve.js'
+import {
+  type HopBudget,
+  type RedirectWalkStatus,
+  resolveHopCap,
+  walkSymlinks,
+} from './redirects.js'
+import { ParentNotFoundError, resolveFilePathToAnchor, splitPathToCanonical } from './resolve.js'
 
 /** The reserved PROPERTY keys the SDK reads as typed slots. Custom `fields` keys
  * fall through to the `properties` bag. */
@@ -74,21 +79,102 @@ function isReservedKey(k: string): k is ReservedKey {
 
 /** The full active-placement resolution: the file's DATA UID + the winning lens. */
 export type ResolvedPlacement = {
-  /** The active DATA UID at the path under the lens. When a REDIRECT was followed
-   * (`followRedirects`), this is the TERMINAL canonical DATA, not the literal one. */
+  /** The active DATA UID at the path under the lens. */
   dataUID: DataUID
-  /** The placement (lens) attester whose active PIN won — `resolvedBy`. When a
-   * REDIRECT was followed, this is the attester who asserted the LAST hop (who
-   * vouched for the canonical), so mirrors/properties scope to the canonical's voucher. */
+  /** The attester whose claim won — `resolvedBy`. Normally the winning placement
+   * PIN's attester; when a symlink resolved directly to a DATA (specs/09 §2
+   * vector 1), it is the attester of that LAST symlink hop (who vouched for the
+   * target), so mirrors/properties scope to the voucher. */
   resolvedBy: Address
-  /** The file's own anchor UID (the parent of its placements). */
+  /** The file's own anchor UID (the parent of its placements). For a direct
+   * symlink→DATA resolution this is the LAST symlink's source anchor. */
   fileAnchorUID: Hex
   /** The active placement PIN attestation UID (provenance: `sourceUIDs.placement`).
-   * Read via `getActivePinSlot` against the file anchor under the winning lens. */
+   * Read via `getActivePinSlot` against the file anchor under the winning lens.
+   * Absent for a direct symlink→DATA resolution (no placement PIN involved). */
   placementPinUID?: Hex
-  /** The REDIRECT alias chain followed to reach `dataUID`, when `followRedirects` was
-   * set AND at least one hop was taken (ADR-0050). Absent ⇒ literal placement. */
+  /** The SYMLINK hops followed during path resolution (specs/09 §2 — symlink is
+   * the ONLY followed kind, ANCHOR-sourced), when `followRedirects` was set AND
+   * at least one hop was taken. Absent ⇒ a literal walk. `sameAs`/`supersededBy`
+   * are never here — an exact DATA never silently advances ("no silent
+   * revision"); see `redirects.canonical`/`redirects.history` for those. */
   via?: readonly RedirectRecord[]
+}
+
+/**
+ * Symlink-aware file-path resolution (specs/09 §2 — the navigational consumer
+ * of {@link walkSymlinks}): walk the path segments and, after EACH landed
+ * anchor, follow its lens-visible symlink chain in the SAME lens scope (§5).
+ * A symlink target that is an ANCHOR continues descent under it (vector 2); a
+ * DATA target at the leaf IS the resolved file (vector 1); a DATA target with
+ * segments remaining is a not-found (a DATA has no children). ONE hop budget
+ * spans the whole resolution — N segments cannot multiply the cap.
+ */
+async function resolveFilePathWithSymlinks(
+  ctx: ReadContext,
+  path: string,
+  attesters: readonly Address[],
+  cap: number,
+): Promise<
+  | { kind: 'anchor'; anchorUID: Hex; via: readonly RedirectRecord[] }
+  | { kind: 'data'; dataUID: Hex; via: readonly RedirectRecord[] }
+  | { kind: 'not-found' }
+  | { kind: 'status'; status: RedirectWalkStatus; at: Hex; via: readonly RedirectRecord[] }
+> {
+  const { contracts, schemas } = ctx.deployment
+  const segments = splitPathToCanonical(path)
+  if (segments.length === 0) return { kind: 'not-found' } // the root is a folder, never a file
+
+  const root = await read<Hex>(ctx.publicClient, {
+    address: contracts.indexer,
+    abi: indexerAbi,
+    functionName: 'rootAnchorUID',
+  })
+
+  const budget: HopBudget = { remaining: cap }
+  const via: RedirectRecord[] = []
+  let parent = root
+
+  for (let i = 0; i < segments.length; i++) {
+    const isLeaf = i === segments.length - 1
+    const seg = segments[i] as string
+    // Leaf resolves the DATA-typed slot first (where the SDK writes file
+    // anchors), generic as fallback; parents resolve generically — the same
+    // order as the literal `resolveFilePathToAnchor`.
+    let child = isLeaf
+      ? await read<Hex>(ctx.publicClient, {
+          address: contracts.indexer,
+          abi: indexerAbi,
+          functionName: 'resolveAnchor',
+          args: [parent, seg, schemas.data],
+        })
+      : ZERO_UID
+    if (child === ZERO_UID) {
+      child = await read<Hex>(ctx.publicClient, {
+        address: contracts.indexer,
+        abi: indexerAbi,
+        functionName: 'resolvePath',
+        args: [parent, seg],
+      })
+    }
+    if (child === ZERO_UID) return { kind: 'not-found' }
+
+    // Landed on an anchor: follow its symlink chain in the SAME lens scope.
+    const walk = await walkSymlinks(ctx, { uid: child, isData: false }, attesters, budget)
+    via.push(...walk.via)
+    if (walk.status !== 'Resolved') {
+      // Router mapping (§8 notes): Dangling/DepthExceeded/CycleStopped are the
+      // 404-equivalent; the surfaced node rides along for diagnostics.
+      return { kind: 'status', status: walk.status, at: walk.uid, via }
+    }
+    if (walk.isData) {
+      // Vector 1: the symlink resolved to a DATA. At the leaf that DATA is the
+      // file; mid-path a DATA has no children ⇒ not-found.
+      return isLeaf ? { kind: 'data', dataUID: walk.uid, via } : { kind: 'not-found' }
+    }
+    parent = walk.uid
+  }
+  return { kind: 'anchor', anchorUID: parent, via }
 }
 
 /** Build the static {@link DataRef} for a resolved placement on this chain. */
@@ -115,17 +201,43 @@ export async function resolvePlacement(
   //    `(parent, name, DATA_SCHEMA_UID)`), with a generic fallback for legacy anchors —
   //    a generic-only walk would report SDK-written files as absent. A missing segment
   //    means the file (or a parent folder) does not exist — surfaced as `null`.
+  //
+  //    With `followRedirects` set, the walk is SYMLINK-AWARE (specs/09 §2): each
+  //    landed anchor's lens-visible symlink chain is followed in the same lens
+  //    scope. A non-`Resolved` walk status (Dangling/CycleStopped/DepthExceeded)
+  //    maps to the 404-equivalent `null` (§8 router mapping) — never a throw.
+  const cap = resolveHopCap(opts?.followRedirects)
   let fileAnchorUID: Hex
-  try {
-    fileAnchorUID = await resolveFilePathToAnchor(
-      ctx.publicClient as never,
-      contracts.indexer,
-      path,
-      schemas.data,
-    )
-  } catch (err) {
-    if (err instanceof ParentNotFoundError) return null
-    throw err
+  let via: readonly RedirectRecord[] | undefined
+  if (cap > 0) {
+    const r = await resolveFilePathWithSymlinks(ctx, path, attesters, cap)
+    if (r.kind === 'not-found' || r.kind === 'status') return null
+    if (r.kind === 'data') {
+      // Vector 1: symlink → DATA. That DATA is the resolved file; there is no
+      // placement PIN. The voucher (resolvedBy) is the LAST symlink's attester,
+      // and the file anchor is that symlink's source.
+      const lastHop = r.via[r.via.length - 1] as RedirectRecord
+      return {
+        dataUID: r.dataUID as DataUID,
+        resolvedBy: lastHop.attester,
+        fileAnchorUID: lastHop.from,
+        via: r.via,
+      }
+    }
+    fileAnchorUID = r.anchorUID
+    if (r.via.length > 0) via = r.via
+  } else {
+    try {
+      fileAnchorUID = await resolveFilePathToAnchor(
+        ctx.publicClient as never,
+        contracts.indexer,
+        path,
+        schemas.data,
+      )
+    } catch (err) {
+      if (err instanceof ParentNotFoundError) return null
+      throw err
+    }
   }
   if (fileAnchorUID === ZERO_UID) return null
 
@@ -159,34 +271,16 @@ export async function resolvePlacement(
     args: [fileAnchorUID, winner.attester, schemas.data],
   })
 
-  // Read-time REDIRECT following (ADR-0050) — OPT-IN via `followRedirects`. The
-  // on-chain resolver does not follow redirects, so this is SDK logic: from the
-  // resolved DATA, walk the active `sameAs`/`supersededBy` alias chain (the dedup /
-  // versioning case) under the SAME lens, to its canonical terminal. These are the
-  // only DATA-sourced kinds. `symlink` (kind=2) is ANCHOR-sourced (a path alias on
-  // the file anchor, not on a DATA) so it is NOT reached by this DATA→DATA walk:
-  // path-level symlink resolution (following an anchor with no placement of its own to
-  // its target anchor/DATA) is DEFERRED pending the ADR-0050 resolution-spec pin
-  // (lens precedence + cycle canonicalization across anchors). Cycle/hop-cap fail
-  // closed (typed throws). Default (`followRedirects` unset/false) ⇒ cap 0 ⇒ no walk.
-  const cap = resolveHopCap(opts?.followRedirects)
-  let dataUID = winner.uid as DataUID
-  let resolvedBy = winner.attester
-  let via: readonly RedirectRecord[] | undefined
-  if (cap > 0) {
-    const followed: RedirectFollowResult = await followRedirectChain(ctx, dataUID, attesters, cap)
-    if (followed.via.length > 0) {
-      dataUID = followed.target as DataUID
-      // The canonical's voucher is whoever asserted the LAST hop — scope the target's
-      // mirrors/properties to that attester (they vouched for the canonical).
-      resolvedBy = followed.via[followed.via.length - 1]?.attester ?? resolvedBy
-      via = followed.via
-    }
-  }
-
+  // NOTE deliberately ABSENT here: there is NO DATA→DATA post-placement walk.
+  // specs/09 §2 (ratified): a placed DATA UID never silently advances — `sameAs`
+  // is canonicalization-only (`redirects.canonical`) and `supersededBy` is a
+  // deliberate breadcrumb (`redirects.history`); a DATA cannot be a symlink
+  // source (AliasResolver write guard), so the §8 follower entered at a placed
+  // DATA always returns `Resolved` immediately. "Latest" is reached by the
+  // path's placement PIN ("no silent revision": path = newest, UID = exact).
   return {
-    dataUID,
-    resolvedBy,
+    dataUID: winner.uid as DataUID,
+    resolvedBy: winner.attester,
     fileAnchorUID,
     ...(slot.pinUID !== ZERO_UID ? { placementPinUID: slot.pinUID } : {}),
     ...(via !== undefined ? { via } : {}),

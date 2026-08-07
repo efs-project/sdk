@@ -408,8 +408,10 @@ export type EfsGraphReadNs = { tags: TagsReadNs; pins: PinsReadNs }
 export type PropsReadNs = Pick<PropsNs, 'get' | 'list'>
 /** Read-only `mirrors`: `list` (no `add`/`remove`). */
 export type MirrorsReadNs = Pick<MirrorsNs, 'list'>
-/** Read-only `redirects`: the literal active-record `get` (no `set`/`remove`). */
-export type RedirectsReadNs = Pick<RedirectsNs, 'get'>
+/** Read-only `redirects`: the lens-scoped read verbs — selected-record `get`,
+ * discovery `list`, `sameAs` canonicalization, and the deliberate
+ * `supersededBy` history walk (no `set`/`remove`). */
+export type RedirectsReadNs = Pick<RedirectsNs, 'get' | 'list' | 'canonical' | 'history'>
 
 /** Read-capable client (no `walletClient`). The `eas`/`raw` escape hatches are
  * read-only here (no write verbs / no `.write.*` on the raw instances), and the standalone
@@ -1331,16 +1333,25 @@ export {
   type SortSourceType,
   type SortReadOptions,
 } from './reads/sorts.js'
-// REDIRECT (alias) — read-time resolution engine (ADR-0050).
+// REDIRECT (alias) — the ratified read-resolution engine (specs/09 / ADR-0067):
+// symlink-only navigation with surfaced-node statuses, `sameAs` canonicalization,
+// and the deliberate `supersededBy` history walk.
 export {
-  readActiveRedirect,
-  followRedirectChain,
+  selectLensRedirect,
+  listLensRedirects,
+  walkSymlinks,
+  canonicalizeSameAs,
+  walkSupersededBy,
   resolveHopCap,
   redirectKindName,
-  isAutoFollowedKind,
+  isNavigationalKind,
   DEFAULT_REDIRECT_HOPS,
   MAX_REDIRECT_HOPS,
-  type RedirectFollowResult,
+  MAX_REDIRECT_SCAN,
+  MAX_SAMEAS_NODES,
+  type RedirectWalkStatus,
+  type RedirectWalkResult,
+  type HopBudget,
 } from './reads/redirects.js'
 // REDIRECT (alias) — `efs.redirects.*` write verbs + plan builder + kind constants.
 export {
@@ -1348,6 +1359,9 @@ export {
   type RedirectsNs,
   type RedirectSetOptions,
   type RedirectGetOptions,
+  type RedirectHistoryOptions,
+  type CanonicalResult,
+  type HistoryResult,
 } from './writes/redirects.js'
 export type { RedirectKind, RedirectRecord } from './types.js'
 

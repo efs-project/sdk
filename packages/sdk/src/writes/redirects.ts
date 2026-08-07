@@ -1,10 +1,11 @@
 /**
- * `efs.redirects.*` — the REDIRECT (alias) primitive (ADR-0050): the trust-scoped
- * "this points at that" edge for canonical/dedup (`sameAs`), version supersession
- * (`supersededBy`), and path symlinks (`symlink`).
+ * `efs.redirects.*` — the REDIRECT (alias) primitive (ADR-0050), with the
+ * RATIFIED read semantics of contracts specs/09 (Accepted / ADR-0067): the
+ * three redirect meanings are three SEPARATE operations, and only `symlink`
+ * ever navigates (via `fs.locate/read({ followRedirects })`, ANCHOR-sourced).
  *
  *  - `set(from, to, { kind? })` → {@link WriteReceipt} — author a REDIRECT
- *    `(refUID = from, data = (to, kind))` as the connected wallet (ONE signature).
+ *    `(refUID = from, data = (to, kind))` as the connected wallet.
  *    `kind` defaults to `sameAs` (0). REDIRECT is NOT cardinality-1 (unlike PIN): a
  *    source may carry several active redirects, so `set` does NOT auto-supersede a
  *    prior one — replacement is `set` the new + `remove` the old. The AliasResolver
@@ -13,21 +14,32 @@
  *    schemas — the resolver is authoritative and reads cost gas on the write path).
  *  - `remove(redirectUID)` → `Hex` — revoke a REDIRECT by its own UID (via
  *    `efs.eas.revoke`, REDIRECT schema; REDIRECT is revocable per ADR-0050).
- *  - `get(from, { lens? })` → {@link RedirectRecord} | undefined — the active redirect
- *    FROM `from` under the lens (first-attester-wins, revoked excluded). NOT a chain
- *    walk and NOT kind-filtered — it surfaces the literal record (any kind, including
- *    the never-auto-followed `relatedVersion`). To FOLLOW a chain to its target, use
- *    `efs.fs.locate(path, { followRedirects: true })`.
+ *  - `get(from, { lens? })` → the SELECTED record per the ratified rule
+ *    (first-attester-wins by lens order; ties within the winning attester break
+ *    by LOWEST redirect UID — specs/09 §5/§8; selection paginates past revoked
+ *    records). Any kind; not a walk.
+ *  - `list(from, { lens? })` → EVERY active lens-visible redirect out of `from`
+ *    (lens order, then ascending UID) — the raw discovery read.
+ *  - `canonical(dataUID, { lens? })` → the `sameAs` dedup representative:
+ *    lowest UID in the lens-scoped SCC (specs/09 §4.2), start-independent.
+ *  - `history(dataUID, { lens?, maxHops? })` → the deliberate `supersededBy`
+ *    breadcrumb walk (specs/09 §2) — the follower NEVER chases this; "latest"
+ *    is the path's placement ("no silent revision": path = newest, UID = exact).
  *
  * Writes route through the SAME Submitter seam as `fs.write`/`graph.*`
- * (`submitEdgePlan`); the read reuses the lens-scoped referencing index.
+ * (`submitEdgePlan`); the reads reuse the lens-scoped referencing index.
  */
 
-import type { Address, Hex } from 'viem'
+import type { Hex } from 'viem'
 import type { EfsDeployment } from '../chain/deployments.js'
 import { EfsError } from '../errors.js'
 import { type ReadContext, resolveAttesters } from '../reads/context.js'
-import { readActiveRedirect } from '../reads/redirects.js'
+import {
+  canonicalizeSameAs,
+  listLensRedirects,
+  selectLensRedirect,
+  walkSupersededBy,
+} from '../reads/redirects.js'
 import type { ReadOptions, RedirectKind, RedirectRecord, WriteReceipt } from '../types.js'
 import { type EdgeSubmitContext, submitEdgePlan } from './edge-submit.js'
 import { REDIRECT_KIND, buildRedirectPlan } from './edge.js'
@@ -39,25 +51,64 @@ export interface RedirectSetOptions {
   kind?: RedirectKind | number
 }
 
-/** Options for a `redirects.get` (lens-scoped, like the other reads). */
+/** Options for the lens-scoped redirect reads. */
 export type RedirectGetOptions = Pick<ReadOptions, 'lens'>
 
-/** The `efs.redirects.*` write+read surface (present only on a write-capable client). */
+/** Options for {@link RedirectsNs.history}. */
+export type RedirectHistoryOptions = RedirectGetOptions & {
+  /** Bound on the deliberate walk (default 16, hard ceiling 32 — specs/09 §3). */
+  maxHops?: number
+}
+
+/** The result of a `redirects.canonical` (specs/09 §4.2). */
+export type CanonicalResult = {
+  /** The lowest UID in the `sameAs` SCC — the dedup representative. */
+  canonical: Hex
+  /** The SCC members (over the forward-reachable lens-visible subgraph). */
+  members: readonly Hex[]
+  /** `false` when the bounded exploration hit its node cap — the canonical is
+   * then best-effort over the explored subgraph. */
+  complete: boolean
+}
+
+/** The result of a `redirects.history` (specs/09 §2 breadcrumb walk). */
+export type HistoryResult = {
+  /** The latest REACHABLE version — the walk's terminal DATA. */
+  latest: Hex
+  /** The `supersededBy` hops taken, oldest→newest. */
+  chain: readonly RedirectRecord[]
+  /** `false` when a broken/revoked pointer, a loop, or the hop bound stopped
+   * the walk early — `latest` is then the last GOOD reachable version. */
+  complete: boolean
+}
+
+/** The `efs.redirects.*` write+read surface (present only on a write-capable client;
+ * the read verbs also surface on the read-only client via `RedirectsReadNs`). */
 export interface RedirectsNs {
   /** Author a REDIRECT from `from` to `to` (one signature). `kind` defaults to
    * `'sameAs'`. Does NOT supersede a prior redirect from the same source. */
   set(from: Hex, to: Hex, opts?: RedirectSetOptions): Promise<WriteReceipt>
   /** Revoke a REDIRECT by its attestation UID (via `efs.eas.revoke`, REDIRECT schema). */
   remove(redirectUID: Hex): Promise<Hex>
-  /** The active redirect FROM `from` under the lens — the literal record (any kind),
-   * or `undefined` when no lens member asserts one. Not a chain walk. */
+  /** The SELECTED active redirect FROM `from` under the lens (first-attester-wins,
+   * lowest-UID tie-break — specs/09 §5/§8), or `undefined` when no lens member
+   * asserts one. Any kind; not a chain walk. */
   get(from: Hex, opts?: RedirectGetOptions): Promise<RedirectRecord | undefined>
+  /** EVERY active lens-visible redirect out of `from` (lens order, ascending UID
+   * within each attester) — the raw discovery read. */
+  list(from: Hex, opts?: RedirectGetOptions): Promise<readonly RedirectRecord[]>
+  /** The `sameAs` dedup representative of `dataUID`'s cluster: the LOWEST UID in
+   * the lens-scoped SCC (specs/09 §4.2) — start-independent, never navigational. */
+  canonical(dataUID: Hex, opts?: RedirectGetOptions): Promise<CanonicalResult>
+  /** The deliberate `supersededBy` version-history walk from `dataUID`
+   * (specs/09 §2 breadcrumb — reads/locate NEVER auto-follow this). */
+  history(dataUID: Hex, opts?: RedirectHistoryOptions): Promise<HistoryResult>
 }
 
 /** Dependencies the `redirects` namespace binds to (built once by the client). */
 export interface RedirectsNsDeps {
   readonly getDeployment: () => EfsDeployment
-  /** The lens-scoped read context (for `get`). */
+  /** The lens-scoped read context (for the read verbs). */
   readonly readContext: () => ReadContext | Promise<ReadContext>
   readonly submitContext: () => EdgeSubmitContext
   /** Revoke a UID under a schema (wired to `efs.eas.revoke`). */
@@ -110,8 +161,30 @@ export function makeRedirectsNs(deps: RedirectsNsDeps): RedirectsNs {
     get: async (from, opts) => {
       const ctx = await deps.readContext()
       const attesters = await resolveAttesters(ctx, opts)
-      // Literal record (any kind, not chain-followed): requireFollowable stays false.
-      return readActiveRedirect(ctx, from, attesters)
+      return selectLensRedirect(ctx, from, attesters)
+    },
+
+    list: async (from, opts) => {
+      const ctx = await deps.readContext()
+      const attesters = await resolveAttesters(ctx, opts)
+      return listLensRedirects(ctx, from, attesters)
+    },
+
+    canonical: async (dataUID, opts) => {
+      const ctx = await deps.readContext()
+      const attesters = await resolveAttesters(ctx, opts)
+      return canonicalizeSameAs(ctx, dataUID, attesters)
+    },
+
+    history: async (dataUID, opts) => {
+      const ctx = await deps.readContext()
+      const attesters = await resolveAttesters(ctx, opts)
+      return walkSupersededBy(
+        ctx,
+        dataUID,
+        attesters,
+        opts?.maxHops !== undefined ? { maxHops: opts.maxHops } : undefined,
+      )
     },
   }
 }

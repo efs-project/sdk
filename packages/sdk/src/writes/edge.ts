@@ -85,14 +85,20 @@ export const EDGE_REF = {
  * map is an SDK convention that can grow additively, not an Etched surface.
  *
  *   - `sameAs`       (0) — strong dedup: a duplicate DATA → its canonical DATA. Both
- *     endpoints must be DATA (AliasResolver write-time guard). Auto-followed.
+ *     endpoints must be DATA (AliasResolver write-time guard). Canonicalization
+ *     ONLY — NOT followed (specs/09 §2; `redirects.canonical` computes the
+ *     lowest-UID-in-SCC representative).
  *   - `supersededBy` (1) — version replacement: an old DATA → its newer DATA. Both
- *     endpoints DATA. Auto-followed.
+ *     endpoints DATA. A discoverable breadcrumb — NOT auto-followed ("no silent
+ *     revision": path = newest, UID = exact; `redirects.history` walks it
+ *     deliberately, specs/09 §2).
  *   - `symlink`      (2) — path symlink: a path Anchor → an Anchor or DATA. Source
- *     must be an Anchor (write-time guard). Auto-followed (one hop per ADR-0050).
- *   - `relatedVersion` (3) — weak discovery hint; **never** auto-followed (the SKOS
+ *     must be an Anchor (write-time guard). The ONLY auto-followed kind
+ *     (specs/09 §2 / ADR-0067, James ratified 2026-06-20).
+ *   - `relatedVersion` (3) — weak discovery hint; **never** followed (the SKOS
  *     guard against "sameAs explosion"). `kind >= 3` is resolver-reserved (recorded,
- *     not type-checked on-chain).
+ *     not type-checked on-chain) and INERT to a conformant reader — never
+ *     suppression (specs/09 §7/§10 seeding ban).
  */
 export const REDIRECT_KIND = {
   sameAs: 0,
@@ -100,11 +106,6 @@ export const REDIRECT_KIND = {
   symlink: 2,
   relatedVersion: 3,
 } as const
-
-/** The lowest auto-followed `kind` boundary: `kind < REDIRECT_FOLLOW_MAX_KIND` is
- * auto-followed (0,1,2); `kind >= 3` is a discovery hint, never auto-followed
- * (ADR-0050 §"Kind following"). */
-export const REDIRECT_FOLLOW_MAX_KIND = 3
 
 /** Map the `'any' | 'addr' | 'schema'` literal union to the on-chain `uint8`
  * `targetType` (0 = ANY, 1 = ADDR, 2 = SCHEMA — IListReader/ListResolver). */

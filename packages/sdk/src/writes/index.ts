@@ -50,7 +50,6 @@ export {
   EDGE_REF,
   DEFAULT_TAG_WEIGHT,
   REDIRECT_KIND,
-  REDIRECT_FOLLOW_MAX_KIND,
   type ListCreateConfig,
 } from './edge.js'
 export {

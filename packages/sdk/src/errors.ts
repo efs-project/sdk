@@ -62,13 +62,9 @@ export type EfsErrorCode =
    * (cross-chain read of a `DataRef`, or a wallet/public-client chain mismatch on write).
    * Fail-closed: same-named contracts on another chain would silently read/write wrong. */
   | 'WrongChain'
-  /** A REDIRECT alias chain forms a cycle under the resolving lens (ADR-0050). The
-   * SDK fails closed rather than guessing a canonical node (the normative
-   * lowest-UID-in-SCC rule is not yet pinned). */
-  | 'RedirectCycle'
-  /** A REDIRECT alias chain exceeded the max-hop cap before terminating (ADR-0050
-   * `D_MAX`/`MAX_ANCHOR_DEPTH`). Fail-closed — a partial stop is attacker-influenceable. */
-  | 'RedirectHopLimit'
+  // NOTE: the pre-ratification 'RedirectCycle'/'RedirectHopLimit' codes are GONE —
+  // specs/09 (Accepted) mandates surfaced-node result STATUSES (Resolved/Dangling/
+  // CycleStopped/DepthExceeded), never throws; see reads/redirects.ts.
   // --- classifier codes (ADR-0007 §Realization) ---------------------------
   /** Wallet rejected by the user (EIP-1193 `4001`). Benign, not a failure. */
   | 'UserRejected'
@@ -356,54 +352,6 @@ export class MissingContentHash extends EfsError {
       { code: 'MissingContentHash' },
     )
     if (path !== undefined) this.path = path
-  }
-}
-
-/**
- * A REDIRECT alias chain forms a cycle under the resolving lens (e.g. A→B asserted
- * by one attester, B→A by another — ADR-0050 §"Write-time guards vs read-time
- * resolution"). The on-chain resolver only blocks a *direct* self-loop (`target ==
- * source`); multi-hop cycles are a read-time concern. The SDK fails CLOSED on a
- * detected cycle: ADR-0050's normative cycle rule (resolve to the lowest UID in the
- * strongly-connected component) is a Durable spec that is not yet pinned, so the SDK
- * does not guess a canonical node — it throws and carries the visited chain. Carries
- * the UID where the cycle was detected (`at`) and the ordered chain that led there.
- */
-export class RedirectCycle extends EfsError {
-  override name = 'RedirectCycle'
-  /** The UID re-encountered, closing the cycle. */
-  readonly at: Hex
-  /** The ordered chain of source UIDs visited before the cycle closed. */
-  readonly chain: readonly Hex[]
-  constructor(at: Hex, chain: readonly Hex[]) {
-    super(
-      `EFS redirects: the alias chain cycles back to '${at}' under the resolving lens. The SDK does not auto-resolve a cycle (ADR-0050's lowest-UID-in-SCC rule is not yet pinned) — break the cycle or read with { followRedirects: false }.`,
-      { code: 'RedirectCycle' },
-    )
-    this.at = at
-    this.chain = chain
-  }
-}
-
-/**
- * A REDIRECT alias chain exceeded the max-hop cap before terminating (ADR-0050
- * `D_MAX` ≈ 8, hard ceiling `MAX_ANCHOR_DEPTH` = 32). Fail-closed: stopping at a
- * partial chain would resolve to an entry-dependent, attacker-influenceable node.
- * Carries the cap and the chain followed up to it.
- */
-export class RedirectHopLimit extends EfsError {
-  override name = 'RedirectHopLimit'
-  /** The max-hop cap that was hit. */
-  readonly cap: number
-  /** The ordered chain of source UIDs followed up to the cap. */
-  readonly chain: readonly Hex[]
-  constructor(cap: number, chain: readonly Hex[]) {
-    super(
-      `EFS redirects: the alias chain did not terminate within ${cap} hops under the resolving lens. Raise the cap with { followRedirects: <n> } (≤ 32) or fix the chain.`,
-      { code: 'RedirectHopLimit' },
-    )
-    this.cap = cap
-    this.chain = chain
   }
 }
 

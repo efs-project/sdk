@@ -82,28 +82,26 @@ export type ReadOpts<E extends readonly ExpandToken[] = readonly ExpandToken[]> 
    * On the value-sugar path a mismatch throws (fail-closed) unless this is false. */
   verify?: boolean
   /**
-   * Follow active REDIRECT aliases (ADR-0050) at read time. The on-chain resolver
-   * does NOT follow redirects — it is write-time-guards-only, and `EFSRouter` reads
-   * only the DATA-pin slot — so following is the SDK's job, scoped to the read lens.
+   * Follow SYMLINK redirects during path resolution (the RATIFIED specs/09 /
+   * ADR-0067 semantics — `symlink` (2) is the ONLY followed kind, and it is
+   * ANCHOR-sourced: each landed path anchor's lens-visible symlink chain is
+   * followed in the same lens scope). `sameAs` and `supersededBy` are NEVER
+   * followed — an exact DATA UID never silently advances ("no silent revision":
+   * path = newest, UID = exact); use `redirects.canonical` (dedup) and
+   * `redirects.history` (version breadcrumb) for those.
    *
-   *   - `false` (DEFAULT) — do NOT follow; resolve the literal placement. (A redirect
-   *     reroutes file *identity* with a larger blast radius than a normal PIN, and
-   *     ADR-0050's normative resolution spec — lens precedence + cycle = lowest-UID-
-   *     in-SCC — is not yet pinned. Off by default keeps reads literal and avoids the
-   *     "silent teleport" footgun; opt in explicitly.)
-   *   - `true` — follow the DATA-sourced dedup/versioning kinds (`sameAs`/
-   *     `supersededBy`) from the resolved placement to their canonical terminal, up to
-   *     the default hop cap (8; ADR-0050 `D_MAX`). NOTE: `symlink` (kind=2) is
-   *     ANCHOR-sourced (a path alias), so path-level symlink resolution is NOT yet
-   *     followed — it is deferred pending the ADR-0050 resolution-spec pin.
-   *     `relatedVersion` (kind ≥ 3) is never auto-followed.
-   *   - a `number` — follow with that explicit max-hop cap (≤ 32, the hard ceiling =
-   *     `MAX_ANCHOR_DEPTH`). `0` is equivalent to `false`.
+   *   - `false` (DEFAULT) — the literal walk; symlinks are not followed. (The
+   *     conformant default before durable REDIRECT seeding is an open call —
+   *     the router will auto-follow; the SDK stays opt-in for now.)
+   *   - `true` — follow symlinks up to the ratified default `D_MAX = 16`.
+   *   - a `number` — an explicit hop cap (clamped to the hard ceiling 32).
+   *     `0` is equivalent to `false`.
    *
-   * On a cycle, throws {@link import('./errors.js').RedirectCycle}; over the cap,
-   * throws {@link import('./errors.js').RedirectHopLimit} (fail-closed — a silent
-   * stop at a partial chain would resolve to an attacker-influenceable node). The
-   * result surfaces where it landed via {@link ReadResult.via}.
+   * NON-`Resolved` walk outcomes (a dangling/mistyped target, a cycle, the cap
+   * with a healthy edge pending) surface as the 404-equivalent — `locate` →
+   * `null`, `info` → `exists:false` — per the specs/09 §8 router mapping; they
+   * NEVER throw (the pre-ratification `RedirectCycle`/`RedirectHopLimit`
+   * errors are gone). Followed hops surface on {@link ReadResult.via}.
    */
   followRedirects?: boolean | number
 }
@@ -128,8 +126,9 @@ export type RedirectRecord = {
   from: Hex
   /** The DESTINATION this redirect points TO (the decoded `target`). */
   to: Hex
-  /** The decoded `kind` discriminator (`0=sameAs`, `1=supersededBy`, `2=symlink`,
-   * `3+`=reserved/never-auto-followed). The raw `uint16`. */
+  /** The decoded `kind` discriminator (`0=sameAs` canonicalization-only,
+   * `1=supersededBy` breadcrumb-only, `2=symlink` — the ONLY followed kind,
+   * `3+`=reserved/inert; specs/09 §2). The raw `uint16`. */
   kindCode: number
   /** The named kind, when recognized (else `undefined` for a reserved `kind >= 4`). */
   kind?: RedirectKind
@@ -549,14 +548,15 @@ export type ReadResult = {
   data: DataRef
   resolvedBy: Address
   /**
-   * The REDIRECT alias chain followed to reach `data`, when `{ followRedirects }`
-   * was set AND at least one hop was taken (ADR-0050). Each entry is one hop, in
-   * traversal order (the first is the redirect on the originally-requested target,
-   * the last lands on `data`). ABSENT when no redirect was followed — so the mere
-   * presence of `via` signals "this was redirected", and `via[0].from` is the
-   * originally-requested identity (`redirectedFrom`). Never silently teleport: a UI
-   * should surface `via` (the asserting attester + the hop) per ADR-0050's
-   * client-UX invariant.
+   * The SYMLINK hops followed during path resolution (specs/09 §2 — symlink is
+   * the only followed kind, ANCHOR-sourced), when `{ followRedirects }` was set
+   * AND at least one hop was taken. Each entry is one hop in traversal order.
+   * ABSENT when nothing was followed — so the mere presence of `via` signals
+   * "this path was rerouted", and `via[0].from` is the first symlink's source
+   * anchor. Never silently teleport: a UI should surface `via` (the asserting
+   * attester + the hop) per ADR-0050's client-UX invariant. `sameAs`/
+   * `supersededBy` hops never appear here (non-followed terminals — see
+   * `redirects.canonical` / `redirects.history`).
    */
   via?: readonly RedirectRecord[]
 }

@@ -171,10 +171,13 @@ function makeCtx(opts: {
   // cursor the previous one emitted (`'0x'` ⇒ exhausted). The first read uses cursor
   // `'0x'`. Captures the args so a test can assert the resolved excludeTagDefs/weights.
   filteredPages?: readonly { items: readonly Item[]; nextCursor: Hex }[]
-  // REDIRECT (ADR-0050): `${source}|${attester}` -> the active redirect from that
-  // source under that attester. Backs getReferencingBySchemaAndAttester (returns the
-  // redirectUID) + getAttestation (returns the encoded `(target, kind)` blob).
+  // REDIRECT (specs/09): `${source}|${attester}` -> the active redirect from that
+  // source under that attester. Backs getReferencingBySchemaAndAttester(+Count)
+  // + getAttestation (returns the encoded `(target, kind)` blob).
   redirects?: Record<string, { redirectUID: Hex; target: Hex; kind: number }>
+  // Typed non-redirect nodes (symlink targets): uid -> schema, for the walker's
+  // dangling read-time typing check (getAttestation on the target).
+  nodes?: Record<string, Hex>
   calls?: { fn: string; args: readonly unknown[] }[]
 }): ReadContext {
   const {
@@ -188,6 +191,7 @@ function makeCtx(opts: {
     dirPage = { items: [], nextCursor: 0n },
     filteredPages = [],
     redirects = {},
+    nodes = {},
     calls = [],
   } = opts
   // Filtered-page walker: serve `filteredPages` in order. The mock returns page i and
@@ -229,9 +233,16 @@ function makeCtx(opts: {
           const [keyAnchor, attester] = args.args as [Hex, Address]
           return pinTargets[`${keyAnchor}|${attester.toLowerCase()}`] ?? ZERO
         }
-        case 'getReferencingBySchemaAndAttester': {
-          // (source, REDIRECT_SCHEMA, attester, …) → the active redirect UID, if any.
+        case 'getReferencingBySchemaAndAttesterCount': {
           const [source, , attester] = args.args as [Hex, Hex, Address]
+          const r = redirects[`${source}|${(attester as string).toLowerCase()}`]
+          return r ? 1n : 0n
+        }
+        case 'getReferencingBySchemaAndAttester': {
+          // (source, REDIRECT_SCHEMA, attester, start, length, …) → the physical
+          // window; this simple mock holds at most one active record per slot.
+          const [source, , attester, start] = args.args as [Hex, Hex, Address, bigint]
+          if (start > 0n) return []
           const r = redirects[`${source}|${(attester as string).toLowerCase()}`]
           return r ? [r.redirectUID] : []
         }
@@ -241,6 +252,10 @@ function makeCtx(opts: {
           const redirectData = redirectByUID.get(u)
           if (redirectData !== undefined) {
             return attestation({ uid: u, data: redirectData, schema: SCHEMAS.redirect })
+          }
+          const nodeSchema = nodes[u]
+          if (nodeSchema !== undefined) {
+            return attestation({ uid: u, schema: nodeSchema })
           }
           const data = attestations[u]
           return attestation({ uid: data !== undefined ? u : ZERO, data })
@@ -337,50 +352,96 @@ describe('locate', () => {
     expect(res?.via).toBeUndefined()
   })
 
-  it('follows a sameAs redirect to the canonical when followRedirects:true, surfacing `via`', async () => {
+  it('does NOT follow sameAs/supersededBy even with followRedirects:true — an exact DATA never silently advances (specs/09 §2)', async () => {
     const ctx = makeCtx({
       edges: README_EDGES,
       files: [fileItem({})],
+      // The placed DATA carries a sameAs to CANON — canonicalization-only, never navigation.
       redirects: {
         [`${DATA_UID}|${LENS.toLowerCase()}`]: { redirectUID: uid(0xf01), target: CANON, kind: 0 },
       },
     })
     const res = await locate(ctx, '/docs/readme.md', { lens: LENS, followRedirects: true })
-    expect(res?.data.uid).toBe(CANON) // resolved to the canonical
+    expect(res?.data.uid).toBe(DATA_UID) // the literal placement — "no silent revision"
+    expect(res?.via).toBeUndefined()
+  })
+
+  it('follows a SYMLINK on the file anchor to a DATA (specs/09 vector 1)', async () => {
+    const ctx = makeCtx({
+      edges: README_EDGES,
+      files: [fileItem({})],
+      redirects: {
+        // FILE_ANCHOR symlinks to CANON (a DATA) — the resolved file IS CANON.
+        [`${FILE_ANCHOR}|${LENS.toLowerCase()}`]: {
+          redirectUID: uid(0xf01),
+          target: CANON,
+          kind: 2,
+        },
+      },
+      nodes: { [CANON]: SCHEMAS.data },
+    })
+    const res = await locate(ctx, '/docs/readme.md', { lens: LENS, followRedirects: true })
+    expect(res?.data.uid).toBe(CANON)
+    expect(res?.resolvedBy).toBe(LENS) // the symlink's attester vouches for the target
     expect(res?.via).toHaveLength(1)
-    expect(res?.via?.[0]?.from).toBe(DATA_UID) // redirectedFrom = the requested identity
-    expect(res?.via?.[0]?.to).toBe(CANON)
-    expect(res?.via?.[0]?.kind).toBe('sameAs')
+    expect(res?.via?.[0]?.kind).toBe('symlink')
   })
 
-  it('follows a multi-hop chain DATA→CANON→FINAL', async () => {
-    const FINAL = uid(0xf1aa1) as DataUID
+  it('follows a SYMLINK to another ANCHOR and reads ITS placement (specs/09 vector 2 shape)', async () => {
+    const LINKED = uid(0x77)
     const ctx = makeCtx({
       edges: README_EDGES,
-      files: [fileItem({})],
+      files: [fileItem({})], // getFilesAtPath serves the placement at the TARGET anchor
       redirects: {
-        [`${DATA_UID}|${LENS.toLowerCase()}`]: { redirectUID: uid(0xf01), target: CANON, kind: 1 },
-        [`${CANON}|${LENS.toLowerCase()}`]: { redirectUID: uid(0xf02), target: FINAL, kind: 1 },
+        [`${FILE_ANCHOR}|${LENS.toLowerCase()}`]: {
+          redirectUID: uid(0xf01),
+          target: LINKED,
+          kind: 2,
+        },
       },
+      nodes: { [LINKED]: SCHEMAS.anchor },
     })
     const res = await locate(ctx, '/docs/readme.md', { lens: LENS, followRedirects: true })
-    expect(res?.data.uid).toBe(FINAL)
-    expect(res?.via?.map((v) => v.to)).toEqual([CANON, FINAL])
+    expect(res?.data.uid).toBe(DATA_UID) // the placement under the linked anchor
+    expect(res?.via).toHaveLength(1)
   })
 
-  it('throws RedirectHopLimit when followRedirects:1 caps a 2-hop chain', async () => {
-    const FINAL = uid(0xf1aa1) as DataUID
+  it('a non-Resolved walk (dangling symlink target) is the 404-equivalent null — never a throw', async () => {
     const ctx = makeCtx({
       edges: README_EDGES,
       files: [fileItem({})],
       redirects: {
-        [`${DATA_UID}|${LENS.toLowerCase()}`]: { redirectUID: uid(0xf01), target: CANON, kind: 0 },
-        [`${CANON}|${LENS.toLowerCase()}`]: { redirectUID: uid(0xf02), target: FINAL, kind: 0 },
+        // Symlink to a target that does not exist ⇒ Dangling ⇒ null.
+        [`${FILE_ANCHOR}|${LENS.toLowerCase()}`]: {
+          redirectUID: uid(0xf01),
+          target: uid(0xdead),
+          kind: 2,
+        },
       },
     })
-    await expect(
-      locate(ctx, '/docs/readme.md', { lens: LENS, followRedirects: 1 }),
-    ).rejects.toMatchObject({ code: 'RedirectHopLimit' })
+    expect(await locate(ctx, '/docs/readme.md', { lens: LENS, followRedirects: true })).toBeNull()
+  })
+
+  it('a symlink CYCLE is the 404-equivalent null (CycleStopped), never a throw', async () => {
+    const OTHER_ANCHOR = uid(0x78)
+    const ctx = makeCtx({
+      edges: README_EDGES,
+      files: [fileItem({})],
+      redirects: {
+        [`${FILE_ANCHOR}|${LENS.toLowerCase()}`]: {
+          redirectUID: uid(0xf01),
+          target: OTHER_ANCHOR,
+          kind: 2,
+        },
+        [`${OTHER_ANCHOR}|${LENS.toLowerCase()}`]: {
+          redirectUID: uid(0xf02),
+          target: FILE_ANCHOR,
+          kind: 2,
+        },
+      },
+      nodes: { [OTHER_ANCHOR]: SCHEMAS.anchor, [FILE_ANCHOR]: SCHEMAS.anchor },
+    })
+    expect(await locate(ctx, '/docs/readme.md', { lens: LENS, followRedirects: true })).toBeNull()
   })
 
   it('returns null when no attester in the lens placed data', async () => {
