@@ -76,6 +76,7 @@
 
 import type { Address, Hex } from 'viem'
 import type { EfsSchemaUIDs } from '../chain/deployments.js'
+import type { ContentHash } from '../content/hash.js'
 import { SchemaEncoder } from '../eas/schema-encoder.js'
 import { EFS_SCHEMA_FIELDS } from '../eas/schemas.js'
 
@@ -189,11 +190,14 @@ export interface FileWriteGraphInput {
   readonly mirrors: readonly { uri: string; transportDefinition: Hex }[]
   /** Optional MIME content type; when present, emits the `contentType` reserved triplet. */
   readonly contentType?: string
-  /** Bare SHA-256 content digest (ADR-0006): lowercase 64-hex with NO `0x`
-   * prefix (byte-identical to `sha256sum`). Emitted verbatim as the `contentHash`
-   * reserved triplet's PROPERTY `string value`. NOT `0x`-prefixed — the read path
-   * validates the canonical bare form and would otherwise report `malformed-claim`. */
-  readonly contentHash: string
+  /** CANONICAL `contentHash` string (specs/10 §2.3, SDK ADR-0016): the
+   * multibase-base16 multihash form `f1220<64 lowercase hex>` (sha2-256).
+   * Emitted verbatim as the `contentHash` reserved triplet's PROPERTY `string
+   * value`. Typed as the `ContentHash` brand so a bare digest or `0x`-prefixed
+   * value can never re-enter this NON-REVOCABLE persistence path — the read
+   * path would report it `malformed-claim`, and the wrong string would pollute
+   * the permanent value-interning index (specs/10 §2.2) forever. */
+  readonly contentHash: ContentHash
   /** File byte length, emitted as the `size` reserved triplet's PROPERTY value. */
   readonly size: bigint
   /** The frozen schema UID set for the target deployment. */
@@ -703,8 +707,8 @@ function buildVisibilityTags(input: FileWriteGraphInput, layer: number): Planned
 /**
  * The reserved-key entries to emit, in canonical order (contentType, contentHash,
  * size), skipping `contentType` when no MIME type is supplied. `contentHash` is
- * the bare SHA-256 digest (ADR-0006, no `0x` prefix); `size` is rendered as a
- * decimal string for the PROPERTY value.
+ * the canonical multibase-multihash string (`f1220…`, specs/10 §2.3 / SDK
+ * ADR-0016); `size` is rendered as a decimal string for the PROPERTY value.
  */
 function reservedEntries(
   input: FileWriteGraphInput,

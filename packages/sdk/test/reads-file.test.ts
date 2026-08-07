@@ -544,7 +544,7 @@ describe('exists', () => {
 
 describe('read + read(ref)', () => {
   const BYTES = new TextEncoder().encode('# Hello EFS\n')
-  const GOOD_HASH = hashContent(BYTES) // 64-hex bare sha256
+  const GOOD_HASH = hashContent(BYTES) // canonical f1220… multihash (specs/10)
   const dataUri = `data:text/markdown;base64,${Buffer.from(BYTES).toString('base64')}`
 
   function ctxWithMirror(propHash: string) {
@@ -569,10 +569,38 @@ describe('read + read(ref)', () => {
   })
 
   it('surfaces a hash MISMATCH as verification status, not a throw', async () => {
-    const wrong = 'a'.repeat(64)
+    const wrong = `f1220${'a'.repeat(64)}` // canonical FORM, wrong digest → mismatch
     const file = await read(ctxWithMirror(wrong), '/docs/readme.md', { lens: LENS })
     expect(file.verification).toBe('mismatch')
     expect(file.bytes.byteLength).toBeGreaterThan(0)
+  })
+
+  it('verifies a b/base32 on-chain claim of the same digest (digest-level, not string-level)', async () => {
+    // specs/10 §2.2: readers accept b/base32; §6: comparison is at digest level.
+    const b32 = (bytes: Uint8Array): string => {
+      const alpha = 'abcdefghijklmnopqrstuvwxyz234567'
+      let bits = 0
+      let value = 0
+      let out = 'b'
+      for (const byte of bytes) {
+        value = (value << 8) | byte
+        bits += 8
+        while (bits >= 5) {
+          bits -= 5
+          out += alpha[(value >> bits) & 31]
+        }
+      }
+      if (bits > 0) out += alpha[(value << (5 - bits)) & 31]
+      return out
+    }
+    const digest = (GOOD_HASH as string).slice(5) // strip f1220
+    const multihash = Uint8Array.from([
+      0x12,
+      0x20,
+      ...Array.from({ length: 32 }, (_, i) => Number.parseInt(digest.slice(i * 2, i * 2 + 2), 16)),
+    ])
+    const file = await read(ctxWithMirror(b32(multihash)), '/docs/readme.md', { lens: LENS })
+    expect(file.verification).toBe('matches-author')
   })
 
   it('reports no-claim when verify:false (no contentHash lookup)', async () => {
@@ -787,7 +815,7 @@ describe('read + read(ref)', () => {
   })
 
   it('readText THROWS ContentHashMismatch on a hash mismatch (fail-closed)', async () => {
-    const wrong = 'a'.repeat(64)
+    const wrong = `f1220${'a'.repeat(64)}` // canonical FORM, wrong digest → mismatch
     await expect(
       readText(ctxWithMirror(wrong), '/docs/readme.md', { lens: LENS }),
     ).rejects.toBeInstanceOf(ContentHashMismatch)
@@ -801,7 +829,7 @@ describe('read + read(ref)', () => {
   })
 
   it('readText with verify:false returns mismatched bytes WITHOUT throwing (opt-out)', async () => {
-    const wrong = 'a'.repeat(64)
+    const wrong = `f1220${'a'.repeat(64)}` // canonical FORM, wrong digest → mismatch
     const text = await readText(ctxWithMirror(wrong), '/docs/readme.md', {
       lens: LENS,
       verify: false,

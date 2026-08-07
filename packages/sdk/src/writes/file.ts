@@ -408,11 +408,11 @@ export async function writeFileTier1(
     content: { kind: 'bytes', bytes: content },
     mirrors,
     ...(opts?.contentType !== undefined ? { contentType: opts.contentType } : {}),
-    // ADR-0006: the `contentHash` PROPERTY value is the BARE SHA-256 digest
-    // (lowercase 64-hex, NO `0x` prefix) — byte-identical to `sha256sum`. The read
-    // path (`verifyContent` / `statusFor`) validates exactly this canonical form,
-    // so prefixing `0x` here would store a 66-char value that reads back as
-    // `malformed-claim`. `hashContent` already returns the bare digest.
+    // specs/10 §2.3 (SDK ADR-0016): the `contentHash` PROPERTY value is the
+    // CANONICAL multibase-multihash string `f1220<64 lowercase hex>` (sha2-256).
+    // The read path decodes the accepted forms (f/base16, b/base32) and compares
+    // at digest level; a bare digest or `0x`-prefixed value would read back as
+    // `malformed-claim`. `hashContent` already returns the canonical form.
     contentHash,
     size,
     schemas: deployment.schemas,

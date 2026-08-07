@@ -7,7 +7,9 @@
  *
  * Security doctrine (future-proofing.md §2/§4):
  *   - Verify before trust: hash the full bytes against `contentHash`; a CID or a
- *     gateway's word is never trusted (CID is not sha256, ADR-0006).
+ *     gateway's word is never trusted. (A raw CIDv1 shares the canonical sha2-256
+ *     digest — specs/10 §4 — but dag-pb/chunked CIDs do not; the CID stays a
+ *     locator, never a verification input, in this engine.)
  *   - nosniff: NEVER decide handling from the response `Content-Type`. We return
  *     the declared type as informational only and never execute fetched bytes.
  *   - Hard size cap: stream and abort past the cap to defend against zip-bombs
@@ -18,7 +20,7 @@
  *   - AbortSignal: the caller can cancel the whole operation.
  */
 
-import { type ContentHash, type VerificationStatus, hashContent } from '../content/hash.js'
+import { type ContentHash, type VerificationStatus, verifyContent } from '../content/hash.js'
 import type { TransportName } from '../types.js'
 import { type SsrfGuardOptions, checkSsrf } from './ssrf.js'
 import {
@@ -108,20 +110,13 @@ export class AllMirrorsFailedError extends Error {
   }
 }
 
-/** A canonical bare SHA-256: lowercase 64-hex (ADR-0006). An uppercase or other
- * non-canonical claim is NOT well-formed — it's a malformed claim, not a match. */
-function isWellFormedHash(s: string): boolean {
-  return /^[0-9a-f]{64}$/.test(s)
-}
-
-/** Compute the trust-relative status without re-importing verifyContent's
- * branching (we already have the bytes hashed once on the success path). */
+/** Compute the trust-relative status of the bytes against the claim. ONE
+ * decode/verify implementation lives in the contentHash codec (`verifyContent`,
+ * specs/10 §6) — this engine deliberately does not re-implement claim parsing,
+ * so the accepted-form rules (f/base16, b/base32, registered codes only,
+ * digest-level compare) cannot drift between the read path and the engine. */
 function statusFor(bytes: Uint8Array, expectedHash: string | undefined): VerificationStatus {
-  if (expectedHash === undefined) return 'no-claim'
-  // Validate the ORIGINAL claim (no lowercasing) — a non-canonical on-chain hash
-  // is malformed, not a silent match. hashContent returns canonical lowercase.
-  if (!isWellFormedHash(expectedHash)) return 'malformed-claim'
-  return (hashContent(bytes) as string) === expectedHash ? 'matches-author' : 'mismatch'
+  return verifyContent(bytes, expectedHash)
 }
 
 /**

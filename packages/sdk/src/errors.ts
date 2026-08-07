@@ -327,8 +327,8 @@ export class MalformedClaim extends EfsError {
   constructor(path?: string) {
     super(
       path !== undefined
-        ? `EFS read: the contentHash claim for '${path}' is malformed (not a bare SHA-256). The bytes cannot be verified.`
-        : 'EFS read: the contentHash claim is malformed (not a bare SHA-256). The bytes cannot be verified.',
+        ? `EFS read: the contentHash claim for '${path}' is malformed (not a well-formed multibase-multihash contentHash, specs/10). The bytes cannot be verified.`
+        : 'EFS read: the contentHash claim is malformed (not a well-formed multibase-multihash contentHash, specs/10). The bytes cannot be verified.',
       { code: 'MalformedClaim' },
     )
     if (path !== undefined) this.path = path

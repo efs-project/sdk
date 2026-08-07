@@ -9,7 +9,8 @@
  *     handled in `fetch.ts` (the injected `web3Reader`), not here; this layer keeps
  *     the `httpUrls()` NotImplemented seam as the fallback when no reader is wired.
  *     `magnet://` parse-only (no HTTP resolution).
- *   - CID is a *locator only* — never trusted as `sha256(bytes)` (ADR-0006).
+ *   - CID is a *locator only* — never a verification input (a raw CIDv1 shares
+ *     the canonical sha2-256 digest, specs/10 §4, but dag-pb/chunked CIDs do not).
  *     We always re-verify fetched bytes against the attested `contentHash`.
  *   - Multi-gateway fallback: a transport can expand to several candidate URLs;
  *     the fetch engine tries them in order (public gateways die / rate-limit /

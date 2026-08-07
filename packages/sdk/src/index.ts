@@ -1166,7 +1166,11 @@ export {
   hashContent,
   verifyContent,
   asContentHash,
+  decodeContentHash,
+  CONTENT_HASH_CODES,
   type ContentHash,
+  type ContentHashAlgorithm,
+  type DecodedContentHash,
   type VerificationStatus,
 } from './content/hash.js'
 // Bigint-safe JSON serialization for EFS result DTOs (`efs.toJSON`) — review P3 DX.

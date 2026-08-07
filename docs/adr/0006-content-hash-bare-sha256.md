@@ -1,6 +1,6 @@
 # ADR-0006: `contentHash` is a bare SHA-256 digest
 
-**Status:** Accepted
+**Status:** Superseded by [ADR-0016](./0016-content-hash-multibase-multihash.md)
 **Date:** 2026-06-10
 **Related:** docs/specs/content-hash.md, contracts ADR-0049 (DATA empty / hash-as-data), planning/Designs/sdk-architecture.md
 

@@ -1,6 +1,7 @@
 import type { Hex } from 'viem'
 import { describe, expect, it } from 'vitest'
 import type { EfsSchemaUIDs } from '../src/chain/deployments.js'
+import { hashContent } from '../src/content/hash.js'
 import { SchemaEncoder } from '../src/eas/schema-encoder.js'
 import { EFS_SCHEMA_FIELDS } from '../src/eas/schemas.js'
 import {
@@ -28,7 +29,9 @@ const SCHEMAS: EfsSchemaUIDs = {
 
 const PARENT = uid(0x100)
 const TRANSPORT = uid(0x200)
-const CONTENT_HASH = uid(0x300) // a 0x-hex digest stand-in
+// The CANONICAL specs/10 §2.3 form (f1220 + 64 hex) — the graph emits it verbatim
+// as the non-revocable PROPERTY value, so the fixture pins the exact wire shape.
+const CONTENT_HASH = hashContent(new Uint8Array([1, 2, 3]))
 const EXISTING_DATA = uid(0x400)
 
 const baseInput = {
@@ -192,6 +195,10 @@ describe('MIRROR node', () => {
 
 describe('reserved-key triplets (contentType / contentHash / size)', () => {
   const atts = buildFileWriteGraph(bytesInput).attestations
+
+  it('persists the contentHash PROPERTY as exactly the canonical f1220… string (specs/10 §2.2 non-revocable-value guard)', () => {
+    expect(CONTENT_HASH).toMatch(/^f1220[0-9a-f]{64}$/)
+  })
 
   const cases: { key: 'contentType' | 'contentHash' | 'size'; value: string }[] = [
     { key: 'contentType', value: 'text/markdown' },

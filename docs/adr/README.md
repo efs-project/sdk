@@ -51,7 +51,7 @@ Compact, scannable — one screen per ADR. Copy `_template.md`. The next number 
 - [ADR-0003 — Ship the on-chain SDK as compile-in Solidity source](./0003-onchain-sdk-as-compile-in-source.md)
 - [ADR-0004 — Publish via npm Trusted Publishing (OIDC), not a stored token](./0004-publish-via-oidc-trusted-publishing.md)
 - [ADR-0005 — Per-chain deployments registry; the SDK is a client, not a deployer](./0005-deployments-registry-not-a-deployer.md)
-- [ADR-0006 — `contentHash` is a bare SHA-256 digest](./0006-content-hash-bare-sha256.md)
+- [ADR-0006 — `contentHash` is a bare SHA-256 digest](./0006-content-hash-bare-sha256.md) _(Superseded by ADR-0016)_
 - [ADR-0007 — Error model: viem-`BaseError`-grade typed tree](./0007-error-model.md)
 - [ADR-0008 — Public API shape, instantiation & semver policy](./0008-public-api-and-semver.md)
 - [ADR-0009 — Library-agnostic seam: viem core, ethers as an optional adapter](./0009-library-agnostic-seam.md)
@@ -61,3 +61,4 @@ Compact, scannable — one screen per ADR. Copy `_template.md`. The next number 
 - [ADR-0013 — Re-vendor the ERC-5219 `EFSBytesStore`; keep the direct chunk reader](./0013-onchain-store-erc5219-revendor-and-direct-reader.md)
 - [ADR-0014 — Pluggable read source; the chain bound as data](./0014-pluggable-read-source-and-chain-as-data.md)
 - [ADR-0015 — Read-trust provenance on read results](./0015-read-trust-provenance.md)
+- [ADR-0016 — `contentHash` is a multibase-multihash string (specs/10 conformance)](./0016-content-hash-multibase-multihash.md)

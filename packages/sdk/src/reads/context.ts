@@ -27,7 +27,7 @@
  * reads the active slot; `getDataMirrors`/`getFilesAtPath` pass `showRevoked=false`).
  * We never set `showRevoked=true` on a read path.
  *
- * ## contentHash verification is trust-relative (ADR-0006, review A2)
+ * ## contentHash verification is trust-relative (specs/10 §6 / SDK ADR-0016, review A2)
  *
  * The `contentHash` we verify fetched bytes against is the one attested *by the
  * winning lens attester* (`resolvedBy`) — read via the reserved-key PROPERTY,
