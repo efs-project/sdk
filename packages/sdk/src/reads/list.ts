@@ -68,6 +68,7 @@
 import type { Address, Hex } from 'viem'
 import { fileViewAbi } from '../chain/abi/fileView.js'
 import { CursorInvalid } from '../errors.js'
+import { decodeName } from '../names/segment.js'
 import type { AnchorUID, DataUID, DirEntry, EfsList, ListOptions, Page } from '../types.js'
 import {
   type FileSystemItem,
@@ -135,12 +136,23 @@ async function resolveExcludeDefs(
   )
 }
 
-/** Map one on-chain `FileSystemItem` to a public {@link DirEntry}. */
+/** Map one on-chain `FileSystemItem` to a public {@link DirEntry}. The stored
+ * `name` is the CANONICAL form (specs/02); the public entry carries the DECODED
+ * human name so `fs.read(dir + '/' + entry.name)` round-trips. Fail-soft on a
+ * decode failure (on-chain names are resolver-validated, so this only fires for
+ * foreign/mocked data): surface the stored form verbatim rather than throwing
+ * mid-listing. */
 function toDirEntry(item: FileSystemItem): DirEntry {
-  if (item.isFolder) {
-    return { name: item.name, kind: 'dir', anchorUID: item.uid as AnchorUID }
+  let name = item.name
+  try {
+    name = decodeName(item.name)
+  } catch {
+    // non-canonical foreign data — keep the on-chain form
   }
-  return { name: item.name, kind: 'file', dataUID: item.uid as DataUID }
+  if (item.isFolder) {
+    return { name, kind: 'dir', anchorUID: item.uid as AnchorUID }
+  }
+  return { name, kind: 'file', dataUID: item.uid as DataUID }
 }
 
 /** Parse an opaque string cursor into the on-chain `uint256` start index

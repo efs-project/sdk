@@ -72,7 +72,9 @@ export type ReadOpts<E extends readonly ExpandToken[] = readonly ExpandToken[]> 
    * omitted (defaults to the client's `defaultLens`, then the connected wallet). */
   lens?: Lens | Address
   /** Projection — which properties to populate. Reserved keys → typed slots;
-   * custom keys → the `properties` bag. Reserved meaning wins on collision. */
+   * custom keys → the `properties` bag. Reserved meaning wins on collision.
+   * Custom keys are HUMAN strings (encoded to canonical anchor names per
+   * specs/02 at lookup, matching what `props.set` wrote). */
   fields?: string[]
   /** Depth — opt into nested raw records. Narrows the return type. */
   expand?: E
@@ -261,7 +263,10 @@ export type EfsList<T> = AsyncIterable<T> & {
  * the entry's name and whether it's a file or a directory, which a bare
  * `DataRef` can't carry. */
 export type DirEntry = {
-  /** The entry's name within the listed directory (the last path segment). */
+  /** The entry's DECODED human name within the listed directory (the on-chain
+   * canonical specs/02 form decoded back — so `fs.read(dir + '/' + entry.name)`
+   * round-trips). A non-canonical foreign name is surfaced verbatim (fail-soft).
+   * The canonical on-chain form is recomputable via `encodeName(entry.name)`. */
   name: string
   /** Whether this entry is a file or a subdirectory. */
   kind: 'file' | 'dir'

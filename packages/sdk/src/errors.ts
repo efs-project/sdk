@@ -23,6 +23,10 @@ export type EfsErrorCode =
   | 'PartialBatchFailure'
   /** A path's parent folder does not exist on-chain (write requires it to). */
   | 'ParentNotFound'
+  /** A path segment / property key is not a valid anchor name (specs/02 canonical
+   * encoding): empty, `.`/`..`, or — for a claimed-canonical string — a bare
+   * reserved byte, malformed/lowercase/over-escape. Thrown by the segment codec. */
+  | 'InvalidAnchorName'
   /** No file is placed at a path under the read's lens (a byte read needs one). */
   | 'FileNotFound'
   /** No LIST attestation exists at the given UID (or it is the wrong schema). A

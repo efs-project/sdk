@@ -25,6 +25,7 @@ import type { EfsDeployment } from '../chain/deployments.js'
 import { hashContent } from '../content/hash.js'
 import { EfsError, WalletRequired } from '../errors.js'
 import { TRANSPORT } from '../mirror/transport.js'
+import { type CanonicalName, decodeName } from '../names/segment.js'
 import {
   ParentNotFoundError,
   type ResolvePublicClient,
@@ -320,7 +321,7 @@ export async function writeFileTier1(
   // layered submitter re-assert again before each of their own txs.)
   await ctx.assertChain?.()
 
-  // 1. Content identity (ADR-0006: bare SHA-256) + size.
+  // 1. Content identity (specs/10: canonical f1220… multihash) + size.
   const contentHash = hashContent(content)
   const size = BigInt(content.byteLength)
 
@@ -338,7 +339,7 @@ export async function writeFileTier1(
   // The anchor the file-ANCHOR hangs off of: the resolved parent (no gap) or, when
   // creating ancestors, the deepest existing anchor the created chain extends from.
   let parentAnchorUID: Hex
-  let missingParents: readonly string[] = []
+  let missingParents: readonly CanonicalName[] = []
   if ('parentAnchorUID' in parentPlan) {
     parentAnchorUID = parentPlan.parentAnchorUID
   } else if (opts?.createParents !== false) {
@@ -347,13 +348,19 @@ export async function writeFileTier1(
   } else {
     // Reconstruct the resolved/missing split for a precise error: the missing
     // suffix is `parentPlan.missingSegments` (shallowest-first); everything before
-    // it resolved. The first missing segment is the one that broke the walk.
+    // it resolved. The first missing segment is the one that broke the walk. The
+    // error reports HUMAN segments (what the caller typed), so decode the
+    // canonical missing segment back.
     const parentSegments = splitPath(path).slice(0, -1)
     const resolvedSegments = parentSegments.slice(
       0,
       parentSegments.length - parentPlan.missingSegments.length,
     )
-    throw new ParentNotFoundError(path, resolvedSegments, parentPlan.missingSegments[0] as string)
+    throw new ParentNotFoundError(
+      path,
+      resolvedSegments,
+      decodeName(parentPlan.missingSegments[0] as CanonicalName),
+    )
   }
 
   // 2b. OVERWRITE detection (Bug-1 fix). EFS file-ANCHORs are keyed by

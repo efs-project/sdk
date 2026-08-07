@@ -272,3 +272,57 @@ describe('planExistingAncestorVisibilityTags (ancestor walk + short-circuit)', (
     expect(out).toEqual([C])
   })
 })
+
+// ── Canonical segment encoding at the resolution choke point (specs/02) ─────────
+
+describe('canonical segment encoding (specs/02)', () => {
+  it('resolvePathToAnchor issues CANONICAL segment args for reserved-byte names', async () => {
+    const qa = uid(0x20)
+    const file = uid(0x21)
+    const { client, calls } = makeResolver({
+      [`${ROOT}|Q%26A%3A%20Episode%205`]: qa,
+      [`${qa}|file.txt`]: file,
+    })
+    const anchor = await resolvePathToAnchor(client, INDEXER, '/Q&A: Episode 5/file.txt')
+    expect(anchor).toBe(file)
+    expect(calls.map((c) => c.name)).toEqual(['Q%26A%3A%20Episode%205', 'file.txt'])
+  })
+
+  it('composed and decomposed é resolve the SAME slot (NFC before lookup)', async () => {
+    const cafe = uid(0x22)
+    const { client } = makeResolver({ [`${ROOT}|café`]: cafe })
+    expect(await resolvePathToAnchor(client, INDEXER, '/café')).toBe(cafe) // composed
+    expect(await resolvePathToAnchor(client, INDEXER, '/café')).toBe(cafe) // decomposed
+  })
+
+  it('ParentNotFoundError carries the HUMAN segment, not the canonical form', async () => {
+    const { client } = makeResolver({})
+    const err = await resolvePathToAnchor(client, INDEXER, '/My Docs/x').catch((e) => e)
+    expect(err).toBeInstanceOf(ParentNotFoundError)
+    expect((err as ParentNotFoundError).missingSegment).toBe('My Docs')
+  })
+
+  it('resolveOrPlanParents returns CANONICAL fileName and missingSegments', async () => {
+    const { client } = makeResolver({})
+    const plan = await resolveOrPlanParents(client, INDEXER, '/My Docs/Ep 5.txt')
+    expect(plan.fileName).toBe('Ep%205.txt')
+    expect(plan.missingSegments).toEqual(['My%20Docs'])
+  })
+
+  it('an unencodable segment throws BEFORE any chain read (fail-fast)', async () => {
+    const { client, calls } = makeResolver({})
+    await expect(resolvePathToAnchor(client, INDEXER, '/docs/../etc')).rejects.toThrow(
+      /not a valid anchor name/,
+    )
+    expect(calls).toHaveLength(0)
+  })
+
+  it('a pre-encoded path segment is treated as HUMAN and double-encodes (documented boundary)', async () => {
+    // A caller holding the canonical form must decode it first (or use the codec
+    // exports); passing it as a path resolves a DIFFERENT slot by design — no sniffing.
+    const wrong = uid(0x23)
+    const { client, calls } = makeResolver({ [`${ROOT}|Q%2526A`]: wrong })
+    expect(await resolvePathToAnchor(client, INDEXER, '/Q%26A')).toBe(wrong)
+    expect(calls[0]?.name).toBe('Q%2526A')
+  })
+})

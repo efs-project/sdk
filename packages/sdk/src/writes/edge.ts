@@ -45,6 +45,7 @@ import type { EfsSchemaUIDs } from '../chain/deployments.js'
 import { SchemaEncoder } from '../eas/schema-encoder.js'
 import { EFS_SCHEMA_FIELDS } from '../eas/schemas.js'
 import { EfsError, InvalidListConfig } from '../errors.js'
+import type { CanonicalName } from '../names/segment.js'
 import type { ListTargetType } from '../types.js'
 import { type FileWriteGraph, type PlannedAttestation, ZERO_ADDRESS, ZERO_UID } from './graph.js'
 
@@ -172,7 +173,9 @@ export function buildTagPlan(
  *
  * @param schemas The frozen schema-UID set (anchor / property / pin UIDs).
  * @param dataUID The DATA (or any anchorable target) the property is bound under.
- * @param key     The property key (the key-ANCHOR `name`).
+ * @param key     The property key (the key-ANCHOR `name`) — the CANONICAL specs/02
+ *   encoding; encode a human key with `encodeName()` at the public boundary (the
+ *   brand keeps a raw key with a space/reserved byte from reverting the L1 multiAttest).
  * @param value   The property value (the PROPERTY `string value`).
  * @param existingKeyAnchorUID The pre-existing key-anchor UID to REUSE (Bug-2), or
  *   `undefined`/omitted to mint a fresh key-ANCHOR.
@@ -180,7 +183,7 @@ export function buildTagPlan(
 export function buildPropertyPlan(
   schemas: EfsSchemaUIDs,
   dataUID: Hex,
-  key: string,
+  key: CanonicalName,
   value: string,
   existingKeyAnchorUID?: Hex,
 ): FileWriteGraph {

@@ -1173,6 +1173,18 @@ export {
   type DecodedContentHash,
   type VerificationStatus,
 } from './content/hash.js'
+// The canonical anchor-segment codec (specs/02): fs.* paths and props keys are
+// HUMAN; these are the explicit encode/decode boundary for callers holding
+// canonical (on-chain / web3://) forms.
+export {
+  encodeName,
+  decodeName,
+  isCanonicalName,
+  asCanonicalName,
+  InvalidAnchorNameError,
+  type CanonicalName,
+  type InvalidNameReason,
+} from './names/segment.js'
 // Bigint-safe JSON serialization for EFS result DTOs (`efs.toJSON`) — review P3 DX.
 export { toJSON, jsonReplacer } from './json.js'
 // Off-chain fetch/verify/mirror engine (freeze-independent; see future-proofing.md §2).

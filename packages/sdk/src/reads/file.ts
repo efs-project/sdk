@@ -39,6 +39,7 @@ import { fileViewAbi } from '../chain/abi/fileView.js'
 import { indexerAbi } from '../chain/abi/indexer.js'
 import type { VerificationStatus } from '../content/hash.js'
 import { easAbi } from '../eas/abi.js'
+import { encodeName } from '../names/segment.js'
 import type {
   DataRef,
   DataUID,
@@ -237,7 +238,10 @@ export async function readReservedProperty(
     address: contracts.indexer,
     abi: indexerAbi,
     functionName: 'resolveAnchor',
-    args: [dataUID, key, schemas.property],
+    // Key-anchor names are canonical (specs/02). Reserved keys encode to
+    // themselves; callers that smuggle CUSTOM keys through this reader
+    // (props.get) get them encoded here — the key-lookup choke point.
+    args: [dataUID, encodeName(key), schemas.property],
   })
   if (keyAnchor === ZERO_UID) return {}
 
@@ -384,7 +388,10 @@ async function readCustomProperty(
     address: contracts.indexer,
     abi: indexerAbi,
     functionName: 'resolveAnchor',
-    args: [dataUID, key, schemas.property],
+    // Custom keys are HUMAN at the public surface — encode to the canonical
+    // anchor name (specs/02) so `info(path, {fields:['my key']})` finds the
+    // slot `props.set('my key')` wrote.
+    args: [dataUID, encodeName(key), schemas.property],
   })
   if (keyAnchor === ZERO_UID) return {}
   const propertyUID = await read<Hex>(ctx.publicClient, {

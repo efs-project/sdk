@@ -845,3 +845,87 @@ describe('resolveTagDefinition', () => {
     expect(paths).toEqual(['tags', 'nsfw'])
   })
 })
+
+// ── Canonical property keys (specs/02) ──────────────────────────────────────────
+
+describe('makePropsNs — canonical key encoding (specs/02)', () => {
+  const DATA = uid(0x900)
+  const HUMAN_KEY = 'my key' // contains a space → canonical 'my%20key'
+  const CANONICAL_KEY = 'my%20key'
+  const KEY_ANCHOR = uid(0x901)
+  const PROP_UID = uid(0x902)
+  const VALUE = 'v'
+
+  it('set resolves + plans under the CANONICAL key (a raw space would revert the L1 multiAttest)', async () => {
+    const { ctx, calls } = makeSubmitCtx()
+    const reads: { fn: string; args: readonly unknown[] }[] = []
+    const props = makePropsNs({
+      getDeployment: () => deployment,
+      publicClient: makeReadClient((fn, args) => {
+        reads.push({ fn, args })
+        return uid(0) // absent → full triple
+      }) as never,
+      readContext: () => ({ publicClient: makeReadClient(() => uid(0)), deployment }) as never,
+      submitContext: () => ctx,
+      attester: () => ATTESTER,
+    })
+    await props.set(DATA, HUMAN_KEY, VALUE)
+    // The update-detection read used the canonical key…
+    const anchorRead = reads.find((r) => r.fn === 'resolveAnchor')
+    expect(anchorRead?.args[1]).toBe(CANONICAL_KEY)
+    // …and the planned key-ANCHOR payload carries the canonical name.
+    const l1 = calls[0] ?? []
+    const anchorReq = l1.find((r) => r.schema === SCHEMAS.anchor)
+    expect(anchorReq?.data[0]?.data).toBe(anchorEnc.encodeData([CANONICAL_KEY, SCHEMAS.property]))
+  })
+
+  it('get(human key) reads the canonical slot set() wrote', async () => {
+    const props = makePropsNs({
+      getDeployment: () => deployment,
+      publicClient: makeReadClient(() => uid(0)) as never,
+      readContext: () =>
+        ({
+          publicClient: makeReadClient((fn, args) => {
+            if (fn === 'resolveAnchor') return args[1] === CANONICAL_KEY ? KEY_ANCHOR : uid(0)
+            if (fn === 'getActivePinTarget') return args[0] === KEY_ANCHOR ? PROP_UID : uid(0)
+            if (fn === 'getAttestation') return { data: propEnc.encodeData([VALUE]) }
+            return uid(0)
+          }),
+          deployment,
+          account: ATTESTER,
+        }) as never,
+      submitContext: () => {
+        throw new Error('unused')
+      },
+      attester: () => ATTESTER,
+    })
+    expect(await props.get(DATA, HUMAN_KEY)).toBe(VALUE)
+  })
+
+  it('list returns HUMAN keys (decodes the canonical on-chain names)', async () => {
+    // The per-key value read routes through the pinned client (same mock): give it
+    // an active binding so the entry survives the filter.
+    const withValues = makePropsNs({
+      getDeployment: () => deployment,
+      publicClient: makeReadClient((fn, args) => {
+        if (fn === 'getAnchorsBySchema') return [KEY_ANCHOR]
+        if (fn === 'getAttestation' && args[0] === KEY_ANCHOR) {
+          return { data: anchorEnc.encodeData([CANONICAL_KEY, SCHEMAS.property]) }
+        }
+        if (fn === 'resolveAnchor') return args[1] === CANONICAL_KEY ? KEY_ANCHOR : uid(0)
+        if (fn === 'getActivePinTarget') return args[0] === KEY_ANCHOR ? PROP_UID : uid(0)
+        if (fn === 'getAttestation') return { data: propEnc.encodeData([VALUE]) }
+        return uid(0)
+      }) as never,
+      readContext: () => {
+        throw new Error('unused')
+      },
+      submitContext: () => {
+        throw new Error('unused')
+      },
+      attester: () => ATTESTER,
+    })
+    const out = await withValues.list(DATA)
+    expect(out).toEqual([{ key: HUMAN_KEY, value: VALUE, propertyUID: PROP_UID }])
+  })
+})

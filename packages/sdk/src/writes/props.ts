@@ -28,6 +28,7 @@ import { easAbi } from '../eas/abi.js'
 import { SchemaEncoder } from '../eas/schema-encoder.js'
 import { EFS_SCHEMA_FIELDS } from '../eas/schemas.js'
 import { EfsError } from '../errors.js'
+import { decodeName, encodeName } from '../names/segment.js'
 import {
   type ReadContext,
   type ReadPublicClient,
@@ -105,6 +106,10 @@ export function makePropsNs(deps: PropsNsDeps): PropsNs {
   return {
     set: async (dataUID, key, value) => {
       const ctx = deps.submitContext()
+      // Public keys are HUMAN — encode to the canonical anchor name (specs/02)
+      // BEFORE the update-detection read and the plan, so a key like 'my key'
+      // resolves/mints the canonical slot instead of reverting the L1 multiAttest.
+      const canonicalKey = encodeName(key)
       // Fail closed on a wrong-chain provider BEFORE the planning read below — the
       // key-anchor lookup FEEDS the plan, so a drifted public client could resolve an
       // anchor that only exists on the wrong chain, making the plan reuse a UID absent on
@@ -123,12 +128,12 @@ export function makePropsNs(deps: PropsNsDeps): PropsNs {
         address: dep.contracts.indexer,
         abi: indexerAbi,
         functionName: 'resolveAnchor',
-        args: [dataUID, key, dep.schemas.property],
+        args: [dataUID, canonicalKey, dep.schemas.property],
       })) as Hex
       const plan = buildPropertyPlan(
         dep.schemas,
         dataUID,
-        key,
+        canonicalKey,
         value,
         existingKeyAnchorUID !== ZERO_UID ? existingKeyAnchorUID : undefined,
       )
@@ -186,6 +191,11 @@ export function makePropsNs(deps: PropsNsDeps): PropsNs {
 
       // Decode each anchor's `name` (the property key), then read its active value
       // under the lens. Fan both passes (independent reads → multicall coalescing).
+      // The on-chain name is the CANONICAL form (specs/02); `list` returns HUMAN
+      // keys — the strings `set()` was called with — for read/write parity.
+      // Fail-soft on a decode failure (on-chain names are resolver-validated, so
+      // this is belt-and-braces for foreign/mocked data): surface the on-chain
+      // form verbatim rather than throwing mid-listing.
       const names = await Promise.all(
         anchorUIDs.map(async (anchorUID) => {
           const att = await read<{ data: Hex }>(pc, {
@@ -194,7 +204,13 @@ export function makePropsNs(deps: PropsNsDeps): PropsNs {
             functionName: 'getAttestation',
             args: [anchorUID],
           })
-          return decodeAnchorName(att.data)
+          const canonical = decodeAnchorName(att.data)
+          if (canonical === undefined) return undefined
+          try {
+            return decodeName(canonical)
+          } catch {
+            return canonical // non-canonical foreign data — surface verbatim
+          }
         }),
       )
 

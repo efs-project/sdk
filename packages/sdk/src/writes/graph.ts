@@ -79,6 +79,8 @@ import type { EfsSchemaUIDs } from '../chain/deployments.js'
 import type { ContentHash } from '../content/hash.js'
 import { SchemaEncoder } from '../eas/schema-encoder.js'
 import { EFS_SCHEMA_FIELDS } from '../eas/schemas.js'
+import { EfsError } from '../errors.js'
+import { type CanonicalName, isCanonicalName } from '../names/segment.js'
 
 /** The zero address — `recipient` is 0x0 for every EFS write attestation. */
 export const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000' as const
@@ -217,8 +219,10 @@ export interface FileWriteGraphInput {
    * refs {@link parentAnchorUID} directly. Each segment becomes one non-revocable
    * ANCHOR whose `refUID` is the previous created folder (the first = the deepest
    * existing anchor = {@link parentAnchorUID}); the file-ANCHOR then refs the last.
+   * CANONICAL segments (specs/02) — they are emitted verbatim into the permanent
+   * ANCHOR payloads; the `CanonicalName` brand keeps raw human strings out.
    */
-  readonly missingParents?: readonly string[]
+  readonly missingParents?: readonly CanonicalName[]
   /**
    * Pre-EXISTING ancestor folder anchor UIDs (concrete) that the uploader has no
    * active visibility TAG on yet, so each needs one emitted in this write. This is
@@ -231,8 +235,9 @@ export interface FileWriteGraphInput {
    * omitted ⇒ every existing ancestor is already covered (steady-state zero cost).
    */
   readonly existingAncestorTagUIDs?: readonly Hex[]
-  /** The file's anchor name (canonical encoding; the file-ANCHOR's `name`). */
-  readonly fileName: string
+  /** The file's anchor name — the CANONICAL encoding (specs/02), enforced by the
+   * brand (the :230-era doc promised canonical; the compiler now holds it). */
+  readonly fileName: CanonicalName
   /**
    * An OVERWRITE's reuse of the existing file anchor (Bug-1 fix). EFS file-ANCHORs
    * are keyed by `(parent, fileName, schemas.data)` and are PERMANENT/non-revocable,
@@ -320,10 +325,25 @@ const GENERIC_FOR_SCHEMA = ZERO_UID
  * @throws never for valid input; the schema encoders throw on a malformed field
  *   value — that is a programming error, surfaced eagerly. (Reserved-key values
  *   like `contentHash` are plain `string value` PROPERTYs, so any string encodes;
- *   well-formedness of the hash is the caller's contract per ADR-0006.)
+ *   well-formedness of the hash is the caller's contract per ADR-0016.) The one
+ *   validated input is the anchor NAMES: the `CanonicalName` brand erases at
+ *   runtime, so a cheap dev-guard re-checks them — a smuggled raw segment would
+ *   otherwise mint a WRONG PERMANENT anchor slot (or revert mid-write at the
+ *   ANCHOR layer after storage deployed).
  */
 export function buildFileWriteGraph(input: FileWriteGraphInput): FileWriteGraph {
   const { schemas } = input
+
+  // Dev-guard: the brand promises canonical names, but `as CanonicalName` casts
+  // exist — validate before the names enter permanent payloads (specs/02).
+  for (const seg of [input.fileName, ...(input.missingParents ?? [])]) {
+    if (!isCanonicalName(seg)) {
+      throw new EfsError(
+        `EFS write plan: anchor name '${seg}' is not in canonical form (specs/02) — encode human segments with encodeName() before building the graph.`,
+        { code: 'InvalidAnchorName' },
+      )
+    }
+  }
 
   // ── `mkdir -p` ancestor folders ─────────────────────────────────────────────
   // When ancestor folders are missing they are created FIRST, as a chain of

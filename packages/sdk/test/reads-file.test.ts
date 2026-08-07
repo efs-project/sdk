@@ -988,6 +988,23 @@ describe('list', () => {
     expect(p.cursor).toBe('7')
   })
 
+  it('DirEntry.name is the DECODED human form of the canonical stored name (specs/02)', async () => {
+    const ctx = makeCtx({
+      edges: { [`${ROOT}|docs`]: DOCS_ANCHOR },
+      dirPage: {
+        items: [
+          fileItem({ uid: uid(0x210), name: 'Q%26A%3A%20Episode%205', isFolder: true }),
+          // Non-canonical foreign data (lowercase escape): surfaced verbatim, no throw.
+          fileItem({ uid: uid(0x211), name: 'bad%2fname', isFolder: false, hasData: true }),
+        ],
+        nextCursor: 0n,
+      },
+    })
+    const p = await list(() => ctx, '/docs', { lens: LENS }).byPage()
+    expect(p.items[0]?.name).toBe('Q&A: Episode 5') // round-trips into fs.read(dir + '/' + name)
+    expect(p.items[1]?.name).toBe('bad%2fname') // fail-soft
+  })
+
   it('async-iterates across pages until the cursor is exhausted', async () => {
     let call = 0
     const calls: { fn: string; args: readonly unknown[] }[] = []

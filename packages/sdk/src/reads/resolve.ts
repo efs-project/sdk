@@ -40,6 +40,7 @@ import type { Address, Hex } from 'viem'
 import { edgeResolverAbi } from '../chain/abi/edgeResolver.js'
 import { indexerAbi } from '../chain/abi/indexer.js'
 import { EfsError } from '../errors.js'
+import { type CanonicalName, encodeName } from '../names/segment.js'
 
 /** The empty UID (`bytes32(0)`) — the kernel's "name slot is empty" sentinel and
  * the seed type for the generic (folder) anchor flavor. */
@@ -88,11 +89,30 @@ export class ParentNotFoundError extends EfsError {
 }
 
 /**
- * Split a path into its non-empty segments, tolerant of leading/trailing/repeat
- * slashes (`/docs//api/` → `['docs', 'api']`). The empty/root path → `[]`.
+ * Split a path into its non-empty HUMAN segments, tolerant of leading/trailing/
+ * repeat slashes (`/docs//api/` → `['docs', 'api']`). The empty/root path → `[]`.
+ *
+ * Path strings are ALWAYS human (specs/02 encoding happens at the resolution
+ * choke points below, via `encodeName`) and `/` is the only separator — a human
+ * name containing a literal `/` cannot be expressed in a path string (it is
+ * reachable via the exported segment codec + the low-level builders).
  */
 export function splitPath(path: string): string[] {
   return path.split('/').filter((s) => s.length > 0)
+}
+
+/**
+ * Split a HUMAN path into its canonical on-chain segments — the ONE
+ * split-then-encode choke point the read/write pipeline shares. Encoding every
+ * segment up front (before any chain read) means an unencodable segment
+ * (`''`/`.`/`..`) fails fast, and downstream code passes only
+ * {@link CanonicalName} into kernel lookups and anchor payloads — the brand
+ * makes a double-encode or a raw-segment leak a type error.
+ *
+ * @throws {InvalidAnchorNameError} on an unencodable segment.
+ */
+export function splitPathToCanonical(path: string): CanonicalName[] {
+  return splitPath(path).map(encodeName)
 }
 
 /**
@@ -113,7 +133,8 @@ export async function resolvePathToAnchor(
   indexerAddr: Address,
   path: string,
 ): Promise<Hex> {
-  const segments = splitPath(path)
+  const segments = splitPath(path) // human — for error messages
+  const canonical = segments.map(encodeName) // encode-early: throws before any read
   const root = (await publicClient.readContract({
     address: indexerAddr,
     abi: indexerAbi,
@@ -122,18 +143,18 @@ export async function resolvePathToAnchor(
 
   let parent = root
   const resolved: string[] = []
-  for (const segment of segments) {
+  for (let i = 0; i < canonical.length; i++) {
     const child = (await publicClient.readContract({
       address: indexerAddr,
       abi: indexerAbi,
       functionName: 'resolvePath',
-      args: [parent, segment],
+      args: [parent, canonical[i] as CanonicalName],
     })) as Hex
     if (child === ZERO_UID) {
-      throw new ParentNotFoundError(path, resolved, segment)
+      throw new ParentNotFoundError(path, resolved, segments[i] as string)
     }
     parent = child
-    resolved.push(segment)
+    resolved.push(segments[i] as string)
   }
   return parent
 }
@@ -156,8 +177,9 @@ export async function resolveFilePathToAnchor(
   path: string,
   dataSchema: Hex,
 ): Promise<Hex> {
-  const segments = splitPath(path)
+  const segments = splitPath(path) // human — for error messages
   if (segments.length === 0) return ZERO_UID // the root is a folder, never a file
+  const canonical = segments.map(encodeName) // encode-early: throws before any read
 
   const root = (await publicClient.readContract({
     address: indexerAddr,
@@ -168,21 +190,21 @@ export async function resolveFilePathToAnchor(
   // Walk the parent folders generically (folders are the generic slot).
   let parent = root
   const resolved: string[] = []
-  for (const segment of segments.slice(0, -1)) {
+  for (let i = 0; i < canonical.length - 1; i++) {
     const child = (await publicClient.readContract({
       address: indexerAddr,
       abi: indexerAbi,
       functionName: 'resolvePath',
-      args: [parent, segment],
+      args: [parent, canonical[i] as CanonicalName],
     })) as Hex
-    if (child === ZERO_UID) throw new ParentNotFoundError(path, resolved, segment)
+    if (child === ZERO_UID) throw new ParentNotFoundError(path, resolved, segments[i] as string)
     parent = child
-    resolved.push(segment)
+    resolved.push(segments[i] as string)
   }
 
   // The file leaf: the DATA-typed slot first (where the SDK writes file anchors),
   // then the generic slot as a fallback (legacy file anchors / router parity).
-  const leaf = segments[segments.length - 1] as string
+  const leaf = canonical[canonical.length - 1] as CanonicalName
   const dataAnchor = (await publicClient.readContract({
     address: indexerAddr,
     abi: indexerAbi,
@@ -228,7 +250,9 @@ export type ParentPlan =
   | {
       /** Every ancestor folder exists; this is the file's immediate parent anchor. */
       readonly parentAnchorUID: Hex
-      readonly fileName: string
+      /** The file's CANONICAL leaf name (specs/02 encoding) — feeds the
+       * file-ANCHOR payload and the overwrite-detection `resolveAnchor` read. */
+      readonly fileName: CanonicalName
       /** No folders to create. */
       readonly missingSegments: readonly []
       /**
@@ -244,9 +268,11 @@ export type ParentPlan =
       /** The deepest ancestor that DOES exist — the chain of created folders extends
        * from here (the first created folder's `refUID`). */
       readonly deepestExistingAnchorUID: Hex
-      readonly fileName: string
-      /** The ordered (shallowest-first) folder segments that must be created. */
-      readonly missingSegments: readonly string[]
+      /** The file's CANONICAL leaf name (specs/02 encoding). */
+      readonly fileName: CanonicalName
+      /** The ordered (shallowest-first) CANONICAL folder segments that must be
+       * created — they feed the folder-chain ANCHOR payloads verbatim. */
+      readonly missingSegments: readonly CanonicalName[]
       /**
        * The EXISTING ancestor folder anchor UIDs resolved before the walk hit the
        * gap, ordered SHALLOWEST-first and **excluding the root anchor**. These are
@@ -281,6 +307,10 @@ export async function resolveOrPlanParents(
   path: string,
 ): Promise<ParentPlan> {
   const { parentSegments, fileName } = splitTargetPath(path)
+  // Encode-early (specs/02): an unencodable segment throws BEFORE any chain read
+  // — and, downstream, before the write's irreversible storage deploys.
+  const canonicalParents = parentSegments.map(encodeName)
+  const canonicalFileName = encodeName(fileName)
 
   const root = (await publicClient.readContract({
     address: indexerAddr,
@@ -293,8 +323,8 @@ export async function resolveOrPlanParents(
   // anchor is deliberately NOT seeded here — the visibility walk is "up to root
   // exclusive" (overview.md step 7), so root never gets a TAG.
   const existingAncestorUIDs: Hex[] = []
-  for (let i = 0; i < parentSegments.length; i++) {
-    const segment = parentSegments[i] as string
+  for (let i = 0; i < canonicalParents.length; i++) {
+    const segment = canonicalParents[i] as CanonicalName
     const child = (await publicClient.readContract({
       address: indexerAddr,
       abi: indexerAbi,
@@ -306,8 +336,8 @@ export async function resolveOrPlanParents(
       // a folder to create, hanging off the last resolved anchor (`parent`).
       return {
         deepestExistingAnchorUID: parent,
-        fileName,
-        missingSegments: parentSegments.slice(i),
+        fileName: canonicalFileName,
+        missingSegments: canonicalParents.slice(i),
         existingAncestorUIDs,
       }
     }
@@ -315,7 +345,12 @@ export async function resolveOrPlanParents(
     parent = child
   }
 
-  return { parentAnchorUID: parent, fileName, missingSegments: [], existingAncestorUIDs }
+  return {
+    parentAnchorUID: parent,
+    fileName: canonicalFileName,
+    missingSegments: [],
+    existingAncestorUIDs,
+  }
 }
 
 /**
@@ -337,13 +372,13 @@ export async function resolveParentAnchor(
   publicClient: ResolvePublicClient,
   indexerAddr: Address,
   path: string,
-): Promise<{ parentAnchorUID: Hex; fileName: string }> {
+): Promise<{ parentAnchorUID: Hex; fileName: CanonicalName }> {
   const { parentSegments, fileName } = splitTargetPath(path)
   // The parent is the path minus the final segment. Re-join and resolve it as a
   // folder walk; an empty parent path means the file lives directly under root.
   const parentPath = parentSegments.join('/')
   const parentAnchorUID = await resolvePathToAnchor(publicClient, indexerAddr, parentPath)
-  return { parentAnchorUID, fileName }
+  return { parentAnchorUID, fileName: encodeName(fileName) }
 }
 
 /**
