@@ -286,8 +286,11 @@ export function makeRedirectsNs(deps: RedirectsNsDeps): RedirectsNs {
           uid: redirectUID,
           txHash: revokeTx,
           // Same hash preservation as set(): a broadcast-but-unconfirmed
-          // indexRevocation tx may still mine — never discard it.
+          // indexRevocation tx may still mine — never discard it; a send that
+          // lost its response is flagged UNKNOWN (no hash exists) — r3741506930:
+          // this leg previously dropped the marker set() carries.
           ...(err instanceof IndexUnconfirmed ? { indexTx: err.txHash } : {}),
+          ...(err instanceof IndexSendUnknown ? { indexBroadcastUnknown: true } : {}),
           cause: err,
         })
       }

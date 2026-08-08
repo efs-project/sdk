@@ -229,16 +229,46 @@ function assertPositiveLimit(limit: number | undefined): void {
   }
 }
 
-/** Parse an opaque base-10 string cursor → on-chain `uint256` start index. Empty →
- * 0. Non-numeric → {@link CursorInvalid} (mirrors `reads/list.ts`). */
-function parseCursor(cursor: string | undefined): bigint {
-  if (cursor === undefined || cursor === '') return 0n
-  if (!/^\d+$/.test(cursor)) throw new CursorInvalid()
+/** Parse an opaque cursor. Format: `<offset>:<attester>` — the attester BINDS
+ * the offset to the listing it indexes (r3741506928): a bare numeric offset
+ * applied to a DIFFERENT winner after a reselection silently skips that
+ * winner's first entries. A legacy bare `<offset>` is accepted and applies to
+ * the CURRENT selection (protected only by the empty-page disambiguation).
+ * Empty → 0. Malformed → {@link CursorInvalid}. */
+function parseCursor(cursor: string | undefined): { start: bigint; attester?: Address } {
+  if (cursor === undefined || cursor === '') return { start: 0n }
+  const m = /^(\d+)(?::(0x[0-9a-fA-F]{40}))?$/.exec(cursor)
+  if (!m) throw new CursorInvalid()
   try {
-    return BigInt(cursor)
+    return {
+      start: BigInt(m[1] as string),
+      ...(m[2] !== undefined ? { attester: m[2] as Address } : {}),
+    }
   } catch {
     throw new CursorInvalid()
   }
+}
+
+/** Re-align the shared selection to a BOUND cursor's attester: still ranked ⇒
+ * continue ITS listing at the cursor's offset (the cursor is a continuation
+ * token of THAT listing — no skip, no duplicate, even if a higher-priority
+ * attester has since gained entries); gone from the candidate set ⇒ the cursor
+ * is void — restart the ranked walk at offset 0 rather than silently applying
+ * a foreign offset to the new winner (r3741506928). */
+function alignCursor(
+  parsed: { start: bigint; attester?: Address },
+  candidates: readonly Address[],
+  sel: { i: number },
+): bigint {
+  if (parsed.attester === undefined) return parsed.start
+  const bound = parsed.attester.toLowerCase()
+  const idx = candidates.findIndex((c) => c.toLowerCase() === bound)
+  if (idx >= 0) {
+    sel.i = idx
+    return parsed.start
+  }
+  sel.i = 0
+  return 0n
 }
 
 /** Disambiguate an EMPTY page: `true` iff the attester's listing is genuinely
@@ -447,7 +477,7 @@ export function listEntries(
     // No per-page cursor ⇒ fall back to the constructor-level `opts.cursor` (a caller
     // who persisted a `Page.cursor` and resumed via `entries(uid, { cursor })` must start
     // there, not restart at offset 0 and duplicate entries).
-    let start = parseCursor(pageOpts?.cursor ?? opts?.cursor)
+    let start = alignCursor(parseCursor(pageOpts?.cursor ?? opts?.cursor), candidates, sel)
     const pageSize = pageOpts?.limit ?? defaultLimit
     let page = await readEntriesPage(
       ctx,
@@ -485,7 +515,11 @@ export function listEntries(
     // A short page (fewer than requested) means the end; otherwise advance the cursor
     // by the raw window size (BEFORE page-local dedupe — the on-chain index counts
     // raw entries, not deduped ones).
-    const next = page.length < pageSize ? undefined : (start + BigInt(page.length)).toString()
+    // The cursor BINDS its offset to the attester it indexes (r3741506928).
+    const next =
+      page.length < pageSize
+        ? undefined
+        : `${(start + BigInt(page.length)).toString()}:${candidates[sel.i]}`
     const items = dedupePage(page, dedupe)
     return next !== undefined ? { items, cursor: next } : { items }
   }
@@ -515,7 +549,7 @@ export function listEntries(
     const { ctx, candidates, sel, kind } = await prime()
     // The first page (cursor undefined) honors the constructor-level `opts.cursor`;
     // subsequent pages thread their own advanced cursor.
-    let start = parseCursor(cursor ?? opts?.cursor)
+    let start = alignCursor(parseCursor(cursor ?? opts?.cursor), candidates, sel)
     let page = await readEntriesPage(
       ctx,
       listUID,
@@ -544,7 +578,10 @@ export function listEntries(
         defaultLimit,
       )
     }
-    const next = page.length < defaultLimit ? undefined : (start + BigInt(page.length)).toString()
+    const next =
+      page.length < defaultLimit
+        ? undefined
+        : `${(start + BigInt(page.length)).toString()}:${candidates[sel.i]}`
     return next !== undefined ? { items: page, cursor: next } : { items: page }
   }
 

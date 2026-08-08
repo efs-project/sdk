@@ -428,7 +428,7 @@ describe('lists.entries pagination (.byPage cursor)', () => {
     const list = listEntries(() => ctx, LIST_UID)
     const p1 = await list.byPage({ limit: 2 })
     expect(p1.items.map((e) => e.entryUID)).toEqual([uid(0xe00), uid(0xe01)])
-    expect(p1.cursor).toBe('2')
+    expect(p1.cursor).toBe(`2:${CURATOR}`) // offset BOUND to the attester it indexes
     const p2 = await list.byPage({ limit: 2, cursor: p1.cursor })
     expect(p2.items.map((e) => e.entryUID)).toEqual([uid(0xe02)])
     expect(p2.cursor).toBeUndefined()
@@ -686,6 +686,32 @@ describe('list attester re-selection after a raced revoke (review r3741157007)',
     }).byPage()
     expect(page.items).toHaveLength(1)
     expect(page.items[0]?.attester).toBe(B)
+  })
+
+  it('a BOUND cursor whose attester evaporated restarts the ranked walk at 0 — never a foreign offset (r3741506928)', async () => {
+    // The cursor was persisted against A's listing; A lost everything and B
+    // (with entries) now wins. Applying A's numeric offset to B would silently
+    // SKIP B's first entries — the binding voids the cursor instead.
+    const ctx = ctxOf(racedClient())
+    const page = await listEntries((() => ctx) as never, LIST_UID, {
+      lens: lens([A, B]),
+      cursor: `5:${A}`,
+    }).byPage()
+    expect(page.items).toHaveLength(1) // B's listing from offset 0 — nothing skipped
+    expect(page.items[0]?.attester).toBe(B)
+  })
+
+  it('a BOUND cursor continues ITS attester even when outranked (no skip, no dup)', async () => {
+    // B gained entries and now outranks... rather: the cursor belongs to B's
+    // listing; even with A ranked first, the bound cursor continues B at its
+    // offset (a continuation token of THAT listing).
+    const ctx = ctxOf(racedClient({ aStable: true }))
+    const page = await listEntries((() => ctx) as never, LIST_UID, {
+      lens: lens([A, B]),
+      cursor: `1:${B}`,
+    }).byPage()
+    // B's single entry sits at offset 0 — resuming at 1 is its honest end.
+    expect(page.items).toHaveLength(0)
   })
 
   it('a RESUMED empty page from a STANDING leader stays the honest end', async () => {

@@ -898,6 +898,22 @@ describe('makeRedirectsNs', () => {
     expect(ii.receipt?.signatureCount).toBe(2) // the signed prompt counts
   })
 
+  it('remove flags a LOST-RESPONSE indexRevocation send UNKNOWN too (r3741506930)', async () => {
+    const lost = new IndexSendUnknown({
+      op: 'indexRevocation',
+      uid: uid(0xabc),
+      cause: new Error('fetch failed: socket hang up'),
+    })
+    const { ns } = harness(makeChain({}), makeSubmitCtx().ctx, { failIndexerCallWith: lost })
+    const err = await ns.remove(uid(0xabc)).catch((e) => e)
+    expect(err).toBeInstanceOf(IndexingIncomplete)
+    const ii = err as IndexingIncomplete
+    expect(ii.txHash).toBe(uid(0xfee)) // the landed revoke leg
+    expect(ii.indexTx).toBeUndefined() // no hash exists for the lost send
+    expect(ii.indexBroadcastUnknown).toBe(true)
+    expect(String(ii.message)).toMatch(/UNKNOWN and it may still mine/)
+  })
+
   it('remove preserves the in-flight indexRevocation tx hash alongside the revoke tx', async () => {
     const inflight = new IndexUnconfirmed({
       op: 'indexRevocation',
