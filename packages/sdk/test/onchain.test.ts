@@ -291,3 +291,24 @@ describe('OnchainStoreIncomplete (review r3740549054)', () => {
     expect(calls.filter((c) => c.kind === 'chunk')).toHaveLength(1)
   })
 })
+
+describe('manager receipt leg carries chunk state (review r3740584996)', () => {
+  it('a failed manager WAIT wraps into OnchainStoreIncomplete with chunk + manager txs', async () => {
+    const { ctx, calls } = makeCtx()
+    let waits = 0
+    const origWait = ctx.publicClient.waitForTransactionReceipt.bind(ctx.publicClient)
+    ;(ctx.publicClient as { waitForTransactionReceipt: unknown }).waitForTransactionReceipt =
+      async (a: unknown) => {
+        waits += 1
+        if (waits === 2) throw Object.assign(new Error('RPC gone'), { code: -32000 })
+        return origWait(a as never)
+      }
+    const err = await storeOnchain(new Uint8Array([1, 2, 3]), ctx).catch((e) => e)
+    expect(err).toBeInstanceOf(OnchainStoreIncomplete)
+    const p = err as OnchainStoreIncomplete
+    expect(p.chunkAddress).toMatch(/^0x/) // the landed, paid-for chunk
+    expect(p.managerTx).toMatch(/^0x/) // the in-flight manager leg
+    expect(p.cause).toBeInstanceOf(OnchainDeployUnconfirmed) // manager may still mine
+    expect(calls.filter((c) => c.kind === 'manager')).toHaveLength(1)
+  })
+})

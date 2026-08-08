@@ -300,3 +300,27 @@ describe('readWeb3Bytes entry validation + cancellation (reviews r3740521402 / r
     expect(chunkReads).toBeLessThanOrEqual(2) // stopped promptly, not 100 chunks
   })
 })
+
+describe('second cancellation point inside the chunk iteration (review r3740584997)', () => {
+  it('an abort while chunkAddress is pending prevents the getCode call', async () => {
+    const { readWeb3Bytes } = await import('../src/mirror/web3.js')
+    const controller = new AbortController()
+    let codeReads = 0
+    const client = {
+      readContract: async (a: { functionName: string }) => {
+        if (a.functionName === 'chunkCount') return 3n
+        controller.abort() // abort DURING chunkAddress
+        return `0x${'bb'.repeat(20)}`
+      },
+      getCode: async () => {
+        codeReads += 1
+        return `0x00${'cc'.repeat(4)}`
+      },
+    } as never
+    const err = await readWeb3Bytes(`web3://0x${'aa'.repeat(20)}`, client, {
+      signal: controller.signal,
+    }).catch((e) => e)
+    expect((err as Error).name).toBe('AbortError')
+    expect(codeReads).toBe(0) // getCode never started after the abort
+  })
+})

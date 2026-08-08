@@ -801,26 +801,25 @@ describe('writeFileTier1 — folder-visibility TAGs (overview.md step 7, ADR-003
     expect(targets.every((t) => t === A || t === B || t === C)).toBe(true)
   })
 
-  it('immediate parent already tagged: short-circuits — NO new TAGs at all', async () => {
-    // The uploader already has a visibility TAG on /a/b/c (the immediate parent).
-    // Walking bottom-up, the first ancestor is already covered ⇒ everything above is
-    // too ⇒ zero TAGs (steady-state zero cost).
-    const { ctx, sent } = makeCtx({ edges: DEEP_EDGES, taggedAncestors: [C] })
+  it('every ancestor tagged: NO new TAGs at all (steady-state zero cost)', async () => {
+    const { ctx, sent } = makeCtx({ edges: DEEP_EDGES, taggedAncestors: [A, B, C] })
     await writeFileTier1('/a/b/c/file.txt', CONTENT, ctx, { contentType: 'text/plain' })
     expect(tagTargets(sent)).toEqual([])
     // The base graph (no TAG layer) is the only thing submitted: DATA / L2 / PINs.
     expect(sent).toHaveLength(3)
   })
 
-  it('immediate parent untagged but its parent IS tagged: exactly one TAG (the untagged parent)', async () => {
-    // /a/b/c: the uploader has tagged /a/b (B) but not /a/b/c (C). Bottom-up walk
-    // tags C, then stops at B (already tagged) — so above B (A) is left untouched.
+  it('REGRESSION (r3740584995): a HOLE above a tagged descendant is repaired — tagged nodes are skipped, not walk-terminators', async () => {
+    // /a's tag was revoked while /a/b (B) stays tagged: the old first-tagged
+    // short-circuit stopped at B and never re-tagged /a, leaving the branch
+    // invisible from the root listing forever. The sweep now covers the FULL
+    // chain (every read was already fetched): C (untagged) and A (the hole)
+    // get TAGs; B is skipped.
     const { ctx, sent } = makeCtx({ edges: DEEP_EDGES, taggedAncestors: [B] })
     await writeFileTier1('/a/b/c/file.txt', CONTENT, ctx, { contentType: 'text/plain' })
     const targets = tagTargets(sent)
-    expect(targets).toEqual([C]) // only the untagged immediate parent
+    expect(targets.slice().sort()).toEqual([C, A].sort())
     expect(targets).not.toContain(B)
-    expect(targets).not.toContain(A)
   })
 })
 

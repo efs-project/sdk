@@ -287,7 +287,17 @@ export async function storeOnchain(
   } catch (cause) {
     throw new OnchainStoreIncomplete(chunkAddress, chunkTx, cause)
   }
-  const chunkManager = await requireContractAddress(ctx, managerTx, 'chunk manager')
+  let chunkManager: Address
+  try {
+    chunkManager = await requireContractAddress(ctx, managerTx, 'chunk manager')
+  } catch (cause) {
+    // The chunk is landed and paid for whatever happened to the manager —
+    // whether its wait failed (OnchainDeployUnconfirmed underneath: the manager
+    // may STILL mine) or it mined without a contract address (definite
+    // failure). Either way the caller needs the chunk state to recover by
+    // wrapping the EXISTING chunk, not a blind full retry.
+    throw new OnchainStoreIncomplete(chunkAddress, chunkTx, cause, managerTx)
+  }
 
   // web3://<chunkManager> — EFSRouter._parseContractFromWeb3URI parses the address
   // only (chainId is the router's own chain, never encoded in the URI). viem's
@@ -366,13 +376,21 @@ export class OnchainStoreIncomplete extends EfsError {
   readonly chunkAddress: Address
   /** The mined chunk deploy transaction. */
   readonly chunkTx: Hex
-  constructor(chunkAddress: Address, chunkTx: Hex, cause: unknown) {
+  /** The manager deploy tx, when the failure happened AT/AFTER its broadcast
+   * (its receipt failed or lacked a contract address — see `cause`; an
+   * `OnchainDeployUnconfirmed` cause means the manager may STILL mine). Absent
+   * when the write stopped before the manager was ever sent. */
+  readonly managerTx?: Hex
+  constructor(chunkAddress: Address, chunkTx: Hex, cause: unknown, managerTx?: Hex) {
     super(
-      `EFS write: the SSTORE2 chunk landed at ${chunkAddress} (tx ${chunkTx}), but the write stopped before the chunk-manager deploy. The chunk is on-chain and paid for — a blind fs.write retry deploys a DUPLICATE; recovery should wrap the existing chunk in a manager instead.`,
+      managerTx === undefined
+        ? `EFS write: the SSTORE2 chunk landed at ${chunkAddress} (tx ${chunkTx}), but the write stopped before the chunk-manager deploy. The chunk is on-chain and paid for — a blind fs.write retry deploys a DUPLICATE; recovery should wrap the existing chunk in a manager instead.`
+        : `EFS write: the SSTORE2 chunk landed at ${chunkAddress} (tx ${chunkTx}), but the chunk-manager leg (tx ${managerTx}) failed — see cause for whether it may still mine. The chunk is on-chain and paid for — a blind fs.write retry deploys a DUPLICATE; recovery should check the manager tx's fate and wrap the existing chunk if it did not land.`,
       { code: 'PartialBatchFailure', cause },
     )
     this.chunkAddress = chunkAddress
     this.chunkTx = chunkTx
+    if (managerTx !== undefined) this.managerTx = managerTx
   }
 }
 

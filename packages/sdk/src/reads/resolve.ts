@@ -448,9 +448,8 @@ export async function planExistingAncestorVisibilityTags(
   // Bottom-up: deepest existing ancestor (immediate parent) first, root-ward last.
   const bottomUp = [...existingAncestorUIDs].reverse()
 
-  // Fan the independent active-TAG existence reads. We read them all, then apply the
-  // short-circuit on the resolved sequence (read upward, then cut) — cheaper in round
-  // trips than a serial walk, and the cut still honors "stop at the first tagged".
+  // Fan the independent active-TAG existence reads — every ancestor is read
+  // (Promise.all), so covering the FULL chain costs no extra round trips.
   const exists = await Promise.all(
     bottomUp.map(async (ancestor) => {
       const [hasTag] = (await publicClient.readContract({
@@ -466,9 +465,12 @@ export async function planExistingAncestorVisibilityTags(
 
   const needTags: Hex[] = []
   for (let i = 0; i < bottomUp.length; i++) {
-    // Steady-state short-circuit: the first already-tagged ancestor means every
-    // ancestor above it is tagged too — stop the walk.
-    if (exists[i]) break
+    // SKIP tagged ancestors but KEEP CLIMBING: "first tagged ⇒ all above tagged"
+    // does not survive TAG revocation — a hole above a tagged descendant (e.g.
+    // /a's tag revoked while /a/b stays tagged) would otherwise never be
+    // repaired, leaving the branch invisible from the root listing. Every read
+    // was already fetched above, so the full sweep is free.
+    if (exists[i]) continue
     needTags.push(bottomUp[i] as Hex)
   }
   return needTags

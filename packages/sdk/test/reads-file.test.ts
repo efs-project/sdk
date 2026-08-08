@@ -755,9 +755,14 @@ describe('read + read(ref)', () => {
       },
       mirrors: [{ uri: dataUri, attester: LENS }],
     })
-    // The 12-byte body exceeds the declared 4 → the fetch cap rejects it (all mirrors
-    // fail) rather than returning oversized bytes as matches-author.
-    await expect(read(ctx, '/docs/readme.md', { lens: LENS })).rejects.toThrow()
+    // The 12-byte body exceeds the declared 4 → the documented 'mismatch' on the
+    // RICH result (r3740584993): the untrusted claim is a consistency check, not a
+    // transport cap — clamping the cap to it made every mirror fail and the read
+    // UNAVAILABLE instead of reporting the inconsistency. The fail-closed sugar
+    // still throws on the mismatch; the safety ceiling stays the caller/default cap.
+    const file = await read(ctx, '/docs/readme.md', { lens: LENS })
+    expect(file.verification).toBe('mismatch')
+    expect(file.bytes.byteLength).toBe(12)
   })
 
   it('read() returns a legitimately EMPTY file (declared size 0) — does not clamp the cap to 0', async () => {

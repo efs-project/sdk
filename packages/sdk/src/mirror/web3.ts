@@ -186,6 +186,11 @@ export async function readWeb3Bytes(
       throw new Web3ReadError(`chunkAddress(${i}) unreadable on ${manager}: ${errMsg(err)}`)
     }
 
+    // Second cancellation point INSIDE the chunk iteration: an abort while
+    // chunkAddress was pending must not start getCode (a stalled code read
+    // would keep a direct caller pending, and the fetch-engine race would
+    // orphan yet more RPC work).
+    signal?.throwIfAborted()
     const code = await client.getCode({ address: chunkAddr })
     // The router returns HTTP 500 ("Storage contract has no code") when extcodesize
     // is 0; an SSTORE2 runtime of just the STOP byte (size 1) carries no content.

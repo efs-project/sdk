@@ -166,24 +166,16 @@ export async function fetchRef(
       : Promise.resolve(undefined),
   ])
 
-  // Cap the fetch. The author's declared `size` may only LOWER the cap, never RAISE it:
-  // an UNTRUSTED attester could otherwise publish a huge `size` (e.g. 1 GB) and, on the
-  // default `read()`/`readText()` (no `opts.maxBytes`), turn that claim into the engine
-  // cap — bypassing the documented 50 MB default and forcing buffering before
-  // verification. So the caller cap is `opts.maxBytes` when set, else the engine default;
-  // `declaredSize` clamps DOWN from there (over-declared bytes are rejected mid-fetch, so
-  // an oversized body can't slip through as `matches-author`).
-  // `declaredSize` lowers the cap only when POSITIVE. A legitimately empty file (size attested
-  // `0`, e.g. `fs.write('/empty', new Uint8Array())`) must NOT clamp the cap to `0` — the engine
-  // rejects a non-positive cap, so a default verified read of an empty file would fail before any
-  // mirror is tried. The empty body verifies against the empty-SHA-256 claim under any positive
-  // cap (and an over-declared non-empty body still fails the contentHash check), so fall through
-  // to the caller/engine default for size 0.
-  const callerCap = opts?.maxBytes ?? DEFAULT_MAX_BYTES
-  const effectiveMaxBytes =
-    declaredSize !== undefined && declaredSize > 0
-      ? Math.min(callerCap, declaredSize)
-      : opts?.maxBytes
+  // Cap the fetch with the CALLER's ceiling only (opts.maxBytes, else the engine
+  // default). The author's declared `size` is deliberately NOT folded into the
+  // transport cap: making an (untrusted) claim the hard cap would turn any
+  // under-declared size (size 1, two-byte body) into an every-mirror abort —
+  // fs.read() would throw AllMirrorsFailed instead of reporting the documented
+  // `verification: 'mismatch'` (docs/specs/content-hash.md). The declared-size
+  // CONSISTENCY check runs uniformly post-fetch below; the safety ceiling
+  // against unbounded buffering is the caller/default cap, which claims can
+  // neither raise nor tighten.
+  const effectiveMaxBytes = opts?.maxBytes
 
   const mirrors: Mirror[] = uris.map((uri) => ({ uri }))
   const engineOpts: FetchVerifiedOptions = {
@@ -213,13 +205,11 @@ export async function fetchRef(
   }
   try {
     const result = await fetchVerified(mirrors, claimedHash, engineOpts)
-    // Enforce the declared-size claim on the FETCHED bytes. For a positive
-    // declared size the clamped cap already rejects over-size mid-fetch, but a
-    // `size: 0` claim cannot clamp (the engine rejects a non-positive cap — the
-    // empty-file carve-out above), so a non-empty body whose contentHash happens
-    // to match the attester's (inconsistent) metadata would otherwise sail
-    // through as `matches-author`. The documented rule is that bytes exceeding
-    // the declared size are a MISMATCH — apply it uniformly post-fetch.
+    // Enforce the declared-size claim on the FETCHED bytes — uniformly, for
+    // every declared size (0 included): bytes exceeding the declared size are
+    // the documented MISMATCH (docs/specs/content-hash.md), reported on the
+    // rich result rather than aborting the fetch (the claim is untrusted
+    // metadata, not a transport cap).
     const verification =
       declaredSize !== undefined && BigInt(result.bytes.byteLength) > declaredSize
         ? ('mismatch' as const)

@@ -259,17 +259,19 @@ describe('planExistingAncestorVisibilityTags (ancestor walk + short-circuit)', (
     expect(out.sort()).toEqual([A, B, C].sort())
   })
 
-  it('immediate parent (deepest) already tagged: short-circuits to zero TAGs', async () => {
-    const { client } = makeTagReader([C]) // C = the deepest existing parent
+  it('every ancestor tagged: zero TAGs (steady state)', async () => {
+    const { client } = makeTagReader([A, B, C])
     const out = await planExistingAncestorVisibilityTags(client, [A, B, C], input)
     expect(out).toEqual([])
   })
 
-  it('immediate parent untagged but its parent IS tagged: exactly one TAG (the untagged parent)', async () => {
-    const { client } = makeTagReader([B]) // B tagged, C not
+  it('REGRESSION (r3740584995): a hole ABOVE a tagged descendant is repaired, not skipped-past', async () => {
+    // C untagged, B tagged, A untagged (the revoked-hole case). The old
+    // first-tagged short-circuit stopped at B and never repaired A.
+    const { client } = makeTagReader([B])
     const out = await planExistingAncestorVisibilityTags(client, [A, B, C], input)
-    // Bottom-up: C untagged → tag it; B tagged → stop (A above is left alone).
-    expect(out).toEqual([C])
+    expect(out.slice().sort()).toEqual([A, C].sort())
+    expect(out).not.toContain(B)
   })
 })
 
