@@ -182,6 +182,38 @@ async function readCapped(
   return out
 }
 
+/**
+ * Settle when `p` settles OR when `signal` aborts — whichever is first. The
+ * underlying promise is NOT cancelled (an in-flight RPC without an abortable
+ * transport keeps running, orphaned); the point is that the CALLER settles, so
+ * a per-attempt timeout can force failover past a transport that never
+ * resolves. The orphan's eventual rejection is swallowed (no unhandled
+ * rejection).
+ */
+function raceAbort<T>(p: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => {
+      p.catch(() => {}) // orphaned — swallow its eventual rejection
+      reject(new DOMException('This operation was aborted', 'AbortError'))
+    }
+    if (signal.aborted) {
+      onAbort()
+      return
+    }
+    signal.addEventListener('abort', onAbort, { once: true })
+    p.then(
+      (v) => {
+        signal.removeEventListener('abort', onAbort)
+        resolve(v)
+      },
+      (e) => {
+        signal.removeEventListener('abort', onAbort)
+        reject(e)
+      },
+    )
+  })
+}
+
 /** Link an outer abort signal to an inner controller, once. */
 function linkAbort(outer: AbortSignal | undefined, inner: AbortController): () => void {
   if (!outer) return () => {}
@@ -415,7 +447,14 @@ export async function fetchVerified(
         // Thread the cap INTO the reader so it stops mid-walk (the bundled
         // readWeb3Bytes throws once the running total exceeds it) instead of
         // accumulating every chunk first. The post-check below stays as defense.
-        const bytes = await opts.web3Reader(uri, { maxBytes, signal: controller.signal })
+        // RACE the reader against the signal: the per-chunk signal checks inside
+        // readWeb3Bytes only run BETWEEN RPCs — a single readContract/getCode
+        // that never settles (a transport with no timeout of its own) would
+        // otherwise hold this await open past the timer, blocking failover.
+        const bytes = await raceAbort(
+          opts.web3Reader(uri, { maxBytes, signal: controller.signal }),
+          controller.signal,
+        )
         if (bytes.byteLength > maxBytes) {
           attempts.push({
             uri: safeUri,

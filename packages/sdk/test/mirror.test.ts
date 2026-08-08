@@ -767,3 +767,21 @@ describe('numeric-option validation (review r3740495860 + sweep)', () => {
     ).rejects.toThrow(RangeError)
   })
 })
+
+describe('web3 attempt races the timeout (review r3740539231)', () => {
+  it('a reader whose RPC never settles cannot block failover past timeoutMs', async () => {
+    const bytes = new TextEncoder().encode('fallback wins')
+    const hash = hashContent(bytes)
+    const dataUri = `data:application/octet-stream;base64,${Buffer.from(bytes).toString('base64')}`
+    const { fetchVerified } = await import('../src/mirror/fetch.js')
+    const start = Date.now()
+    const out = await fetchVerified([`web3://0x${'aa'.repeat(20)}`, dataUri], hash, {
+      timeoutMs: 50,
+      web3Reader: () => new Promise<Uint8Array>(() => {}), // NEVER settles
+    })
+    expect(out.verification).toBe('matches-author')
+    expect(out.mirrorUsed).toBe(dataUri) // failover happened
+    expect(out.attempts[0]?.reason).toMatch(/abort/i)
+    expect(Date.now() - start).toBeLessThan(5_000) // settled on the timer, not never
+  })
+})
