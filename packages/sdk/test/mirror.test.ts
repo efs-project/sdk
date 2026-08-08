@@ -794,3 +794,26 @@ describe('web3 attempt races the timeout (review r3740539231)', () => {
     expect(Date.now() - start).toBeLessThan(5_000) // settled on the timer, not never
   })
 })
+
+describe('abort propagates between GATEWAY attempts (review r3740650224)', () => {
+  it('an abort during the first gateway surfaces as the abort, not AllMirrorsFailed', async () => {
+    const ac = new AbortController()
+    const fetchImpl = (async () => {
+      // The caller cancels while the first gateway attempt is in flight.
+      ac.abort()
+      throw Object.assign(new Error('The operation was aborted.'), { name: 'AbortError' })
+    }) as unknown as typeof fetch
+    const { fetchVerified } = await import('../src/mirror/fetch.js')
+    const err = await fetchVerified(
+      ['ipfs://bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi'],
+      undefined,
+      {
+        fetchImpl,
+        signal: ac.signal,
+        ipfsGateways: ['https://g1.example/ipfs/', 'https://g2.example/ipfs/'],
+      },
+    ).catch((e) => e)
+    expect((err as Error).name).toBe('AbortError')
+    expect(err).not.toBeInstanceOf(AllMirrorsFailedError)
+  })
+})

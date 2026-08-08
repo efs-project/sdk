@@ -1026,7 +1026,16 @@ export function createEfsV1Client(config: EfsClientConfig): EfsClient {
         // type level — so cast through `FileWriteContext` at this boundary.
         const dep = getDeployment()
         const ctx = {
-          publicClient,
+          // Planning reads (the parent walk, overwrite probe, visibility-tag
+          // checks, transport lookups) run through the chain-GUARDED client
+          // pinned to the deployment: the single entry preflight above cannot
+          // cover this multi-RPC window — a provider that drifts mid-planning
+          // and back would bake chain-B parent/anchor UIDs into a plan the
+          // per-tx guards then happily submit on chain A. The guard's pre+post
+          // checks fail each read closed instead. Non-read methods (the
+          // storage receipt waits) pass through the proxy untouched and keep
+          // their own assertChain guards.
+          publicClient: chainGuardedPublicClient(publicClient, () => dep.chainId),
           walletClient: wallet,
           deployment: dep,
           // viem binds `account`/`chain` on a wallet client built from the
@@ -1063,7 +1072,8 @@ export function createEfsV1Client(config: EfsClientConfig): EfsClient {
         // Fail closed if the wallet OR the public client is on a different chain.
         await assertWriteChain(wallet, publicClient, dep.chainId)
         const baseCtx = {
-          publicClient,
+          // Same guarded planning client as fs.write — see the write ctx note.
+          publicClient: chainGuardedPublicClient(publicClient, () => dep.chainId),
           walletClient: wallet,
           deployment: dep,
           account: wallet.account,

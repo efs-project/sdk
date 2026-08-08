@@ -506,16 +506,11 @@ export async function fetchVerified(
         continue
       }
 
-      // Cooperative cancellation between attempts.
-      if (opts.signal?.aborted) {
-        attempts.push({
-          uri: safeUri,
-          url: summarizeUri(url.href),
-          scheme: resolved.scheme,
-          reason: 'aborted by caller',
-        })
-        throw new AllMirrorsFailedError(attempts)
-      }
+      // Cooperative cancellation between gateway attempts — propagated AS the
+      // abort (the caller's own reason), same rule as the mirror loop: an
+      // aborted first gateway must not surface as a mirror OUTAGE just because
+      // the transport had another candidate URL.
+      opts.signal?.throwIfAborted()
 
       try {
         const { bytes, contentType, finalUrl } = await fetchOne(url, opts)
