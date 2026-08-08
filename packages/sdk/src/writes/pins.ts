@@ -20,6 +20,7 @@
 import type { Address, Hex } from 'viem'
 import { edgeResolverAbi } from '../chain/abi/edgeResolver.js'
 import type { EfsDeployment } from '../chain/deployments.js'
+import { getAttestationAbi } from '../eas/abi.js'
 import { EfsError } from '../errors.js'
 import { read } from '../reads/context.js'
 import type { ReadPublicClient } from '../reads/context.js'
@@ -64,9 +65,38 @@ export interface PinsNsDeps {
 export function makePinsNs(deps: PinsNsDeps): PinsNs {
   return {
     place: async (anchor, dataUID) => {
+      const ctx = deps.submitContext()
+      // Fail closed on a wrong-chain provider BEFORE the gate read below — the
+      // attestation we validate against must come from the deployment chain.
+      await ctx.assertChain?.()
       const dep = deps.getDeployment()
+      const pc = deps.guardReadClient?.(dep.chainId) ?? deps.publicClient
+      // TS parity with Solidity EFSLib.place (r3741216395 / r3741216397): the
+      // PIN is authored by the CONNECTED account, and lens-scoped reads resolve
+      // mirrors/properties under the placement attester — placing FOREIGN DATA
+      // yields a visible-but-unreadable file (ForeignDataUID), and a non-DATA
+      // target pins into the wrong schema slot, invisible to `pins.active()`
+      // and file resolution (NotDataUID).
+      const att = await read<{ attester: Address; schema: Hex }>(pc, {
+        address: dep.contracts.eas,
+        abi: getAttestationAbi,
+        functionName: 'getAttestation',
+        args: [dataUID],
+      })
+      if (att.attester.toLowerCase() !== ctx.attester.toLowerCase()) {
+        throw new EfsError(
+          `efs.graph.pins.place: the DATA ${dataUID} is authored by ${att.attester}, not the connected account ${ctx.attester} — a foreign placement resolves to a file whose mirrors/properties are INVISIBLE under your lens (unreadable, unverifiable). Re-publish the bytes as your own write instead.`,
+          { code: 'InvalidArgument' },
+        )
+      }
+      if (att.schema.toLowerCase() !== dep.schemas.data.toLowerCase()) {
+        throw new EfsError(
+          `efs.graph.pins.place: the target ${dataUID} is not a DATA attestation (schema ${att.schema}) — the PIN would index under that schema while pins.active() and file resolution read the DATA slot: a confirmed receipt for an invisible placement.`,
+          { code: 'InvalidArgument' },
+        )
+      }
       const plan = buildPlacementPinPlan(dep.schemas, anchor, dataUID)
-      return submitEdgePlan(plan, deps.submitContext())
+      return submitEdgePlan(plan, ctx)
     },
 
     unplace: async (pinUID) => {

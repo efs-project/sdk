@@ -845,11 +845,20 @@ describe('makePinsNs', () => {
   const ANCHOR = uid(0x800)
   const DATA = uid(0x900)
 
+  /** The place() gate's EAS read: self-authored DATA by default. */
+  const gateClient = (over?: { attester?: Address; schema?: Hex }) =>
+    makeReadClient((fn) => {
+      if (fn === 'getAttestation') {
+        return { attester: over?.attester ?? ATTESTER, schema: over?.schema ?? SCHEMAS.data }
+      }
+      return uid(0)
+    })
+
   it('place emits the placement PIN and submits (one signature)', async () => {
     const { ctx, calls } = makeSubmitCtx()
     const pins = makePinsNs({
       getDeployment: () => deployment,
-      publicClient: makeReadClient(() => uid(0)) as never,
+      publicClient: gateClient() as never,
       submitContext: () => ctx,
       attester: () => ATTESTER,
       revoke: async () => uid(0),
@@ -861,6 +870,36 @@ describe('makePinsNs', () => {
     expect(entry?.refUID).toBe(DATA) // placed DATA in refUID
     expect(entry?.revocable).toBe(true)
     expect(entry?.data).toBe(pinEnc.encodeData([ANCHOR])) // definition = anchor
+  })
+
+  it('place REFUSES foreign-authored DATA — nothing submits (r3741216395)', async () => {
+    const { ctx, calls } = makeSubmitCtx()
+    const pins = makePinsNs({
+      getDeployment: () => deployment,
+      publicClient: gateClient({ attester: addr(0xbeef) }) as never,
+      submitContext: () => ctx,
+      attester: () => ATTESTER,
+      revoke: async () => uid(0),
+    })
+    const err = await pins.place(ANCHOR, DATA).catch((e) => e)
+    expect((err as { code?: string }).code).toBe('InvalidArgument')
+    expect(String((err as Error).message)).toMatch(/INVISIBLE under your lens/)
+    expect(calls).toHaveLength(0)
+  })
+
+  it('place REFUSES a self-authored NON-DATA target — nothing submits (r3741216397)', async () => {
+    const { ctx, calls } = makeSubmitCtx()
+    const pins = makePinsNs({
+      getDeployment: () => deployment,
+      publicClient: gateClient({ schema: SCHEMAS.anchor }) as never,
+      submitContext: () => ctx,
+      attester: () => ATTESTER,
+      revoke: async () => uid(0),
+    })
+    const err = await pins.place(ANCHOR, DATA).catch((e) => e)
+    expect((err as { code?: string }).code).toBe('InvalidArgument')
+    expect(String((err as Error).message)).toMatch(/not a DATA attestation/)
+    expect(calls).toHaveLength(0)
   })
 
   it('unplace revokes the right UID under the PIN schema', async () => {

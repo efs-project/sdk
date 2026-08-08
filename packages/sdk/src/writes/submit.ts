@@ -663,6 +663,13 @@ export async function submitLayeredTier1(
   plan: FileWriteGraph,
   ctx: SubmitContext,
 ): Promise<LayeredWriteResult> {
+  // HARDLINK plans reuse a pre-existing DATA — enforce the self-authorship +
+  // DATA-schema gates HERE, the common boundary EVERY exported executor
+  // funnels through (submitWriteTier1 wraps this; the edge verbs call it
+  // directly), so no entry point can bypass them (r3741216400). Edge plans are
+  // hardlink:false, so this is a no-op for them; the Solidity SDK applies the
+  // same gates on-chain (ForeignDataUID / NotDataUID).
+  await assertHardlinkSelfAuthored(plan, ctx)
   const resolved = new Map<string, Hex>()
   const layerTxHashes: Hex[] = []
   const layers: LayerResult[] = []
@@ -832,12 +839,8 @@ export async function submitWriteTier1(
   plan: FileWriteGraph,
   ctx: SubmitContext,
 ): Promise<Tier1WriteResult> {
-  // HARDLINK plans reuse a pre-existing DATA — enforce the same self-authorship
-  // gate the Solidity SDK applies on-chain (ForeignDataUID/r3741157003) at THIS
-  // chain boundary, since the pure builder cannot read EAS: a placement authored
-  // by the submitting account only resolves readably when that account also
-  // authored the DATA (+ its mirrors/properties).
-  await assertHardlinkSelfAuthored(plan, ctx)
+  // The hardlink authorship/schema gates run inside submitLayeredTier1 — the
+  // common boundary every exported executor funnels through (r3741216400).
   const { uids: resolved, layerTxHashes, layers } = await submitLayeredTier1(plan, ctx)
 
   const placementPinUID = resolved.get(REF.PLACEMENT_PIN)
