@@ -490,6 +490,18 @@ describe('mkdir -p — missing ancestor folders folded into the write', () => {
   })
 })
 
+describe('byte-plan mirror floor (review r3741534977)', () => {
+  it('REJECTS an empty mirror set — a mirror-less file is unreadable', () => {
+    expect(() =>
+      buildFileWriteGraph({
+        ...baseInput,
+        content: { kind: 'bytes', bytes: new Uint8Array([1]) },
+        mirrors: [],
+      }),
+    ).toThrowError(/at least one mirror/)
+  })
+})
+
 describe('hardlink short-circuit', () => {
   const graph = buildFileWriteGraph({
     ...hardlinkBase,

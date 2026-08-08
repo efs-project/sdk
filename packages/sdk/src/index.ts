@@ -1008,6 +1008,8 @@ export function createEfsV1Client(config: EfsClientConfig): EfsClient {
   const redirectsNs = makeRedirectsNs({
     getDeployment,
     readContext,
+    publicClient: publicClient as unknown as ReadContext['publicClient'],
+    guardReadClient,
     submitContext: edgeSubmitContext,
     revoke: (schema, uid) => easVerbs.revoke({ schema, uid }),
     indexerCall,

@@ -132,6 +132,12 @@ library EFSLib {
     ///         successfully but that lookup never reaches the binding.
     error NotPropertyKeyAnchor(bytes32 uid, bytes32 schema, bytes32 forSchema);
 
+    /// @notice {writeFile} requires at least one MIRROR: a mirror-less file confirms (and
+    ///         emits {EFSWriter.EFSFileWritten}) but resolves to a DATA with NO retrieval
+    ///         method under the writer's lens — every byte read fails. The same readability
+    ///         invariant the placement helpers enforce ({NoActiveMirror}).
+    error EmptyMirrorSet();
+
     /// @dev The reused-anchor SLOT-BINDING gate shared by {writeFile} and the 6-arg
     ///      {placeExisting}: beyond being an ANCHOR, the reused UID must name EXACTLY
     ///      the requested `(parent, fileName, DATA)` slot.
@@ -250,7 +256,8 @@ library EFSLib {
     /// @param  schemas             The frozen EFS schema UID set for the target deployment.
     /// @param  parentAnchorUID     Pre-existing parent folder anchor UID (the file-ANCHOR's refUID).
     /// @param  fileName            The file's anchor name (canonical encoding; verbatim).
-    /// @param  mirrors             Retrieval methods to publish (one MIRROR each). May be empty.
+    /// @param  mirrors             Retrieval methods to publish (one MIRROR each). MUST be
+    ///                             non-empty ({EmptyMirrorSet}) — a mirror-less file is unreadable.
     /// @param  reservedKeys        Reserved-key triplets to bind (contentType/contentHash/size).
     ///         May be empty (e.g. a minimal file with no metadata).
     /// @param  existingFileAnchorUID OVERWRITE support: the pre-existing file-ANCHOR UID for this
@@ -291,6 +298,10 @@ library EFSLib {
         internal
         returns (bytes32 dataUID, bytes32 fileAnchorUID, bytes32 placementPinUID)
     {
+        // READABILITY invariant (r3741534980): no mirrors ⇒ an unreadable file —
+        // reject BEFORE anything mints (the placement helpers enforce the same
+        // floor via NoActiveMirror).
+        if (w.mirrors.length == 0) revert EmptyMirrorSet();
         // A REUSED file-ANCHOR must actually BE an ANCHOR (r3741308922) — the same
         // definition gate as {place}/{placeExisting}, checked BEFORE the DATA graph
         // mints: a PROPERTY/DATA/nonexistent reused UID would let the whole write

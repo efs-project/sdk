@@ -527,6 +527,19 @@ export function buildFileWriteGraph(input: FileWriteGraphInput): FileWriteGraph 
     }
   }
 
+  // READABILITY invariant (r3741534977): a byte-write plan with NO mirrors
+  // mints a fully-confirmed file whose every content read fails
+  // AllMirrorsFailed — fetchRef resolves URIs from the writer's MIRRORs. The
+  // orchestrated paths can never get here empty (fs.write auto-stores on-chain
+  // when the caller supplies no mirrors, and rejects an explicit empty list);
+  // the exported builder enforces the same floor.
+  if (input.mirrors.length === 0) {
+    throw new EfsError(
+      'EFS write plan: a byte-write plan must carry at least one mirror — a mirror-less file is unreadable (every read() fails AllMirrorsFailed). Use fs.write (which auto-stores on-chain when you pass no mirrors), or include the storage-backed web3:// mirror / your own URIs.',
+      { code: 'InvalidArgument' },
+    )
+  }
+
   const attestations: PlannedAttestation[] = [...folderAttestations]
 
   // ── DATA — the content-identity hub (base layer 1, shifted by `m`) ───────────

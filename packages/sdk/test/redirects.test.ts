@@ -781,13 +781,34 @@ describe('makeRedirectsNs', () => {
   function harness(
     chain: ReadContext['publicClient'],
     ctx = makeSubmitCtx().ctx,
-    opts?: { failIndexerCall?: boolean; failIndexerCallWith?: Error; failWaitForReceipt?: Error },
+    opts?: {
+      failIndexerCall?: boolean
+      failIndexerCallWith?: Error
+      failWaitForReceipt?: Error
+      symlinkGate?: { targetSchema?: Hex; mirrors?: bigint }
+    },
   ) {
     const indexerCalls: { fn: string; uid: Hex }[] = []
     const waited: Hex[] = []
     const ns = makeRedirectsNs({
       getDeployment: () => deployment,
       readContext: () => ctxWith(chain),
+      // The symlink→DATA gate's reads: by default the target is an ANCHOR
+      // (gate no-ops); `opts.symlinkGate` overrides for the DATA cases.
+      publicClient: {
+        async readContract(a: { functionName: string }) {
+          if (a.functionName === 'getAttestation') {
+            return { schema: opts?.symlinkGate?.targetSchema ?? SCHEMAS.anchor }
+          }
+          if (a.functionName === 'getReferencingBySchemaAndAttesterCount') {
+            return opts?.symlinkGate?.mirrors ?? 0n
+          }
+          if (a.functionName === 'getReferencingBySchemaAndAttester') {
+            return (opts?.symlinkGate?.mirrors ?? 0n) > 0n ? [uid(0x3141)] : []
+          }
+          throw new Error(`gate mock: unexpected ${a.functionName}`)
+        },
+      } as never,
       submitContext: () => ctx,
       revoke: async () => uid(0xfee),
       indexerCall: async (fn, u) => {
@@ -927,6 +948,36 @@ describe('makeRedirectsNs', () => {
     const ii = err as IndexingIncomplete
     expect(ii.txHash).toBe(uid(0xfee)) // the landed revoke leg
     expect(ii.indexTx).toBe(uid(0x78)) // the in-flight indexer leg
+  })
+
+  it('a symlink DIRECTLY at a foreign-metadata DATA refuses — unreadable link (r3741534983)', async () => {
+    // The author has NO active mirror on the target DATA; resolvedBy would be
+    // the author, so reads could never fetch the bytes.
+    const { ctx, calls } = makeSubmitCtx()
+    const { ns, indexerCalls } = harness(makeChain({}), ctx, {
+      symlinkGate: { targetSchema: SCHEMAS.data, mirrors: 0n },
+    })
+    const err = await ns.set(FROM, TO, { kind: 'symlink' }).catch((e) => e)
+    expect((err as { code?: string }).code).toBe('InvalidArgument')
+    expect(String((err as Error).message)).toMatch(/YOUR OWN active mirror/)
+    expect(calls).toHaveLength(0) // nothing attested
+    expect(indexerCalls).toHaveLength(0) // nothing indexed
+  })
+
+  it('a symlink at a DATA the author mirrors passes the gate', async () => {
+    const { ctx } = makeSubmitCtx()
+    const { ns } = harness(makeChain({}), ctx, {
+      symlinkGate: { targetSchema: SCHEMAS.data, mirrors: 1n },
+    })
+    const receipt = await ns.set(FROM, TO, { kind: 'symlink' })
+    expect(receipt.signatureCount).toBe(2) // attest + index — the write went through
+  })
+
+  it('a symlink at an ANCHOR target skips the DATA gate (the walk carries its own metadata)', async () => {
+    const { ctx } = makeSubmitCtx()
+    const { ns } = harness(makeChain({}), ctx) // default: target reads as ANCHOR
+    const receipt = await ns.set(FROM, TO, { kind: 'symlink' })
+    expect(receipt.signatureCount).toBe(2)
   })
 
   it('set defaults kind to sameAs', async () => {

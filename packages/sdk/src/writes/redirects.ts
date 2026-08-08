@@ -31,7 +31,12 @@
  */
 
 import type { Hex } from 'viem'
+import {
+  getReferencingBySchemaAndAttesterAbi,
+  getReferencingBySchemaAndAttesterCountAbi,
+} from '../chain/abi/indexer.js'
 import type { EfsDeployment } from '../chain/deployments.js'
+import { getAttestationAbi } from '../eas/abi.js'
 import {
   EfsError,
   IndexSendUnknown,
@@ -39,7 +44,12 @@ import {
   IndexingIncomplete,
   RevokeUnconfirmed,
 } from '../errors.js'
-import { type ReadContext, resolveAttesters } from '../reads/context.js'
+import {
+  type ReadContext,
+  type ReadPublicClient,
+  read,
+  resolveAttesters,
+} from '../reads/context.js'
 import {
   canonicalizeSameAs,
   listLensRedirects,
@@ -155,6 +165,12 @@ export interface RedirectsNsDeps {
   readonly getDeployment: () => EfsDeployment
   /** The lens-scoped read context (for the read verbs). */
   readonly readContext: () => ReadContext | Promise<ReadContext>
+  /** Raw read client (the symlink readability gate's fallback when no guard is
+   * wired — unit tests). */
+  readonly publicClient?: ReadPublicClient
+  /** Drift-guarded read client pinned to a chainId — the symlink gate's reads
+   * must not follow a drifting provider (same rule as every write planner). */
+  readonly guardReadClient?: (chainId: number) => ReadPublicClient
   readonly submitContext: () => EdgeSubmitContext
   /** Revoke a UID under a schema (wired to `efs.eas.revoke`). Returns the tx
    * hash WITHOUT waiting for the receipt (mirrors the eas verb). */
@@ -203,10 +219,55 @@ export function makeRedirectsNs(deps: RedirectsNsDeps): RedirectsNs {
   return {
     set: async (from, to, opts) => {
       const dep = deps.getDeployment()
+      const ctx = deps.submitContext()
+      // SYMLINK→DATA readability gate (r3741534983): path resolution reports the
+      // symlink AUTHOR as `resolvedBy`, and fetchRef scopes mirrors/properties
+      // to that address — a symlink pointing DIRECTLY at a DATA whose retrieval
+      // metadata lives under someone ELSE resolves but can never be read.
+      // Require the author's own active mirror on the target before
+      // broadcasting (symlink→ANCHOR targets are unaffected: the walk continues
+      // into that anchor's own placements, whose winners carry their metadata).
+      if (kindCode(opts?.kind) === REDIRECT_KIND.symlink) {
+        await ctx.assertChain?.()
+        const pc = deps.guardReadClient?.(dep.chainId) ?? deps.publicClient
+        if (pc !== undefined) {
+          const att = await read<{ schema: Hex }>(pc, {
+            address: dep.contracts.eas,
+            abi: getAttestationAbi,
+            functionName: 'getAttestation',
+            args: [to],
+          })
+          if (att.schema.toLowerCase() === dep.schemas.data.toLowerCase()) {
+            const rawCount = await read<bigint>(pc, {
+              address: dep.contracts.indexer,
+              abi: getReferencingBySchemaAndAttesterCountAbi,
+              functionName: 'getReferencingBySchemaAndAttesterCount',
+              args: [to, dep.schemas.mirror, ctx.attester],
+            })
+            let hasActiveMirror = false
+            const total = Math.min(Number(rawCount), 500)
+            for (let start = 0; start < total && !hasActiveMirror; start += 50) {
+              const page = await read<readonly Hex[]>(pc, {
+                address: dep.contracts.indexer,
+                abi: getReferencingBySchemaAndAttesterAbi,
+                functionName: 'getReferencingBySchemaAndAttester',
+                args: [to, dep.schemas.mirror, ctx.attester, BigInt(start), 50n, false, false],
+              })
+              hasActiveMirror = page.length > 0
+            }
+            if (!hasActiveMirror) {
+              throw new EfsError(
+                `efs.redirects.set: a symlink pointing DIRECTLY at DATA ${to} requires YOUR OWN active mirror on it — reads scope retrieval metadata to the symlink author (resolvedBy), so this link would resolve but never be readable. Attest a mirror via efs.mirrors.add first, or symlink to the file's ANCHOR instead (the walk then uses the placement winner's metadata).`,
+                { code: 'InvalidArgument' },
+              )
+            }
+          }
+        }
+      }
       const plan = buildRedirectPlan(dep.schemas, from, to, kindCode(opts?.kind))
       const { receipt, uid: redirectUID } = await submitEdgePlanWithUID(
         plan,
-        deps.submitContext(),
+        ctx,
         EDGE_REF.REDIRECT,
       )
       if (opts?.index === false) return receipt // caller owns eventual indexing

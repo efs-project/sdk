@@ -325,7 +325,11 @@ contract EFSWriterTest is Test {
         w.schemas = schemas;
         w.parentAnchorUID = PARENT;
         w.fileName = "hello.txt";
-        // empty mirrors + reservedKeys
+        // ONE mirror — writeFile enforces the readability floor (EmptyMirrorSet);
+        // reservedKeys stay empty.
+        w.mirrors = new EFSLib.Mirror[](1);
+        w.mirrors[0] =
+            EFSLib.Mirror({transportDefinition: keccak256("WEB3_TRANSPORT"), uri: "web3://0xabc"});
     }
 
     /// @notice Minimal file: DATA + file-ANCHOR + placement-PIN, in that order, correctly threaded.
@@ -335,7 +339,7 @@ contract EFSWriterTest is Test {
         vm.prank(ALICE);
         (bytes32 dataUID, bytes32 fileAnchorUID, bytes32 pinUID) = consumer.writeFile(w);
 
-        assertEq(eas.callCount(), 3, "minimal write = 3 attestations");
+        assertEq(eas.callCount(), 4, "minimal write = DATA + ANCHOR + MIRROR + PIN");
 
         // Call 0: DATA
         MockEAS.Call memory c0 = eas.callAt(0);
@@ -358,14 +362,19 @@ contract EFSWriterTest is Test {
         );
         assertEq(fileAnchorUID, _uid(1), "returned fileAnchorUID = call-1 UID");
 
-        // Call 2: placement-PIN — definition = file-ANCHOR (threaded), refUID = DATA (threaded)
-        MockEAS.Call memory c2 = eas.callAt(2);
-        assertEq(c2.schema, schemas.pin, "c2 schema = PIN");
+        // Call 2: MIRROR (the readability floor) — refUID = DATA (threaded)
+        MockEAS.Call memory cm = eas.callAt(2);
+        assertEq(cm.schema, schemas.mirror, "c2 schema = MIRROR");
+        assertEq(cm.refUID, dataUID, "MIRROR refUID = DATA UID");
+
+        // Call 3: placement-PIN — definition = file-ANCHOR (threaded), refUID = DATA (threaded)
+        MockEAS.Call memory c2 = eas.callAt(3);
+        assertEq(c2.schema, schemas.pin, "c3 schema = PIN");
         assertEq(c2.refUID, dataUID, "placement-PIN refUID = DATA UID");
         assertEq(c2.revocable, true, "PIN revocable");
         assertEq(c2.expirationTime, 0, "PIN no expiration");
         assertEq(c2.data, abi.encode(fileAnchorUID), "PIN data = (file-ANCHOR UID)");
-        assertEq(pinUID, _uid(2), "returned placementPinUID = call-2 UID");
+        assertEq(pinUID, _uid(3), "returned placementPinUID = call-3 UID");
 
         // Attester = the consumer contract (lib inlined; msg.sender preserved through to EAS).
         assertEq(c0.attester, address(consumer), "DATA attester = consumer (inlined)");
@@ -384,15 +393,15 @@ contract EFSWriterTest is Test {
         vm.prank(ALICE);
         (bytes32 dataUID, bytes32 fileAnchorUID, bytes32 pinUID) = consumer.writeFile(w);
 
-        // DATA + placement PIN only — the permanent file-ANCHOR is reused, not re-minted.
-        assertEq(eas.callCount(), 2, "overwrite = DATA + placement PIN (no anchor mint)");
+        // DATA + MIRROR + placement PIN — the permanent file-ANCHOR is reused, not re-minted.
+        assertEq(eas.callCount(), 3, "overwrite = DATA + MIRROR + PIN (no anchor mint)");
         assertEq(fileAnchorUID, existing, "returns the reused anchor");
 
-        MockEAS.Call memory pin = eas.callAt(1);
-        assertEq(pin.schema, schemas.pin, "call 1 = placement PIN");
+        MockEAS.Call memory pin = eas.callAt(2);
+        assertEq(pin.schema, schemas.pin, "call 2 = placement PIN");
         assertEq(pin.data, abi.encode(existing), "PIN definition = the reused anchor");
         assertEq(pin.refUID, dataUID, "PIN refUID = the fresh DATA");
-        assertEq(pinUID, _uid(1), "returned placement-PIN UID");
+        assertEq(pinUID, _uid(2), "returned placement-PIN UID");
     }
 
     /// @notice Full graph: DATA, file-ANCHOR, 1 MIRROR, 2 reserved-key triplets, placement-PIN.
@@ -550,6 +559,18 @@ contract EFSWriterTest is Test {
 
         // No ANCHOR-schema attestation: the permanent file-ANCHOR was NOT re-minted.
         assertTrue(pin.schema != schemas.anchor, "no fresh file-ANCHOR minted on relink");
+    }
+
+    /// @notice writeFile refuses an EMPTY mirror set (r3741534980): a mirror-less file
+    ///         confirms (and emits EFSFileWritten) but every byte read fails — the same
+    ///         readability floor the placement helpers enforce.
+    function test_WriteFile_RevertsOnEmptyMirrors() public {
+        EFSLib.FileWrite memory w = _minimalWrite();
+        w.mirrors = new EFSLib.Mirror[](0);
+        vm.prank(ALICE);
+        vm.expectRevert(EFSLib.EmptyMirrorSet.selector);
+        consumer.writeFile(w);
+        // nothing minted — the gate runs before the DATA attest
     }
 
     /// @notice writeFile refuses a reused anchor from a DIFFERENT slot (r3741358641):
