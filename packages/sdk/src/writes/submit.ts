@@ -328,11 +328,12 @@ export class WriteNotSentError extends EfsError {
   readonly landed: RefMap
   constructor(layer: number, failedRefs: readonly string[], landed: RefMap, cause: unknown) {
     const classified = classifyError(cause)
+    const guidance =
+      landed.size === 0
+        ? `No earlier EAS layer landed. If no completed storage is attached ('storage'), nothing from this attempt is on-chain and a retry is safe; with 'storage' attached, pass storage.web3Uri as an explicit mirror on the retry instead of re-paying the deploy.`
+        : `${landed.size} attestation(s) from earlier layers ALREADY LANDED and fs.write does not resume — a whole-write retry would re-mint them (and can revert on permanent duplicate anchors). Recover from 'landed' (and 'storage', when attached) instead of retrying.`
     super(
-      `EFS write could not be sent at layer ${layer} — the transaction was never broadcast (${failedRefs.length} attestation(s): ${failedRefs.join(', ')}). No tx is in flight for this layer. ` +
-        (landed.size === 0
-          ? `No earlier EAS layer landed. If no completed storage is attached ('storage'), nothing from this attempt is on-chain and a retry is safe; with 'storage' attached, pass storage.web3Uri as an explicit mirror on the retry instead of re-paying the deploy.`
-          : `${landed.size} attestation(s) from earlier layers ALREADY LANDED and fs.write does not resume — a whole-write retry would re-mint them (and can revert on permanent duplicate anchors). Recover from 'landed' (and 'storage', when attached) instead of retrying.`),
+      `EFS write could not be sent at layer ${layer} — the transaction was never broadcast (${failedRefs.length} attestation(s): ${failedRefs.join(', ')}). No tx is in flight for this layer. ${guidance}`,
       { code: 'PartialBatchFailure', cause, details: classified.shortMessage },
     )
     this.layer = layer
