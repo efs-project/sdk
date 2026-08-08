@@ -375,12 +375,10 @@ export async function fetchVerified(
     const safeUri = summarizeUri(uri)
     // Honor cancellation BEFORE resolving — resolveTransport decodes inline data:
     // payloads, so an already-aborted caller must not pay that allocation/hash.
-    if (opts.signal?.aborted) {
-      const scheme = (uri.match(/^([a-zA-Z][a-zA-Z0-9+.-]*):/)?.[1]?.toLowerCase() ??
-        'https') as TransportName
-      attempts.push({ uri: safeUri, scheme, reason: 'aborted by caller' })
-      throw new AllMirrorsFailedError(attempts)
-    }
+    // The abort PROPAGATES as itself (throwIfAborted rethrows the caller's own
+    // reason): converting it into AllMirrorsFailedError misclassified a user
+    // cancellation as a mirror outage.
+    opts.signal?.throwIfAborted()
     let resolved: ResolvedTransport
     try {
       resolved = resolveTransport(uri, {
@@ -542,6 +540,10 @@ export async function fetchVerified(
     }
   }
 
+  // If the loop drained BECAUSE the caller aborted mid-attempt (the per-attempt
+  // failure was logged and the loop advanced), the cancellation wins over the
+  // mirror-outage framing.
+  opts.signal?.throwIfAborted()
   throw new AllMirrorsFailedError(attempts)
 }
 

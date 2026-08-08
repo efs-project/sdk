@@ -643,14 +643,25 @@ function chainGuardedPublicClient(
         const readFn = target.readContract.bind(target)
         return (async (args: Parameters<PublicClient['readContract']>[0]) => {
           await assertChainMatches(target, deploymentChainId())
-          return readFn(args)
+          const out = await readFn(args)
+          // Re-check AFTER the read resolves: a provider that switched between
+          // the pre-check and the eth_call executed the call on chain B — its
+          // result must not be accepted as chain-A data (the capability probe
+          // would cache chain-B bytecode under chain A; ordinary reads would
+          // return wrong-chain values). The post-check narrows the TOCTOU
+          // window to a single in-flight request and fails closed on drift.
+          await assertChainMatches(target, deploymentChainId())
+          return out
         }) as PublicClient['readContract']
       }
       if (prop === 'getCode') {
         const getCodeFn = target.getCode.bind(target)
         return (async (args: Parameters<PublicClient['getCode']>[0]) => {
           await assertChainMatches(target, deploymentChainId())
-          return getCodeFn(args)
+          const out = await getCodeFn(args)
+          // Same post-check as readContract — see above.
+          await assertChainMatches(target, deploymentChainId())
+          return out
         }) as PublicClient['getCode']
       }
       return Reflect.get(target, prop, receiver)

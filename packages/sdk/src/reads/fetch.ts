@@ -147,7 +147,11 @@ export async function fetchRef(
   let uris = await lensMirrorUris(ctx, ref.uid, resolvedBy)
   // Transport restriction (review A8): when the caller pins transports, keep only
   // mirrors whose scheme is allowed, preserving the on-chain priority order.
-  if (opts?.transports && opts.transports.length > 0) {
+  // An EXPLICITLY EMPTY list is honored as "no transports allowed" (zero
+  // candidates → the read fails) — OMITTING the option is the allow-all form,
+  // and silently widening `transports: []` from a computed security policy into
+  // every scheme would invert the caller's restriction.
+  if (opts?.transports !== undefined) {
     const allow = new Set(opts.transports.map((t) => t.toLowerCase()))
     uris = uris.filter((u) => allow.has(schemeName(u)))
   }
@@ -217,6 +221,11 @@ export async function fetchRef(
     // Use the ATTESTED contentType (or omit) — never the untrusted transport header.
     return makeEfsFile(result.bytes, verification, attestedContentType, resolvedBy)
   } catch (err) {
+    // A caller CANCELLATION is not a mirror failure — the raw AbortError (with
+    // the caller's own reason) propagates unclassified, matching the abort
+    // convention everywhere else in the SDK, so UIs can distinguish "user
+    // cancelled" from "mirrors are down".
+    if ((err as Error | undefined)?.name === 'AbortError') throw err
     throw classifyError(err)
   }
 }

@@ -1509,3 +1509,21 @@ describe('trust provenance (ADR-0015)', () => {
     expect(err?.trust.freshness).toBe('stale')
   })
 })
+
+describe('transports: [] is honored (review r3740636910)', () => {
+  it('an explicitly empty allowlist leaves ZERO candidates — never allow-all', async () => {
+    const dataUri = `data:text/markdown;base64,${Buffer.from('# Hello EFS\n').toString('base64')}`
+    const ctx = makeCtx({
+      edges: README_EDGES,
+      files: [fileItem({})],
+      placementPins: README_PLACEMENT,
+      mirrors: [{ uri: dataUri, attester: LENS }],
+    })
+    // Omitted → the data: mirror serves. Empty → no transports allowed → fails.
+    const ok = await read(ctx, '/docs/readme.md', { lens: LENS, verify: false })
+    expect(ok.bytes.byteLength).toBeGreaterThan(0)
+    await expect(
+      read(ctx, '/docs/readme.md', { lens: LENS, verify: false, transports: [] }),
+    ).rejects.toThrow(/all mirrors failed/i)
+  })
+})

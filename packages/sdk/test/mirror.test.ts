@@ -706,13 +706,18 @@ describe('fetchVerified - http downgrade defense (allowInsecureHttp)', () => {
 })
 
 describe('fetchVerified - AbortSignal', () => {
-  it('an already-aborted signal short-circuits before any fetch', async () => {
+  it('an already-aborted signal short-circuits before any fetch — and propagates as the ABORT, not a mirror outage (r3740636913)', async () => {
     const ac = new AbortController()
     ac.abort()
     const fetchImpl = vi.fn() as unknown as typeof fetch
-    await expect(
-      fetchVerified(['https://a.example/x'], undefined, { fetchImpl, signal: ac.signal }),
-    ).rejects.toBeInstanceOf(AllMirrorsFailedError)
+    const err = await fetchVerified(['https://a.example/x'], undefined, {
+      fetchImpl,
+      signal: ac.signal,
+    }).catch((e) => e)
+    // Cancellation is the CALLER's act — converting it into AllMirrorsFailedError
+    // misclassified it as an outage. The raw abort reason propagates.
+    expect(err).not.toBeInstanceOf(AllMirrorsFailedError)
+    expect((err as Error).name).toBe('AbortError')
     expect(fetchImpl).not.toHaveBeenCalled()
   })
 
@@ -720,9 +725,10 @@ describe('fetchVerified - AbortSignal', () => {
     // The abort check must run BEFORE resolveTransport decodes the inline payload.
     const ac = new AbortController()
     ac.abort()
-    await expect(
-      fetchVerified(['data:text/plain;base64,aGVsbG8='], undefined, { signal: ac.signal }),
-    ).rejects.toBeInstanceOf(AllMirrorsFailedError)
+    const err = await fetchVerified(['data:text/plain;base64,aGVsbG8='], undefined, {
+      signal: ac.signal,
+    }).catch((e) => e)
+    expect((err as Error).name).toBe('AbortError') // the abort, not a mirror outage
   })
 })
 
