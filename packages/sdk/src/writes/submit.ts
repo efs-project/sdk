@@ -70,7 +70,7 @@
 
 import type { Address, Hex, Log, TransactionReceipt } from 'viem'
 import { parseEventLogs } from 'viem'
-import { easAbi } from '../eas/abi.js'
+import { easAbi, getAttestationAbi } from '../eas/abi.js'
 import { buildMultiAttest } from '../eas/attest.js'
 import { SchemaEncoder } from '../eas/schema-encoder.js'
 import { EFS_SCHEMA_FIELDS } from '../eas/schemas.js'
@@ -125,6 +125,16 @@ export interface SubmitWalletClient {
  */
 export interface SubmitPublicClient {
   waitForTransactionReceipt(args: { hash: Hex }): Promise<TransactionReceipt>
+  /** EAS read used by the HARDLINK self-authorship gate (a viem `PublicClient`
+   * satisfies this). Optional so minimal byte-write contexts keep working —
+   * but a HARDLINK plan submitted without it FAILS CLOSED (the gate cannot be
+   * skipped; see {@link submitWriteTier1}). */
+  readContract?(args: {
+    address: Address
+    abi: unknown
+    functionName: string
+    args: readonly unknown[]
+  }): Promise<unknown>
 }
 
 /** Execution context for {@link submitWriteTier1}. */
@@ -372,6 +382,49 @@ export class WriteSendUnknownError extends EfsError {
     this.layer = layer
     this.refs = refs
     this.landed = landed
+  }
+}
+
+/** The r3741157003 gate: verify a hardlink plan's DATA is authored by the
+ * submitting account BEFORE any layer broadcasts. Fails CLOSED when the
+ * context cannot resolve a signing account or lacks `readContract` — a
+ * foreign hardlink yields a visible-but-unreadable file (lens-scoped reads key
+ * mirrors/properties on the placement attester), so the check is mandatory. */
+async function assertHardlinkSelfAuthored(plan: FileWriteGraph, ctx: SubmitContext): Promise<void> {
+  if (!plan.hardlink) return
+  const pin = plan.attestations.find((a) => a.ref === REF.PLACEMENT_PIN)
+  const dataUID = pin !== undefined && typeof pin.refUID === 'string' ? pin.refUID : undefined
+  if (dataUID === undefined) return // a hardlink plan always carries a concrete PIN refUID
+  const ctxAccount =
+    typeof ctx.account === 'string'
+      ? (ctx.account as Address)
+      : (ctx.account as { address?: Address } | undefined)?.address
+  const walletAccount = (ctx.walletClient as { account?: { address?: Address } }).account?.address
+  const submitter = ctxAccount ?? walletAccount
+  if (submitter === undefined) {
+    throw new EfsError(
+      'EFS write: a HARDLINK plan requires a resolvable signing account (ctx.account, or a wallet client with a bound account) — the self-authorship gate must verify the DATA author before placement.',
+      { code: 'InvalidArgument' },
+    )
+  }
+  if (ctx.publicClient.readContract === undefined) {
+    throw new EfsError(
+      'EFS write: a HARDLINK plan requires a publicClient with readContract — the self-authorship gate reads the DATA attestation before placement.',
+      { code: 'InvalidArgument' },
+    )
+  }
+  const att = (await ctx.publicClient.readContract({
+    address: ctx.easAddress,
+    abi: getAttestationAbi,
+    functionName: 'getAttestation',
+    args: [dataUID],
+  })) as { attester?: Address } | undefined
+  const author = att?.attester
+  if (author === undefined || author.toLowerCase() !== submitter.toLowerCase()) {
+    throw new EfsError(
+      `EFS write: the hardlink DATA ${dataUID} is authored by ${author ?? '0x0 (unknown UID)'}, not the submitting account ${submitter}. A foreign hardlink resolves to a file whose mirrors/properties are INVISIBLE under your lens (unreadable, unverifiable). Re-publish the bytes as your own write instead. (Solidity parity: EFSLib.ForeignDataUID.)`,
+      { code: 'InvalidArgument' },
+    )
   }
 }
 
@@ -759,6 +812,12 @@ export async function submitWriteTier1(
   plan: FileWriteGraph,
   ctx: SubmitContext,
 ): Promise<Tier1WriteResult> {
+  // HARDLINK plans reuse a pre-existing DATA — enforce the same self-authorship
+  // gate the Solidity SDK applies on-chain (ForeignDataUID/r3741157003) at THIS
+  // chain boundary, since the pure builder cannot read EAS: a placement authored
+  // by the submitting account only resolves readably when that account also
+  // authored the DATA (+ its mirrors/properties).
+  await assertHardlinkSelfAuthored(plan, ctx)
   const { uids: resolved, layerTxHashes, layers } = await submitLayeredTier1(plan, ctx)
 
   const placementPinUID = resolved.get(REF.PLACEMENT_PIN)

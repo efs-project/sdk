@@ -151,12 +151,12 @@ async function readConfig(
  * One `length` read per candidate, fanned with `Promise.all` (multicall-coalesced),
  * then the first non-zero wins.
  */
-async function resolveListAttester(
+async function resolveListAttesters(
   ctx: ReadContext,
   opts: ListReadOptions | undefined,
   listUID: Hex,
   curator: Address,
-): Promise<Address> {
+): Promise<readonly Address[]> {
   const lens = await resolveAttesters(ctx, opts)
   // The curator is a convenience fallback ONLY when the caller expressed NO lens intent
   // (no per-call lens, no client defaultLens, no connected account) — i.e. the read fell
@@ -186,9 +186,13 @@ async function resolveListAttester(
       }),
     ),
   )
-  const idx = lengths.findIndex((n) => n > 0n)
-  // First attester with entries wins; else the first candidate (stable, empty).
-  return candidates[idx >= 0 ? idx : 0] as Address
+  // EVERY candidate with entries, in lens order (r3741157007): the probe and
+  // the verb's follow-up read are two reads, so a revoke can empty the leading
+  // candidate in between — the verbs RE-CHECK and fall through to the next
+  // candidate instead of reporting a false empty/zero/false, preserving
+  // first-attester-WITH-ENTRIES. Fallback: the first candidate (stable, empty).
+  const withEntries = candidates.filter((_, i) => (lengths[i] ?? 0n) > 0n)
+  return withEntries.length > 0 ? withEntries : [candidates[0] as Address]
 }
 
 /** Read one raw `entries` page for a resolved attester. */
@@ -263,13 +267,18 @@ export async function listLength(
 ): Promise<bigint> {
   const config = await readConfig(ctx.publicClient, ctx.deployment.contracts.listReader, listUID)
   if (!config.exists) throw new ListNotFound(listUID)
-  const attester = await resolveListAttester(ctx, opts, listUID, config.curator)
-  return read<bigint>(ctx.publicClient, {
-    address: ctx.deployment.contracts.listReader,
-    abi: listReaderAbi,
-    functionName: 'length',
-    args: [listUID, attester],
-  })
+  // Walk the ranked candidates: a revoke between the selection probe and this
+  // read can empty the leader — fall through instead of reporting a false 0.
+  for (const attester of await resolveListAttesters(ctx, opts, listUID, config.curator)) {
+    const n = await read<bigint>(ctx.publicClient, {
+      address: ctx.deployment.contracts.listReader,
+      abi: listReaderAbi,
+      functionName: 'length',
+      args: [listUID, attester],
+    })
+    if (n > 0n) return n
+  }
+  return 0n
 }
 
 /**
@@ -286,15 +295,28 @@ export async function listHas(
 ): Promise<boolean> {
   const config = await readConfig(ctx.publicClient, ctx.deployment.contracts.listReader, listUID)
   if (!config.exists) throw new ListNotFound(listUID)
-  const attester = await resolveListAttester(ctx, opts, listUID, config.curator)
   const identityKey = identityKeyFor(config.targetType, target)
-  const count = await read<bigint>(ctx.publicClient, {
-    address: ctx.deployment.contracts.listReader,
-    abi: listReaderAbi,
-    functionName: 'countOf',
-    args: [listUID, attester, identityKey],
-  })
-  return count > 0n
+  for (const attester of await resolveListAttesters(ctx, opts, listUID, config.curator)) {
+    const count = await read<bigint>(ctx.publicClient, {
+      address: ctx.deployment.contracts.listReader,
+      abi: listReaderAbi,
+      functionName: 'countOf',
+      args: [listUID, attester, identityKey],
+    })
+    if (count > 0n) return true
+    // countOf 0 splits two ways: the winner STANDS but lacks the target (an
+    // honest `false` — first-attester-wins forbids falling through), or the
+    // winner EVAPORATED between the probe and this read (its whole list is now
+    // empty — try the next candidate).
+    const n = await read<bigint>(ctx.publicClient, {
+      address: ctx.deployment.contracts.listReader,
+      abi: listReaderAbi,
+      functionName: 'length',
+      args: [listUID, attester],
+    })
+    if (n > 0n) return false
+  }
+  return false
 }
 
 /**
@@ -350,7 +372,13 @@ export function listEntries(
   const defaultLimit = opts?.limit ?? DEFAULT_LIST_PAGE_SIZE
 
   let primed:
-    | Promise<{ ctx: ReadContext; attester: Address; kind: ListTargetType; dedupe: boolean }>
+    | Promise<{
+        ctx: ReadContext
+        candidates: readonly Address[]
+        sel: { i: number }
+        kind: ListTargetType
+        dedupe: boolean
+      }>
     | undefined
   const prime = () => {
     if (!primed) {
@@ -362,8 +390,16 @@ export function listEntries(
           listUID,
         )
         if (!config.exists) throw new ListNotFound(listUID)
-        const attester = await resolveListAttester(ctx, opts, listUID, config.curator)
-        return { ctx, attester, kind: config.targetType, dedupe: !config.allowsDuplicates }
+        const candidates = await resolveListAttesters(ctx, opts, listUID, config.curator)
+        // `sel.i` is the CURRENT candidate — advanced by byPage when a leader
+        // evaporates between the selection probe and its first page read.
+        return {
+          ctx,
+          candidates,
+          sel: { i: 0 },
+          kind: config.targetType,
+          dedupe: !config.allowsDuplicates,
+        }
       })()
     }
     return primed
@@ -389,13 +425,35 @@ export function listEntries(
     cursor?: string
   }): Promise<Page<ListEntry>> => {
     assertPositiveLimit(pageOpts?.limit)
-    const { ctx, attester, kind, dedupe } = await prime()
+    const { ctx, candidates, sel, kind, dedupe } = await prime()
     // No per-page cursor ⇒ fall back to the constructor-level `opts.cursor` (a caller
     // who persisted a `Page.cursor` and resumed via `entries(uid, { cursor })` must start
     // there, not restart at offset 0 and duplicate entries).
     const start = parseCursor(pageOpts?.cursor ?? opts?.cursor)
     const pageSize = pageOpts?.limit ?? defaultLimit
-    const page = await readEntriesPage(ctx, listUID, attester, kind, start, pageSize)
+    let page = await readEntriesPage(
+      ctx,
+      listUID,
+      candidates[sel.i] as Address,
+      kind,
+      start,
+      pageSize,
+    )
+    // An EMPTY page at offset 0 means the selected candidate evaporated between
+    // the selection probe and this read (a revoke landed) — advance to the next
+    // ranked candidate (r3741157007) rather than reporting a false empty list.
+    // An empty page at a NONZERO offset is the normal end of pagination.
+    while (page.length === 0 && start === 0n && sel.i + 1 < candidates.length) {
+      sel.i += 1
+      page = await readEntriesPage(
+        ctx,
+        listUID,
+        candidates[sel.i] as Address,
+        kind,
+        start,
+        pageSize,
+      )
+    }
     // A short page (fewer than requested) means the end; otherwise advance the cursor
     // by the raw window size (BEFORE page-local dedupe — the on-chain index counts
     // raw entries, not deduped ones).
@@ -426,11 +484,30 @@ export function listEntries(
   /** Like `byPage` but WITHOUT page-local dedupe — the iterator / `toArray` dedupe
    * globally, so the windowed reads must surface raw entries. */
   const byPageRaw = async (cursor: string | undefined): Promise<Page<ListEntry>> => {
-    const { ctx, attester, kind } = await prime()
+    const { ctx, candidates, sel, kind } = await prime()
     // The first page (cursor undefined) honors the constructor-level `opts.cursor`;
     // subsequent pages thread their own advanced cursor.
     const start = parseCursor(cursor ?? opts?.cursor)
-    const page = await readEntriesPage(ctx, listUID, attester, kind, start, defaultLimit)
+    let page = await readEntriesPage(
+      ctx,
+      listUID,
+      candidates[sel.i] as Address,
+      kind,
+      start,
+      defaultLimit,
+    )
+    // Same evaporated-leader fall-through as byPage (r3741157007).
+    while (page.length === 0 && start === 0n && sel.i + 1 < candidates.length) {
+      sel.i += 1
+      page = await readEntriesPage(
+        ctx,
+        listUID,
+        candidates[sel.i] as Address,
+        kind,
+        start,
+        defaultLimit,
+      )
+    }
     const next = page.length < defaultLimit ? undefined : (start + BigInt(page.length)).toString()
     return next !== undefined ? { items: page, cursor: next } : { items: page }
   }

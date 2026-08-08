@@ -899,6 +899,19 @@ describe('makePinsNs', () => {
     expect(await pins.active(ANCHOR)).toBe(DATA)
   })
 
+  it('active with NO attester and NO connected account throws LensRequired — never a false absence (r3741157009)', async () => {
+    const pins = makePinsNs({
+      getDeployment: () => deployment,
+      publicClient: makeReadClient(() => {
+        throw new Error('no read should happen without an effective attester')
+      }) as never,
+      submitContext: () => makeSubmitCtx().ctx,
+      attester: () => undefined, // read-only client, no lens
+      revoke: async () => uid(0),
+    })
+    await expect(pins.active(ANCHOR)).rejects.toMatchObject({ code: 'LensRequired' })
+  })
+
   it('active returns undefined for an empty slot', async () => {
     const pins = makePinsNs({
       getDeployment: () => deployment,

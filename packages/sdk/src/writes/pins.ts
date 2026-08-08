@@ -20,6 +20,7 @@
 import type { Address, Hex } from 'viem'
 import { edgeResolverAbi } from '../chain/abi/edgeResolver.js'
 import type { EfsDeployment } from '../chain/deployments.js'
+import { EfsError } from '../errors.js'
 import { read } from '../reads/context.js'
 import type { ReadPublicClient } from '../reads/context.js'
 import { ZERO_UID } from '../reads/context.js'
@@ -76,7 +77,14 @@ export function makePinsNs(deps: PinsNsDeps): PinsNs {
     active: async (anchor, attester) => {
       const dep = await (deps.liveDeployment ?? deps.getDeployment)()
       const who = attester ?? deps.attester()
-      if (who === undefined) return undefined
+      // No effective attester is NOT an empty slot (r3741157009): returning
+      // undefined here would report a false absence for a read that never
+      // happened. Match the other standalone namespaces' contract.
+      if (who === undefined)
+        throw new EfsError(
+          'efs.graph.pins.active: no attester supplied and no connected account.',
+          { code: 'LensRequired' },
+        )
       // Guard against a chain switch between resolving `dep` and this read (TOCTOU).
       const pc = deps.guardReadClient?.(dep.chainId) ?? deps.publicClient
       const target = await read<Hex>(pc, {

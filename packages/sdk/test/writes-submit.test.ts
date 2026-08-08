@@ -126,6 +126,8 @@ interface MockChainOptions {
   /** Deterministic minted UID for the i-th attestation across the whole write
    * (global counter). Defaults to `0xD000 + i`. */
   mintUID?: (globalIndex: number) => Hex
+  /** Override the DATA author the mock EAS reports (the hardlink gate read). */
+  hardlinkAuthor?: Address
   /** Layer (1-based call index) at which `writeContract` throws a CODED refusal. */
   revertOnCall?: number
   /** Layer at which `writeContract` fails with a CODE-LESS transport error. */
@@ -218,6 +220,15 @@ function makeMockChain(opts: MockChainOptions = {}) {
   }
 
   const publicClient: SubmitPublicClient = {
+    // The hardlink self-authorship gate's EAS read (r3741157003): by default the
+    // mock reports the submitting ACCOUNT as the DATA author (self-authored);
+    // `hardlinkAuthor` overrides it to simulate a foreign DATA.
+    async readContract(args: { functionName: string }) {
+      if (args.functionName === 'getAttestation') {
+        return { attester: opts.hardlinkAuthor ?? ACCOUNT }
+      }
+      throw new Error(`mock: unexpected readContract ${args.functionName}`)
+    },
     async waitForTransactionReceipt({ hash }) {
       // The tx hash encodes its 1-based call index (`0x..0N`); honor a configured
       // receipt-wait throw for that layer (the tx WAS sent — a hash exists).
@@ -411,6 +422,37 @@ describe('submitWriteTier1 — receipt UID extraction', () => {
 })
 
 describe('submitWriteTier1 — hardlink plan', () => {
+  it('REFUSES a foreign-authored hardlink BEFORE any layer broadcasts (r3741157003)', async () => {
+    const plan = buildFileWriteGraph({
+      ...hardlinkBase,
+      content: { kind: 'hardlink', dataUID: EXISTING_DATA },
+    })
+    const { ctx, sent } = makeMockChain({
+      hardlinkAuthor: '0x000000000000000000000000000000000000beef' as Address,
+    })
+    const err = await submitWriteTier1(plan, ctx).catch((e) => e)
+    expect((err as { code?: string }).code).toBe('InvalidArgument')
+    expect(String((err as Error).message)).toMatch(/authored by 0x0+beef/i)
+    expect(String((err as Error).message)).toMatch(/ForeignDataUID/) // Solidity parity pointer
+    expect(sent).toHaveLength(0) // nothing broadcast — the gate runs first
+  })
+
+  it('FAILS CLOSED when the context cannot run the authorship read', async () => {
+    const plan = buildFileWriteGraph({
+      ...hardlinkBase,
+      content: { kind: 'hardlink', dataUID: EXISTING_DATA },
+    })
+    const { ctx, sent } = makeMockChain()
+    const bare = {
+      ...ctx,
+      publicClient: { waitForTransactionReceipt: ctx.publicClient.waitForTransactionReceipt },
+    } as SubmitContext
+    const err = await submitWriteTier1(plan, bare).catch((e) => e)
+    expect((err as { code?: string }).code).toBe('InvalidArgument')
+    expect(String((err as Error).message)).toMatch(/readContract/)
+    expect(sent).toHaveLength(0)
+  })
+
   it('threads the file-ANCHOR symbol and points the PIN at the pre-existing DATA', async () => {
     const plan = buildFileWriteGraph({
       ...hardlinkBase,

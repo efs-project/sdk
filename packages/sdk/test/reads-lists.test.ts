@@ -599,3 +599,78 @@ describe('sorts.* — deferred (SORT_INFO not frozen): every verb throws NotImpl
     await expect(applySort(uid(0x1), uid(0x501))).rejects.toBeInstanceOf(NotImplemented)
   })
 })
+
+describe('list attester re-selection after a raced revoke (review r3741157007)', () => {
+  const A = addr(0xaa1)
+  const B = addr(0xbb2)
+
+  /** A hand-rolled client: attester A reports one entry on its FIRST `length`
+   * read (the selection probe) and zero afterwards (a revoke landed between the
+   * probe and the verb's follow-up read); B holds one entry throughout. */
+  function racedClient(opts?: { bCountOf?: bigint }): ReadContext['publicClient'] {
+    let aLengthReads = 0
+    return {
+      async readContract(args: { functionName: string; args?: readonly unknown[] }) {
+        const a = (args.args ?? []) as readonly unknown[]
+        switch (args.functionName) {
+          case 'getMode':
+            return {
+              exists: true,
+              curator: CURATOR,
+              allowsDuplicates: false,
+              appendOnly: false,
+              targetType: 0,
+              targetSchema: ZERO,
+              maxEntries: 0n,
+            }
+          case 'length': {
+            const who = (a[1] as string).toLowerCase()
+            if (who === A.toLowerCase()) {
+              aLengthReads += 1
+              return aLengthReads === 1 ? 1n : 0n
+            }
+            return who === B.toLowerCase() ? 1n : 0n
+          }
+          case 'countOf': {
+            const who = (a[1] as string).toLowerCase()
+            if (who === B.toLowerCase()) return opts?.bCountOf ?? 1n
+            return 0n // A's slot evaporated (or never held the target)
+          }
+          case 'entries': {
+            const who = (a[1] as string).toLowerCase()
+            if (who === B.toLowerCase()) {
+              return [{ entryUID: uid(0xe1), identityKey: uid(0x777) }]
+            }
+            return [] // A's entries are gone
+          }
+          default:
+            throw new Error(`unexpected ${args.functionName}`)
+        }
+      },
+    } as unknown as ReadContext['publicClient']
+  }
+  const ctxOf = (client: ReadContext['publicClient']): ReadContext =>
+    ({ publicClient: client, deployment: deployment() }) as ReadContext
+
+  it('length falls through to the next lens attester (never a false 0)', async () => {
+    const ctx = ctxOf(racedClient())
+    expect(await listLength(ctx, LIST_UID, { lens: lens([A, B]) })).toBe(1n) // B's count
+  })
+
+  it('has() falls through when the leader evaporated — but an honest false STANDS', async () => {
+    // Leader evaporated → B is consulted (target present under B → true).
+    const ctx = ctxOf(racedClient())
+    expect(await listHas(ctx, LIST_UID, uid(0x777), { lens: lens([A, B]) })).toBe(true)
+    // Honest false: B is the standing winner (length > 0) but lacks THIS target —
+    // first-attester-wins forbids any further fall-through.
+    const ctx2 = ctxOf(racedClient({ bCountOf: 0n }))
+    expect(await listHas(ctx2, LIST_UID, uid(0x888), { lens: lens([A, B]) })).toBe(false)
+  })
+
+  it('entries falls through on an empty first page (never a false empty listing)', async () => {
+    const ctx = ctxOf(racedClient())
+    const page = await listEntries((() => ctx) as never, LIST_UID, { lens: lens([A, B]) }).byPage()
+    expect(page.items).toHaveLength(1)
+    expect(page.items[0]?.attester).toBe(B)
+  })
+})
