@@ -288,7 +288,16 @@ export async function resolvePlacement(
     dataUID: winner.uid as DataUID,
     resolvedBy: winner.attester,
     fileAnchorUID,
-    ...(slot.pinUID !== ZERO_UID ? { placementPinUID: slot.pinUID } : {}),
+    // The slot read is SEQUENTIAL after getFilesAtPath, so a concurrent
+    // re-placement by the winning attester can land between the two — the slot
+    // then describes the NEW placement while `winner.uid` is the snapshot's
+    // DATA. Provenance must describe the RETURNED snapshot: expose the PIN only
+    // when the slot's target IS the winner; on mismatch omit it exactly like
+    // the legitimate empty slot, never a `sourceUIDs.placement` (and expanded
+    // attestation) that contradicts the DataRef it rides with.
+    ...(slot.pinUID !== ZERO_UID && slot.targetID === winner.uid
+      ? { placementPinUID: slot.pinUID }
+      : {}),
     ...(via !== undefined ? { via } : {}),
   }
 }

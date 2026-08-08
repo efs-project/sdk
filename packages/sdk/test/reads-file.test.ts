@@ -162,6 +162,11 @@ function makeCtx(opts: {
   edges?: Record<string, Hex> // `${parent}|${name}` -> child anchor (resolvePath)
   files?: readonly Item[] // getFilesAtPath result for FILE_ANCHOR
   placementPins?: Record<string, Hex> // `${anchor}|${attester}` -> placement pin UID (getActivePinSlot)
+  // `${anchor}|${attester}` -> getActivePinSlot targetID OVERRIDE. Default is the
+  // CONSISTENT world (the attester's winning DATA — what a real EdgeResolver
+  // returns absent a concurrent re-placement); set this to simulate the TOCTOU
+  // mismatch where the slot advanced past the getFilesAtPath snapshot.
+  slotTargets?: Record<string, Hex>
   keyAnchors?: Record<string, Hex> // `${dataUID}|${key}` -> keyAnchor (resolveAnchor)
   pinTargets?: Record<string, Hex> // `${keyAnchor}|${attester}` -> propertyUID (getActivePinTarget)
   attestations?: Record<string, Hex> // propertyUID -> data blob (getAttestation)
@@ -185,6 +190,7 @@ function makeCtx(opts: {
     edges = {},
     files = [],
     placementPins = {},
+    slotTargets = {},
     keyAnchors = {},
     pinTargets = {},
     attestations = {},
@@ -221,9 +227,18 @@ function makeCtx(opts: {
           return { items: files, nextCursor: '0x' as Hex }
         case 'getActivePinSlot': {
           const [anchor, attester] = args.args as [Hex, Address]
+          const slotKey = `${anchor}|${attester.toLowerCase()}`
           return {
-            pinUID: placementPins[`${anchor}|${attester.toLowerCase()}`] ?? ZERO,
-            targetID: ZERO,
+            pinUID: placementPins[slotKey] ?? ZERO,
+            targetID:
+              slotTargets[slotKey] ??
+              files.find(
+                (f) =>
+                  f.hasData &&
+                  f.uid !== ZERO &&
+                  f.attester.toLowerCase() === attester.toLowerCase(),
+              )?.uid ??
+              ZERO,
           }
         }
         case 'resolveAnchor': {
@@ -547,6 +562,23 @@ describe('info', () => {
     expect(i.sourceUIDs.placement).toBe(PLACEMENT_PIN)
     expect(i.sourceUIDs.size).toBe(sizeProp)
     expect(i.sourceUIDs.contentType).toBe(typeProp)
+  })
+
+  it('omits placement provenance when the slot advanced past the snapshot (TOCTOU)', async () => {
+    // r3740754687: getActivePinSlot runs AFTER getFilesAtPath, so a concurrent
+    // re-placement can make the slot describe a NEWER DATA than the returned
+    // winner. The PIN must then be withheld (like an empty slot) — otherwise
+    // `sourceUIDs.placement` attaches the NEW placement's PIN to the OLD DataRef.
+    const ctx = makeCtx({
+      edges: README_EDGES,
+      files: [fileItem({})],
+      placementPins: README_PLACEMENT,
+      slotTargets: { [`${FILE_ANCHOR}|${LENS.toLowerCase()}`]: uid(0xd1f) }, // ≠ DATA_UID
+    })
+    const i = await info(ctx, '/docs/readme.md', { lens: LENS })
+    expect(i.exists).toBe(true)
+    expect(i.ref?.uid).toBe(DATA_UID) // the snapshot winner is still returned…
+    expect(i.sourceUIDs.placement).toBeUndefined() // …with NO contradicting PIN
   })
 
   it('omits size when the reserved PROPERTY is absent', async () => {

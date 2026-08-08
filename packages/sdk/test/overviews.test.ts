@@ -200,7 +200,9 @@ function makeCtx(opts: {
           }
         }
         case 'getActivePinSlot':
-          return { pinUID: uid(0x9111), targetID: ZERO }
+          // Consistent world: the slot's target IS the winner's DATA (src now
+          // withholds the PIN on a targetID/winner mismatch — the TOCTOU gate).
+          return { pinUID: uid(0x9111), targetID: winner?.dataUID ?? ZERO }
         case 'resolveAnchor': {
           const [, key] = args.args as [Hex, string]
           return keyAnchor(key)
