@@ -654,6 +654,33 @@ describe('capability probe chain-pinning (review r3740495867)', () => {
     expect((err as { code?: string }).code).toBe('WrongChain')
   })
 
+  it('the ENS lens resolution is chain-guarded too (r3741740331)', async () => {
+    // One provider serves ENS and the EFS reads: a drift between them would
+    // make the resolved ATTESTER come from another chain's registry. The guard
+    // fails closed instead.
+    let chainCalls = 0
+    const provider = createMockProvider({
+      chainId: 31337,
+      handlers: {
+        eth_chainId: () => {
+          chainCalls += 1
+          return chainCalls === 1 ? '0xaa36a7' : '0x3e7' // sepolia, then drift to 999
+        },
+        eth_call: () => `0x${'0'.repeat(64)}`,
+      },
+    })
+    // Sepolia is in the built-in registry, so deployment resolution succeeds on
+    // the FIRST getChainId; the drift then lands on the ENS resolution.
+    const pc = createPublicClient({ chain: sepolia, transport: custom(provider) })
+    const efs = createEfsClient({ publicClient: pc }) as unknown as {
+      fs: { read(p: string, o: unknown): Promise<unknown> }
+    }
+    const err = await efs.fs
+      .read('/docs/readme.md', { lens: identity('vitalik.eth') })
+      .catch((e) => e)
+    expect((err as { code?: string }).code).toBe('WrongChain')
+  })
+
   it('capabilities({ refresh: true }) re-probes mutable account code; a plain call serves the cache (r3740877068)', async () => {
     // Same account, same chain — but the CODE changes (an EIP-7702 delegation
     // lands). The cache key can't see that, so the plain call keeps serving

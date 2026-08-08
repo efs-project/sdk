@@ -195,14 +195,17 @@ describe('MIRROR node', () => {
       ...bytesInput,
       mirrors: [
         { uri: 'ipfs://A', transportDefinition: IPFS_T },
-        { uri: 'ar://B', transportDefinition: AR_T },
+        { uri: 'ar://AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', transportDefinition: AR_T },
       ],
     }).attestations.filter((a) => a.kind === 'MIRROR')
     expect(two).toHaveLength(2)
     // Each MIRROR carries its own transport — the ar:// entry is NOT mislabeled
     // with the ipfs transport (the bug this guards).
     expect(mirrorEnc.decodeData(two[0].data)).toEqual([IPFS_T, 'ipfs://A'])
-    expect(mirrorEnc.decodeData(two[1].data)).toEqual([AR_T, 'ar://B'])
+    expect(mirrorEnc.decodeData(two[1].data)).toEqual([
+      AR_T,
+      'ar://AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    ])
   })
 })
 
@@ -542,6 +545,32 @@ describe('byte-plan builder preflight (reviews r3741586928 / r3741586938)', () =
         ],
       }),
     ).toThrowError(/URI|8192|length/i)
+  })
+
+  it('REJECTS a structurally invalid KNOWN-scheme URI (r3741740332)', () => {
+    // The chain accepts any nonempty string (ADR-0056: no scheme allowlist), so
+    // `ipfs://!` mints a valid MIRROR — and then every read fails to resolve it.
+    expect(() =>
+      buildFileWriteGraph({
+        ...good,
+        mirrors: [
+          { uri: 'ipfs://!', transportDefinition: baseInput.mirrors[0]!.transportDefinition },
+        ],
+      }),
+    ).toThrowError(/not a valid ipfs: locator/)
+  })
+
+  it('ACCEPTS an unknown/custom scheme untouched (the ADR-0056 escape hatch)', () => {
+    const g = buildFileWriteGraph({
+      ...good,
+      mirrors: [
+        {
+          uri: 'ftps://legacy.example/file',
+          transportDefinition: baseInput.mirrors[0]!.transportDefinition,
+        },
+      ],
+    })
+    expect(g.attestations.some((a) => a.kind === 'MIRROR')).toBe(true)
   })
 
   it('REJECTS a malformed transportDefinition (shape) at build time', () => {

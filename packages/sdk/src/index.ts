@@ -655,7 +655,12 @@ function chainGuardedWallet(wallet: WalletClient, deploymentChainId: () => numbe
  * construction) would otherwise hit the resolved chain's addresses on the new chain, returning
  * false misses / wrong-chain data. Guarding fails closed on drift. `getCode` is included
  * because the `web3://` (SSTORE2) read transport code-copies chunks by address. `getEnsAddress`
- * is deliberately NOT guarded — ENS resolution is cross-chain by nature (mainnet registry).
+ * IS guarded too (r3741740331): the client holds ONE provider, so an ENS lens resolves on
+ * whatever chain that provider is currently on — under drift the resolved ATTESTER comes from
+ * another chain's registry while the guarded EFS reads run on the deployment chain, yielding a
+ * false absence or another lens's data. (The earlier "cross-chain by nature" exemption bought
+ * nothing: with a single client it made resolution nondeterministic rather than cross-chain.
+ * Deliberate cross-chain ENS would need its own client, not provider drift.)
  */
 function chainGuardedPublicClient(
   client: PublicClient,
@@ -687,6 +692,17 @@ function chainGuardedPublicClient(
           await assertChainMatches(target, deploymentChainId())
           return out
         }) as PublicClient['getCode']
+      }
+      if (prop === 'getEnsAddress') {
+        const ensFn = target.getEnsAddress.bind(target)
+        return (async (args: Parameters<PublicClient['getEnsAddress']>[0]) => {
+          await assertChainMatches(target, deploymentChainId())
+          const out = await ensFn(args)
+          // Same post-check as readContract — an address resolved on a drifted
+          // chain must never become the lens attester for deployment-chain reads.
+          await assertChainMatches(target, deploymentChainId())
+          return out
+        }) as PublicClient['getEnsAddress']
       }
       return Reflect.get(target, prop, receiver)
     },
@@ -1162,7 +1178,12 @@ export function createEfsV1Client(config: EfsClientConfig): EfsClient {
       },
     },
     lenses: {
-      resolve: (input) => resolveLens(input, { publicClient }),
+      // Guarded like the read path's lens resolution (r3741740331): an ENS name
+      // resolved on a drifted chain must never become an attester.
+      resolve: (input) =>
+        resolveLens(input, {
+          publicClient: chainGuardedPublicClient(publicClient, () => getDeployment().chainId),
+        }),
       lens,
       identity,
     },

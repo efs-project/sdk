@@ -243,7 +243,7 @@ describe('resolveMirrorTransport', () => {
         throw new Error('should not read when the map has arweave')
       }) as never,
       deployment,
-      'ar://abc',
+      'ar://AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
       undefined,
     )
     expect(out).toBe(ARWEAVE_TRANSPORT)

@@ -45,6 +45,7 @@ import type { EfsSchemaUIDs } from '../chain/deployments.js'
 import { SchemaEncoder } from '../eas/schema-encoder.js'
 import { EFS_SCHEMA_FIELDS } from '../eas/schemas.js'
 import { EfsError, InvalidListConfig } from '../errors.js'
+import { TRANSPORT, UnsupportedUriError, resolveTransport } from '../mirror/transport.js'
 import type { CanonicalName } from '../names/segment.js'
 import type { ListTargetType } from '../types.js'
 import { type FileWriteGraph, type PlannedAttestation, ZERO_ADDRESS, ZERO_UID } from './graph.js'
@@ -643,5 +644,27 @@ export function validateMirrorUri(uri: string, verb: string): void {
       `${verb}: the mirror URI is ${byteLength} bytes, over MirrorResolver's ${MAX_MIRROR_URI_BYTES}-byte limit. Use a shorter URI (e.g. a content-addressed \`ipfs://\`/\`ar://\` reference).`,
       { code: 'InvalidArgument' },
     )
+  }
+  // STRUCTURAL parse for schemes the SDK itself resolves (r3741740332). The
+  // chain accepts any nonempty string (ADR-0056 deliberately has no scheme
+  // allowlist), so `ipfs://!` mints a perfectly valid MIRROR — and then the
+  // SDK's own `resolveTransport` rejects the locator before any fetch, leaving
+  // every read AllMirrorsFailed on a confirmed file. Parse the known schemes
+  // here; UNKNOWN schemes stay untouched (the custom-transport escape hatch the
+  // ADR protects).
+  const scheme = /^([a-z][a-z0-9+.-]*):/i.exec(uri)?.[1]?.toLowerCase()
+  const known = scheme !== undefined && (scheme === 'ar' || scheme in TRANSPORT)
+  if (known) {
+    try {
+      resolveTransport(uri, {})
+    } catch (err) {
+      if (err instanceof UnsupportedUriError) {
+        throw new EfsError(
+          `${verb}: the mirror URI '${uri}' is not a valid ${scheme}: locator (${err.message}). MirrorResolver would accept it, but every read would fail to resolve it — fix the URI, or use a custom scheme if this transport is not one the SDK resolves.`,
+          { code: 'InvalidArgument', cause: err },
+        )
+      }
+      throw err
+    }
   }
 }

@@ -505,7 +505,7 @@ describe('writeFileTier1 — caller-supplied mirrors', () => {
     // else a valid ar:// write throws MissingTransport.
     const { ctx, sent } = makeCtx({ transports: { arweave: ARWEAVE } })
     await writeFileTier1('/docs/readme.md', CONTENT, ctx, {
-      mirrors: ['ar://abcdEFGHtxid'],
+      mirrors: ['ar://AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'],
     })
     const { SchemaEncoder } = await import('../src/eas/schema-encoder.js')
     const { EFS_SCHEMA_FIELDS } = await import('../src/eas/schemas.js')
@@ -513,7 +513,7 @@ describe('writeFileTier1 — caller-supplied mirrors', () => {
     const mirrorEntry = sent[1].entries.find((e) => e.schema === SCHEMAS.mirror)
     const [transportDef, uriValue] = mirrorEnc.decodeData(mirrorEntry!.data) as [Hex, string]
     expect(transportDef).toBe(ARWEAVE) // ar → arweave
-    expect(uriValue).toBe('ar://abcdEFGHtxid')
+    expect(uriValue).toBe('ar://AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA')
   })
 
   it('labels each mirror of a mixed-scheme set with its OWN transport (ipfs + ar)', async () => {
@@ -524,7 +524,7 @@ describe('writeFileTier1 — caller-supplied mirrors', () => {
     // A common durability pair — each MIRROR must get its own transport, not the
     // first URI's (the mislabeling bug this guards).
     await writeFileTier1('/docs/readme.md', CONTENT, ctx, {
-      mirrors: ['ipfs://QmExample', 'ar://txid'],
+      mirrors: ['ipfs://QmExample', 'ar://AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'],
     })
     const { SchemaEncoder } = await import('../src/eas/schema-encoder.js')
     const { EFS_SCHEMA_FIELDS } = await import('../src/eas/schemas.js')
@@ -533,7 +533,7 @@ describe('writeFileTier1 — caller-supplied mirrors', () => {
     expect(mirrorEntries).toHaveLength(2)
     const decoded = mirrorEntries.map((e) => mirrorEnc.decodeData(e.data) as [Hex, string])
     expect(decoded).toContainEqual([TRANSPORT_IPFS, 'ipfs://QmExample'])
-    expect(decoded).toContainEqual([ARWEAVE, 'ar://txid'])
+    expect(decoded).toContainEqual([ARWEAVE, 'ar://AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'])
   })
 })
 
