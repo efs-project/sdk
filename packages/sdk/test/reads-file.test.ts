@@ -1556,6 +1556,53 @@ describe('trust provenance (ADR-0015)', () => {
   })
 })
 
+describe('transports priority ordering (review r3741656072)', () => {
+  it("reorders candidates by the CALLER's preference, not the on-chain order", async () => {
+    // Two mirrors: the on-chain order puts the data: (https-like) mirror LAST.
+    // With `transports: ['data', 'ipfs']` the data: mirror must be tried FIRST
+    // — the engine takes the first mirror that yields bytes, so ordering is the
+    // whole contract ("Restrict/prioritize").
+    const md = '# Hello EFS\n'
+    const dataUri = `data:text/markdown;base64,${Buffer.from(md).toString('base64')}`
+    const ctx = makeCtx({
+      edges: README_EDGES,
+      files: [fileItem({})],
+      placementPins: README_PLACEMENT,
+      // On-chain order: ipfs first (unreachable in this harness), data: second.
+      mirrors: [
+        { uri: 'ipfs://QmUnreachable', attester: LENS },
+        { uri: dataUri, attester: LENS },
+      ],
+    })
+    const file = await read(ctx, '/docs/readme.md', {
+      lens: LENS,
+      verify: false,
+      transports: ['data', 'ipfs'],
+    })
+    expect(file.mirrorUsed).toBe(dataUri) // the preferred scheme won
+  })
+
+  it('keeps the on-chain order WITHIN a scheme (stable sort)', async () => {
+    const first = `data:text/plain;base64,${Buffer.from('first').toString('base64')}`
+    const second = `data:text/plain;base64,${Buffer.from('second').toString('base64')}`
+    const ctx = makeCtx({
+      edges: README_EDGES,
+      files: [fileItem({})],
+      placementPins: README_PLACEMENT,
+      mirrors: [
+        { uri: first, attester: LENS },
+        { uri: second, attester: LENS },
+      ],
+    })
+    const file = await read(ctx, '/docs/readme.md', {
+      lens: LENS,
+      verify: false,
+      transports: ['data'],
+    })
+    expect(file.mirrorUsed).toBe(first) // same scheme → on-chain priority preserved
+  })
+})
+
 describe('transports: [] is honored (review r3740636910)', () => {
   it('an explicitly empty allowlist leaves ZERO candidates — never allow-all', async () => {
     const dataUri = `data:text/markdown;base64,${Buffer.from('# Hello EFS\n').toString('base64')}`

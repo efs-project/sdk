@@ -127,8 +127,25 @@ export async function fetchRef(
   // and silently widening `transports: []` from a computed security policy into
   // every scheme would invert the caller's restriction.
   if (opts?.transports !== undefined) {
-    const allow = new Set(opts.transports.map((t) => t.toLowerCase()))
-    uris = uris.filter((u) => allow.has(schemeName(u)))
+    // The option's contract is "Restrict/PRIORITIZE" — an ordered preference,
+    // not just an allowlist (r3741656072). Filter to the allowed schemes, then
+    // reorder by the caller's position (STABLE within a scheme, so the on-chain
+    // priority still breaks ties between same-scheme mirrors). The engine takes
+    // the first mirror that yields bytes, so without this the caller's stated
+    // preference had no effect at all.
+    const rank = new Map<string, number>()
+    opts.transports.forEach((t, i) => {
+      const key = t.toLowerCase()
+      if (!rank.has(key)) rank.set(key, i) // first mention wins on duplicates
+    })
+    uris = uris
+      .map((u, i) => ({ u, scheme: schemeName(u), i }))
+      .filter((e) => rank.has(e.scheme))
+      .sort((a, b) => {
+        const byRank = (rank.get(a.scheme) as number) - (rank.get(b.scheme) as number)
+        return byRank !== 0 ? byRank : a.i - b.i
+      })
+      .map((e) => e.u)
   }
 
   // Author-attested metadata, scoped to the winning lens. `contentType` is ALWAYS
