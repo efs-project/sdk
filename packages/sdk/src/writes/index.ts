@@ -24,6 +24,7 @@ export {
   submitLayeredTier1,
   WriteRevertedError,
   WriteNotSentError,
+  WriteUidsUnknownError,
   type SubmitContext,
   type SubmitWalletClient,
   type SubmitPublicClient,

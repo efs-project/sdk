@@ -54,6 +54,7 @@ import {
   type SubmitWalletClient,
   WriteNotSentError,
   WriteRevertedError,
+  WriteUidsUnknownError,
 } from './submit.js'
 import type { SubmitterContext } from './submitter.js'
 
@@ -528,7 +529,11 @@ export async function writeFileTier1(
     return await submitter.submit(plan, submitterCtx)
   } catch (err) {
     if (storage !== undefined) {
-      if (err instanceof WriteNotSentError || err instanceof WriteRevertedError) {
+      if (
+        err instanceof WriteNotSentError ||
+        err instanceof WriteRevertedError ||
+        err instanceof WriteUidsUnknownError
+      ) {
         err.storage = storage
       } else {
         // A FIRST-layer preflight failure (abort / WrongChain before any EAS

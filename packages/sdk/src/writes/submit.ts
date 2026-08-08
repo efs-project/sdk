@@ -204,8 +204,11 @@ export interface Tier1WriteResult {
  * all later ones did not (cleanly). The file is half-written.
  *
  * For a failure where NO tx was ever sent (the `writeContract` call itself threw —
- * user rejection, wallet RPC error, preflight), see {@link WriteNotSentError}: there
- * is no `txHash`, nothing landed in this layer, and a retry is safe.
+ * user rejection, wallet RPC error, preflight), see {@link WriteNotSentError}:
+ * there is no `txHash` and nothing landed in this layer. For a receipt that
+ * mined SUCCESSFULLY but whose `Attested` logs could not be decoded, see
+ * {@link WriteUidsUnknownError}: those attestations DID mint — the opposite of
+ * this class's contract.
  */
 export class WriteRevertedError extends EfsError {
   /** The COMPLETED (irreversible) on-chain storage the write performed before
@@ -256,15 +259,61 @@ export class WriteRevertedError extends EfsError {
 }
 
 /**
+ * Raised when a layer's `multiAttest` MINED SUCCESSFULLY (`status: 'success'`)
+ * but its `Attested` logs could not be extracted (an RPC returning incomplete
+ * logs, or event drift) — every attestation in this layer therefore EXISTS
+ * on-chain, with UNKNOWN UIDs. This is NOT a revert ({@link WriteRevertedError}:
+ * `failedRefs` did not mint) and NOT an unsent layer ({@link WriteNotSentError}):
+ * resending this layer — or retrying the whole write — would DUPLICATE every
+ * attestation in it. Recovery re-reads the transaction's receipt logs (another
+ * RPC works) to recover the UIDs. Later layers were NOT sent (their symbolic
+ * refs needed these UIDs).
+ */
+export class WriteUidsUnknownError extends EfsError {
+  /** See {@link WriteRevertedError.storage} — same attachment, same recovery. */
+  storage?: CompletedOnchainStorage
+  override name = 'WriteUidsUnknownError'
+  /** The DAG layer that mined with unextractable logs. */
+  readonly layer: number
+  /** The refs in the mined layer — every one EXISTS on-chain (UID unknown). */
+  readonly mintedRefs: readonly string[]
+  /** The `ref → UID` table from layers that landed BEFORE this one. */
+  readonly landed: RefMap
+  /** The MINED tx — the recovery handle (re-read its `Attested` logs). */
+  readonly txHash: Hex
+  constructor(
+    layer: number,
+    mintedRefs: readonly string[],
+    landed: RefMap,
+    txHash: Hex,
+    cause: unknown,
+  ) {
+    const classified = classifyError(cause)
+    super(
+      `EFS write layer ${layer} MINED successfully (tx ${txHash}) but its Attested logs could not be extracted — all ${mintedRefs.length} attestation(s) in the layer (${mintedRefs.join(', ')}) EXIST on-chain with unknown UIDs. Do NOT resend the layer or retry the write (either would duplicate them); recover the UIDs from the tx's receipt logs. ${landed.size} attestation(s) from earlier layers already landed; later layers were not sent.`,
+      { code: 'PartialBatchFailure', cause, details: classified.shortMessage },
+    )
+    this.layer = layer
+    this.mintedRefs = mintedRefs
+    this.landed = landed
+    this.txHash = txHash
+  }
+}
+
+/**
  * Raised when a layer's `multiAttest` was NEVER SENT — the `writeContract` call
  * itself threw (user rejection, wallet/RPC error, or a client-side preflight/
- * simulation failure) before any transaction was broadcast. So NO tx hash exists,
- * NO partial on-chain layer was created by this attempt, and a retry of the whole
- * write is SAFE (there is no in-flight tx to duplicate).
+ * simulation failure) before any transaction was broadcast. So NO tx hash exists
+ * and THIS layer has no in-flight tx to duplicate — but that alone does NOT make
+ * a whole-write retry safe: `fs.write` does not resume, so when earlier layers
+ * ({@link WriteNotSentError.landed}) or completed storage (`storage`) exist, a
+ * retry rebuilds the write from scratch — re-minting the landed attestations,
+ * re-paying storage deploys, and possibly reverting on permanent duplicate
+ * anchors. Only with an empty `landed` AND no `storage` is a plain retry safe.
  *
- * The partial-write boundary from PRIOR layers is still preserved: layers before
+ * The partial-write boundary from PRIOR layers is preserved: layers before
  * {@link WriteNotSentError.layer} already mined (their UIDs are in
- * {@link WriteNotSentError.landed}). This is the safe-to-retry counterpart to
+ * {@link WriteNotSentError.landed}). The no-txHash counterpart of
  * {@link WriteRevertedError} (which carries an in-flight `txHash`).
  */
 export class WriteNotSentError extends EfsError {
@@ -280,8 +329,10 @@ export class WriteNotSentError extends EfsError {
   constructor(layer: number, failedRefs: readonly string[], landed: RefMap, cause: unknown) {
     const classified = classifyError(cause)
     super(
-      `EFS write could not be sent at layer ${layer} — the transaction was never broadcast (${failedRefs.length} attestation(s): ${failedRefs.join(', ')}). ` +
-        `No tx is in flight, so a retry is safe. ${landed.size} attestation(s) from earlier layers already landed.`,
+      `EFS write could not be sent at layer ${layer} — the transaction was never broadcast (${failedRefs.length} attestation(s): ${failedRefs.join(', ')}). No tx is in flight for this layer. ` +
+        (landed.size === 0
+          ? `No earlier EAS layer landed. If no completed storage is attached ('storage'), nothing from this attempt is on-chain and a retry is safe; with 'storage' attached, pass storage.web3Uri as an explicit mirror on the retry instead of re-paying the deploy.`
+          : `${landed.size} attestation(s) from earlier layers ALREADY LANDED and fs.write does not resume — a whole-write retry would re-mint them (and can revert on permanent duplicate anchors). Recover from 'landed' (and 'storage', when attached) instead of retrying.`),
       { code: 'PartialBatchFailure', cause, details: classified.shortMessage },
     )
     this.layer = layer
@@ -530,19 +581,23 @@ export async function submitLayeredTier1(
       throw new WriteNotSentError(layer, flatRefs, new Map(resolved), ctx.signal.reason)
     }
 
-    // Send the layer's single multiAttest. The three failure modes are kept
-    // DISTINCT so a caller can tell safe-retry from possible-duplicate:
+    // Send the layer's single multiAttest. The four failure modes are kept
+    // DISTINCT so a caller can tell what (if anything) landed:
     //
     //   (a) writeContract throws (or the pre-send chain guard fails AFTER an earlier layer
-    //       landed) → NO tx was broadcast: nothing landed in this layer, a retry is safe →
-    //       WriteNotSentError (no txHash), carrying the landed-UID map for recovery.
+    //       landed) → NO tx was broadcast: nothing landed in THIS layer →
+    //       WriteNotSentError (no txHash), carrying the landed-UID map for recovery
+    //       (whole-write retry safety depends on `landed`/`storage` — see its docs).
     //   (b) the receipt wait throws after a txHash exists → the tx may still mine
     //       later: outcome UNKNOWN, naive retry risks a duplicate →
     //       WriteRevertedError(mined:false) carrying the in-flight txHash.
     //   (c) the receipt reports status:'reverted' → the tx mined and reverted →
     //       WriteRevertedError(mined:true) carrying the txHash.
+    //   (d) the receipt is SUCCESS but the Attested logs can't be extracted → the
+    //       layer's attestations EXIST with unknown UIDs → WriteUidsUnknownError
+    //       (resending would duplicate them; recover from the receipt logs).
     //
-    // All three preserve the prior-layer landed refs.
+    // All four preserve the prior-layer landed refs.
     // Wrong-chain boundary (pre-send): re-assert the live wallet/public chain BEFORE
     // broadcasting — a multi-layer write prompts once per layer, so a switch after an earlier
     // layer mined must not broadcast this dependent layer to the new chain. When earlier layers
@@ -609,23 +664,12 @@ export async function submitLayeredTier1(
       uids = extractMintedUIDs(receipt, ctx.easAddress, flatRefs.length)
     } catch (cause) {
       // The layer MINED (status success) — only the Attested-log extraction
-      // failed (an RPC returning incomplete logs, or event drift). Throwing a
-      // bare error here would read as "unsent" and invite a resend that
-      // DUPLICATES the landed attestations. Surface the mined-with-unknown-UIDs
-      // state structurally: txHash + mined:true + the prior landed map, with
-      // the extraction failure as cause — recovery re-reads the tx's logs
-      // instead of replaying the layer.
-      throw new WriteRevertedError(
-        layer,
-        flatRefs,
-        new Map(resolved),
-        txHash,
-        true,
-        new EfsError(
-          `multiAttest tx ${txHash} MINED successfully, but its Attested logs could not be extracted — this layer's attestations EXIST on-chain with unknown UIDs. Do NOT resend the layer (that would duplicate it); recover the UIDs from the transaction's receipt logs.`,
-          { code: 'PartialBatchFailure', cause },
-        ),
-      )
+      // failed (an RPC returning incomplete logs, or event drift). This is
+      // mode (d): NOT a revert (WriteRevertedError's contract says failedRefs
+      // did not mint — here every ref DID), and NOT unsent. The distinct class
+      // makes the duplicate-on-resend hazard structural: recovery re-reads the
+      // tx's logs instead of replaying the layer.
+      throw new WriteUidsUnknownError(layer, flatRefs, new Map(resolved), txHash, cause)
     }
     const minted: { ref: string; uid: Hex }[] = flatRefs.map((ref, i) => {
       // `extractMintedUIDs` asserts `uids.length === flatRefs.length`, so the

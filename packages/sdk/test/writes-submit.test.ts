@@ -18,6 +18,7 @@ import {
   type SubmitWalletClient,
   WriteNotSentError,
   WriteRevertedError,
+  WriteUidsUnknownError,
   submitWriteTier1,
 } from '../src/writes/submit.js'
 
@@ -364,22 +365,25 @@ describe('submitWriteTier1 — receipt UID extraction', () => {
     expect(result.uids.size).toBe(13)
   })
 
-  it('a receipt whose Attested logs cannot be extracted surfaces MINED-with-unknown-UIDs, never "unsent" (r3740563979)', async () => {
+  it('a receipt whose Attested logs cannot be extracted surfaces WriteUidsUnknownError, never "unsent" or "reverted" (r3740563979/r3740820584)', async () => {
     // The layer MINED (receipt status success) — only log extraction failed
-    // (incomplete RPC logs / drift). A bare throw read as "unsent" and invited
-    // a resend DUPLICATING the landed attestations. The structured shape keeps
-    // the txHash + mined:true + the prior landed map; the extraction failure
-    // (count mismatch here) rides as the cause chain.
+    // (incomplete RPC logs / drift). A bare throw read as "unsent"; encoding it
+    // as WriteRevertedError{mined:true} claimed the refs did NOT mint (that
+    // class's contract) when every one of them DID — recovery reading the
+    // top-level fields would resend and duplicate the layer. The DISTINCT
+    // class carries the mined txHash + mintedRefs + the prior landed map; the
+    // extraction failure (count mismatch here) is the cause.
     const plan = buildFileWriteGraph(bytesInput)
     const { ctx } = makeMockChain({ dropLastLog: true })
     const err = await submitWriteTier1(plan, ctx).catch((e) => e)
-    expect(err).toBeInstanceOf(WriteRevertedError)
-    const w = err as WriteRevertedError
+    expect(err).toBeInstanceOf(WriteUidsUnknownError)
+    expect(err).not.toBeInstanceOf(WriteRevertedError)
+    const w = err as WriteUidsUnknownError
     expect(w.txHash).toMatch(/^0x/)
-    expect(w.mined).toBe(true)
-    expect(String((w.cause as { cause?: unknown })?.cause ?? w.cause)).toMatch(
-      /does not match the submitted multiAttest/,
-    )
+    expect(w.mintedRefs.length).toBeGreaterThan(0)
+    expect(String(w.message)).toMatch(/EXIST on-chain with unknown UIDs/)
+    expect(String(w.message)).toMatch(/Do NOT resend/)
+    expect(String(w.cause)).toMatch(/does not match the submitted multiAttest/)
   })
 })
 
@@ -596,7 +600,10 @@ describe('submitWriteTier1 — partial-write boundary: three distinct failure mo
     expect(we.failedRefs).toContain('fileAnchor')
     // Only one layer tx was sent successfully before the failure.
     expect(sent).toHaveLength(1)
-    expect(String(we.message)).toMatch(/retry is safe/)
+    // r3740820587: layer 1 ALREADY LANDED, so the message must NOT bless a
+    // whole-write retry (fs.write does not resume — a retry re-mints layer 1).
+    expect(String(we.message)).not.toMatch(/retry is safe/)
+    expect(String(we.message)).toMatch(/ALREADY LANDED and fs.write does not resume/)
   })
 
   it('receipt-wait throw after a hash → WriteRevertedError(mined:false) carrying the in-flight txHash', async () => {
