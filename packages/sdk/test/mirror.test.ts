@@ -725,3 +725,28 @@ describe('fetchVerified - AbortSignal', () => {
     ).rejects.toBeInstanceOf(AllMirrorsFailedError)
   })
 })
+
+describe('browser opaqueredirect provenance (review r3740482355)', () => {
+  it('urlUsed reports the FOLLOWED final URL, not the pre-redirect one', async () => {
+    const bytes = new TextEncoder().encode('follow me')
+    const hash = hashContent(bytes)
+    const FINAL = 'https://cdn.example/final/blob.bin'
+    let call = 0
+    const fetchImpl = (async (_url: unknown, init?: { redirect?: string }) => {
+      call += 1
+      if (init?.redirect === 'manual') {
+        // Browser path: the manual probe yields an opaque redirect.
+        return { type: 'opaqueredirect', ok: false, status: 0 } as unknown as Response
+      }
+      // The follow request lands on the redirect target — Response.url carries it.
+      const res = mockResponse(bytes)
+      Object.defineProperty(res, 'url', { value: FINAL })
+      return res
+    }) as typeof fetch
+    const { fetchVerified } = await import('../src/mirror/fetch.js')
+    const out = await fetchVerified(['https://gateway.example/start'], hash, { fetchImpl })
+    expect(out.verification).toBe('matches-author')
+    expect(out.urlUsed).toBe(FINAL) // was: the pre-redirect start URL
+    expect(call).toBe(2)
+  })
+})

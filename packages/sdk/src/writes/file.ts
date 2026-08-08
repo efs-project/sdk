@@ -187,6 +187,16 @@ export async function resolveMirrors(
   // `storage:'onchain'` (cap bypassed), else gated by the on-chain auto-cap.
   const forced = opts?.storage === 'onchain'
   const limit = ctx.onchainAutoLimit ?? DEFAULT_ONCHAIN_AUTO_LIMIT
+  // A NaN/non-positive cap from bad config would make `byteLength > limit`
+  // always FALSE — silently waving oversized payloads into gas-spending
+  // storage deploys instead of throwing. Reject garbage loudly (same rule as
+  // the read path's maxBytes validation).
+  if (!Number.isFinite(limit) || limit <= 0) {
+    throw new EfsError(
+      `EFS write: \`write.onchainAutoLimit\` is ${String(limit)} — the on-chain auto-store cap must be a finite positive byte count (default ${DEFAULT_ONCHAIN_AUTO_LIMIT}).`,
+      { code: 'InvalidArgument' },
+    )
+  }
   if (!forced && bytes.byteLength > limit) {
     throw new PayloadTooLarge(bytes.byteLength, limit)
   }

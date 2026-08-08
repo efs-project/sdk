@@ -81,3 +81,22 @@ describe('bigint-safe JSON serialization (review P3 DX)', () => {
     expect(BigInt(back.size as string)).toBe(42n) // the consumer re-BigInts known-numeric fields
   })
 })
+
+describe('toJSON runtime contract (review r3740482358)', () => {
+  it('throws InvalidArgument for roots with no JSON representation, keeping the string promise truthful', async () => {
+    const { toJSON } = await import('../src/json.js')
+    for (const bad of [undefined, () => 0, Symbol('x')]) {
+      const err = (() => {
+        try {
+          toJSON(bad)
+          return undefined
+        } catch (e) {
+          return e as { code?: string }
+        }
+      })()
+      expect(err?.code, typeof bad).toBe('InvalidArgument')
+    }
+    // null IS serializable — stays fine.
+    expect(toJSON(null)).toBe('null')
+  })
+})

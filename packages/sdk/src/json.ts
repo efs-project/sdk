@@ -29,6 +29,8 @@
  * deliberately REJECTS `toJSON` output (no envelope) — the two formats never mix.
  */
 
+import { EfsError } from './errors.js'
+
 /**
  * A `JSON.stringify` replacer that renders `bigint` values as decimal strings.
  * Pass it as the second argument to `JSON.stringify` to serialize any value that
@@ -64,7 +66,19 @@ export function jsonReplacer(_key: string, value: unknown): unknown {
  *   spaces or a string) for pretty-printing.
  * @returns The JSON string. See the module note on the round-trip caveat — bigints
  *   come back as strings, not bigints (there is no safe automatic reviver).
+ * @throws {EfsError} (`InvalidArgument`) when the root value has NO JSON
+ *   representation (`undefined`, a function, or a symbol) — `JSON.stringify`
+ *   returns `undefined` for those, which would break this signature's `string`
+ *   contract at runtime (and persistence APIs would store the literal text
+ *   `"undefined"`). Throwing keeps the promise truthful.
  */
 export function toJSON(value: unknown, space?: number | string): string {
-  return JSON.stringify(value, jsonReplacer, space)
+  const out = JSON.stringify(value, jsonReplacer, space)
+  if (out === undefined) {
+    throw new EfsError(
+      `efs.toJSON: a ${typeof value} root has no JSON representation — pass a serializable value (object/array/string/number/boolean/null).`,
+      { code: 'InvalidArgument' },
+    )
+  }
+  return out
 }

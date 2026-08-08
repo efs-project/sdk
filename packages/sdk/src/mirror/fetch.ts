@@ -259,7 +259,14 @@ async function fetchOne(
           headers: { accept: 'application/octet-stream, */*', 'accept-encoding': 'identity' },
         })
         if (!followed.ok) throw new Error(`HTTP ${followed.status} ${followed.statusText}`)
-        return { ...(await finishResponse(followed, maxBytes, controller)), finalUrl: current.href }
+        // Provenance: the browser followed the chain, so the bytes came from the
+        // FOLLOWED response's final URL, not the pre-redirect one — `urlUsed`
+        // must name the endpoint that actually supplied them. (An empty
+        // `followed.url` — an opaque response — falls back to the request URL.)
+        return {
+          ...(await finishResponse(followed, maxBytes, controller)),
+          finalUrl: followed.url !== '' ? followed.url : current.href,
+        }
       }
 
       if (res.status >= 300 && res.status < 400) {

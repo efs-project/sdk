@@ -602,6 +602,17 @@ describe('writeFileTier1 — on-chain storage overrides + caps', () => {
     expect(uriValue).toBe(`web3://${MANAGER_ADDR}`)
   })
 
+  it('REGRESSION (r3740482349): a NaN/non-positive cap throws InvalidArgument — never waves oversized payloads into storage deploys', async () => {
+    // NaN fails every comparison, so `byteLength > limit` would be false for ANY
+    // size — two gas-spending deploys instead of PayloadTooLarge. Fail loud.
+    for (const bad of [Number.NaN, 0, -1, Number.POSITIVE_INFINITY]) {
+      const { ctx, deploys } = makeCtx({ onchainAutoLimit: bad })
+      const err = await writeFileTier1('/docs/readme.md', CONTENT, ctx).catch((e) => e)
+      expect((err as { code?: string }).code, String(bad)).toBe('InvalidArgument')
+      expect(deploys, String(bad)).toHaveLength(0) // no gas spent on garbage config
+    }
+  })
+
   it('respects a raised onchainAutoLimit (stores on-chain at a size that the default would reject)', async () => {
     // 8 KB content, cap raised to 8 KB → on-chain (default 16 KB would also allow,
     // so use a SMALL default override to prove the client cap is what's consulted).

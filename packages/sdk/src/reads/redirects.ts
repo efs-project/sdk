@@ -43,7 +43,7 @@ import {
   getReferencingBySchemaAndAttesterCountAbi,
 } from '../chain/abi/indexer.js'
 import { getAttestationAbi } from '../eas/abi.js'
-import { RedirectScanTruncated } from '../errors.js'
+import { EfsError, RedirectScanTruncated } from '../errors.js'
 import type { RedirectKind, RedirectRecord } from '../types.js'
 import { type ReadContext, ZERO_UID, read } from './context.js'
 
@@ -99,10 +99,20 @@ export function isNavigationalKind(kindCode: number): boolean {
  *   - `undefined` / `false` / `0` ⇒ `0` (do not follow — the literal walk).
  *   - `true` ⇒ {@link DEFAULT_REDIRECT_HOPS} (the ratified `D_MAX = 16`).
  *   - a positive number ⇒ that number, clamped to {@link MAX_REDIRECT_HOPS}.
+ *   - a NON-FINITE number (`NaN`/`±Infinity`) throws `InvalidArgument` — NaN
+ *     fails every comparison, so it would silently DISABLE following for a
+ *     caller who explicitly requested it (paths reachable only through a
+ *     symlink would read as absent with no signal).
  */
 export function resolveHopCap(followRedirects: boolean | number | undefined): number {
   if (followRedirects === undefined || followRedirects === false) return 0
   if (followRedirects === true) return DEFAULT_REDIRECT_HOPS
+  if (!Number.isFinite(followRedirects)) {
+    throw new EfsError(
+      `EFS read: \`followRedirects\` is ${String(followRedirects)} — pass a boolean or a finite hop count (1–${MAX_REDIRECT_HOPS}).`,
+      { code: 'InvalidArgument' },
+    )
+  }
   if (followRedirects <= 0) return 0
   return Math.min(Math.floor(followRedirects), MAX_REDIRECT_HOPS)
 }

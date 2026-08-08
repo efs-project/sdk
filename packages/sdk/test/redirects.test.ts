@@ -953,3 +953,19 @@ describe('makeRedirectsNs', () => {
     expect(history.complete).toBe(true)
   })
 })
+
+describe('resolveHopCap input validation (review r3740482352)', () => {
+  it('throws InvalidArgument on non-finite caps instead of silently disabling following', () => {
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+      const err = (() => {
+        try {
+          resolveHopCap(bad)
+          return undefined
+        } catch (e) {
+          return e as { code?: string }
+        }
+      })()
+      expect(err?.code, String(bad)).toBe('InvalidArgument')
+    }
+  })
+})
