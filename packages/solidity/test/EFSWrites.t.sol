@@ -250,6 +250,7 @@ contract EFSWritesTest is Test {
 
     function test_Place_BindsDataAtAnchor() public {
         bytes32 anchor = keccak256("FILE_ANCHOR");
+        eas.seedSchema(anchor, schemas.anchor);
         vm.prank(ALICE);
         bytes32 pinUID =
             consumer.place(IEFSIndexerWrite(address(indexer)), schemas, anchor, DATA_UID);
@@ -333,6 +334,7 @@ contract EFSWritesTest is Test {
 
     function test_Place_EmitsEFSFileWritten() public {
         bytes32 anchor = keccak256("FILE_ANCHOR_E");
+        eas.seedSchema(anchor, schemas.anchor); // the definition-side gate
         vm.expectEmit(true, true, false, true, address(consumer));
         emit EFSWriter.EFSFileWritten(anchor, DATA_UID, _uid(0));
         vm.prank(ALICE);
@@ -362,11 +364,25 @@ contract EFSWritesTest is Test {
         eas.seedAuthor(bareData, address(consumer));
         eas.seedSchema(bareData, schemas.data);
         // no seedActiveMirrors — zero mirrors
+        bytes32 a = keccak256("A");
+        eas.seedSchema(a, schemas.anchor); // pass the definition gate; fail on mirrors
         vm.prank(ALICE);
         vm.expectRevert(
             abi.encodeWithSelector(EFSLib.NoActiveMirror.selector, bareData, address(consumer))
         );
-        consumer.place(IEFSIndexerWrite(address(indexer)), schemas, keccak256("A"), bareData);
+        consumer.place(IEFSIndexerWrite(address(indexer)), schemas, a, bareData);
+    }
+
+    /// @notice place() rejects a NON-ANCHOR definition (r3741271349): path resolution
+    ///         discovers placements through ANCHOR nodes only.
+    function test_Place_RevertsOnNonAnchorDefinition() public {
+        bytes32 notAnchor = keccak256("A_PROPERTY_NODE");
+        eas.seedSchema(notAnchor, schemas.property);
+        vm.prank(ALICE);
+        vm.expectRevert(
+            abi.encodeWithSelector(EFSLib.NotAnchorUID.selector, notAnchor, schemas.property)
+        );
+        consumer.place(IEFSIndexerWrite(address(indexer)), schemas, notAnchor, DATA_UID);
     }
 
     /// @notice place() also rejects a SELF-authored non-DATA target (r3741115243).

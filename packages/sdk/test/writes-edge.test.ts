@@ -846,9 +846,18 @@ describe('makePinsNs', () => {
   const DATA = uid(0x900)
 
   /** The place() gate's EAS read: self-authored DATA by default. */
-  const gateClient = (over?: { attester?: Address; schema?: Hex; mirrors?: bigint }) =>
-    makeReadClient((fn) => {
+  const gateClient = (over?: {
+    attester?: Address
+    schema?: Hex
+    anchorSchema?: Hex
+    mirrors?: bigint
+  }) =>
+    makeReadClient((fn, args) => {
       if (fn === 'getAttestation') {
+        // Dispatch on the queried UID: the gate reads BOTH sides of the PIN.
+        if (args[0] === ANCHOR) {
+          return { attester: ATTESTER, schema: over?.anchorSchema ?? SCHEMAS.anchor }
+        }
         return { attester: over?.attester ?? ATTESTER, schema: over?.schema ?? SCHEMAS.data }
       }
       // The readability proof's active-mirror scan.
@@ -919,6 +928,23 @@ describe('makePinsNs', () => {
     const err = await pins.place(ANCHOR, DATA).catch((e) => e)
     expect((err as { code?: string }).code).toBe('InvalidArgument')
     expect(String((err as Error).message)).toMatch(/NO active mirror/)
+    expect(calls).toHaveLength(0)
+  })
+
+  it('place REFUSES a non-ANCHOR definition — undiscoverable placement (r3741271349)', async () => {
+    // EdgeResolver accepts any existing attestation as the definition, but path
+    // resolution only finds PINs hanging off ANCHOR nodes.
+    const { ctx, calls } = makeSubmitCtx()
+    const pins = makePinsNs({
+      getDeployment: () => deployment,
+      publicClient: gateClient({ anchorSchema: SCHEMAS.property }) as never,
+      submitContext: () => ctx,
+      attester: () => ATTESTER,
+      revoke: async () => uid(0),
+    })
+    const err = await pins.place(ANCHOR, DATA).catch((e) => e)
+    expect((err as { code?: string }).code).toBe('InvalidArgument')
+    expect(String((err as Error).message)).toMatch(/not an ANCHOR attestation/)
     expect(calls).toHaveLength(0)
   })
 

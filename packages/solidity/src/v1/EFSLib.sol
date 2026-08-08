@@ -105,6 +105,13 @@ library EFSLib {
     ///         (or write the file via {writeFile}, which emits them inline).
     error NoActiveMirror(bytes32 dataUID, address author);
 
+    /// @notice The placement DEFINITION is not an ANCHOR attestation. EdgeResolver accepts
+    ///         any existing attestation as a PIN definition, but path resolution discovers
+    ///         placements by resolving an ANCHOR and only then reading its PIN slot — a
+    ///         PROPERTY/DATA (or nonexistent) definition confirms a placement no reader
+    ///         can ever find.
+    error NotAnchorUID(bytes32 uid, bytes32 schema);
+
     /// @dev The placement helpers' READABILITY proof: require >=1 ACTIVE mirror authored by
     ///      `address(this)` on `dataUID`. Walks the RAW referencing count in filtered
     ///      physical windows (a window may be short WITHOUT being the end — revoked entries
@@ -559,6 +566,10 @@ library EFSLib {
         Attestation memory att = eas.getAttestation(dataUID);
         if (att.attester != address(this)) revert ForeignDataUID(dataUID, att.attester);
         if (att.schema != schemas.data) revert NotDataUID(dataUID, att.schema);
+        // The DEFINITION side of the PIN (r3741271349): must be an ANCHOR, or the
+        // placement is undiscoverable (see {NotAnchorUID}).
+        Attestation memory anchorAtt = eas.getAttestation(anchor);
+        if (anchorAtt.schema != schemas.anchor) revert NotAnchorUID(anchor, anchorAtt.schema);
         _requireActiveMirror(indexer, schemas, dataUID);
         pinUID = _attestPin(eas, schemas.pin, anchor, dataUID);
     }

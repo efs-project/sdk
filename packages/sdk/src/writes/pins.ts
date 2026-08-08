@@ -81,12 +81,20 @@ export function makePinsNs(deps: PinsNsDeps): PinsNs {
       // yields a visible-but-unreadable file (ForeignDataUID), and a non-DATA
       // target pins into the wrong schema slot, invisible to `pins.active()`
       // and file resolution (NotDataUID).
-      const att = await read<{ attester: Address; schema: Hex }>(pc, {
-        address: dep.contracts.eas,
-        abi: getAttestationAbi,
-        functionName: 'getAttestation',
-        args: [dataUID],
-      })
+      const [att, anchorAtt] = await Promise.all([
+        read<{ attester: Address; schema: Hex }>(pc, {
+          address: dep.contracts.eas,
+          abi: getAttestationAbi,
+          functionName: 'getAttestation',
+          args: [dataUID],
+        }),
+        read<{ schema: Hex }>(pc, {
+          address: dep.contracts.eas,
+          abi: getAttestationAbi,
+          functionName: 'getAttestation',
+          args: [anchor],
+        }),
+      ])
       if (att.attester.toLowerCase() !== ctx.attester.toLowerCase()) {
         throw new EfsError(
           `efs.graph.pins.place: the DATA ${dataUID} is authored by ${att.attester}, not the connected account ${ctx.attester} — a foreign placement resolves to a file whose mirrors/properties are INVISIBLE under your lens (unreadable, unverifiable). Re-publish the bytes as your own write instead.`,
@@ -96,6 +104,17 @@ export function makePinsNs(deps: PinsNsDeps): PinsNs {
       if (att.schema.toLowerCase() !== dep.schemas.data.toLowerCase()) {
         throw new EfsError(
           `efs.graph.pins.place: the target ${dataUID} is not a DATA attestation (schema ${att.schema}) — the PIN would index under that schema while pins.active() and file resolution read the DATA slot: a confirmed receipt for an invisible placement.`,
+          { code: 'InvalidArgument' },
+        )
+      }
+      // The DEFINITION must be an ANCHOR (r3741271349): EdgeResolver accepts any
+      // existing attestation as a PIN definition, but fs.* discovers placements
+      // by resolving a DATA-bucket ANCHOR first and only then reading its PIN
+      // slot — a PROPERTY/DATA (or nonexistent) definition confirms a placement
+      // no path resolution can ever find.
+      if (anchorAtt.schema.toLowerCase() !== dep.schemas.anchor.toLowerCase()) {
+        throw new EfsError(
+          `efs.graph.pins.place: the definition ${anchor} is not an ANCHOR attestation (schema ${anchorAtt.schema}) — path resolution discovers placements through ANCHOR nodes only, so this PIN would confirm but never be found.`,
           { code: 'InvalidArgument' },
         )
       }
