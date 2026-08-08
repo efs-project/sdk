@@ -223,6 +223,10 @@ export function makeRedirectsNs(deps: RedirectsNsDeps): RedirectsNs {
             ...receipt,
             status: 'partial',
             steps: [...receipt.steps, { id: 'index', uid: redirectUID, done: false }],
+            // A BROADCAST index tx (the IndexUnconfirmed case) was signed and
+            // sent by the user — the recovery artifact must not underreport the
+            // write's prompts/cost. A leg that never broadcast adds nothing.
+            signatureCount: receipt.signatureCount + (err instanceof IndexUnconfirmed ? 1 : 0),
           },
           cause: err,
         })

@@ -354,8 +354,10 @@ function makeSubmitCtx(mintUID: Hex = uid(0xd000)): {
   }
 }
 
-/** A ReadContext whose publicClient resolves `getMode` (the list config read). */
-function readContextFor(mode: {
+/** A chain-pinned read client (the `guardReadClient` dep) that resolves `getMode`
+ * (the list config read). r3740796046: the planners' config reads are pinned to
+ * the selected deployment's chain, never a live re-resolving read context. */
+function guardClientFor(mode: {
   exists: boolean
   curator?: Address
   allowsDuplicates?: boolean
@@ -364,26 +366,22 @@ function readContextFor(mode: {
   targetSchema?: Hex
   maxEntries?: bigint
 }) {
-  return () =>
+  return (_chainId: number) =>
     ({
-      publicClient: {
-        async readContract(a: { functionName: string }) {
-          if (a.functionName === 'getMode') {
-            return {
-              exists: mode.exists,
-              curator: mode.curator ?? ATTESTER,
-              allowsDuplicates: mode.allowsDuplicates ?? false,
-              appendOnly: mode.appendOnly ?? false,
-              targetType: mode.targetType ?? 0,
-              targetSchema: mode.targetSchema ?? ZERO_UID,
-              maxEntries: mode.maxEntries ?? 0n,
-            }
+      async readContract(a: { functionName: string }) {
+        if (a.functionName === 'getMode') {
+          return {
+            exists: mode.exists,
+            curator: mode.curator ?? ATTESTER,
+            allowsDuplicates: mode.allowsDuplicates ?? false,
+            appendOnly: mode.appendOnly ?? false,
+            targetType: mode.targetType ?? 0,
+            targetSchema: mode.targetSchema ?? ZERO_UID,
+            maxEntries: mode.maxEntries ?? 0n,
           }
-          return ZERO_UID
-        },
+        }
+        return ZERO_UID
       },
-      deployment,
-      account: ATTESTER,
     }) as never
 }
 
@@ -396,7 +394,7 @@ describe('makeListsWriteNs.create', () => {
     const lists = makeListsWriteNs({
       getDeployment: () => deployment,
       publicClient: { async readContract() {} } as never,
-      readContext: readContextFor({ exists: true }),
+      guardReadClient: guardClientFor({ exists: true }),
       submitContext: () => ctx,
       revoke: async () => uid(0),
     })
@@ -419,7 +417,7 @@ describe('makeListsWriteNs.create', () => {
     const lists = makeListsWriteNs({
       getDeployment: () => deployment,
       publicClient: { async readContract() {} } as never,
-      readContext: readContextFor({ exists: true }),
+      guardReadClient: guardClientFor({ exists: true }),
       submitContext: () => ctx,
       revoke: async () => uid(0),
     })
@@ -439,7 +437,7 @@ describe('makeListsWriteNs.add', () => {
     const lists = makeListsWriteNs({
       getDeployment: () => deployment,
       publicClient: { async readContract() {} } as never,
-      readContext: readContextFor({ exists: true, targetType: 0 }), // ANY
+      guardReadClient: guardClientFor({ exists: true, targetType: 0 }), // ANY
       submitContext: () => ctx,
       revoke: async () => uid(0),
     })
@@ -448,6 +446,34 @@ describe('makeListsWriteNs.add', () => {
     const entry = calls[0]?.[0]?.data[0]
     expect(entry?.recipient).toBe(ZERO_ADDR)
     expect(entry?.data).toBe(listEntryEnc.encodeData([LIST, target]))
+  })
+
+  it('add pins the config read to the DEPLOYMENT chain via guardReadClient (r3740796046)', async () => {
+    // The config read FEEDS the plan, so it must go through the drift-guarded
+    // client pinned to the selected deployment's chainId — never the raw
+    // publicClient (or a live re-resolving read context). Prove the fallback is
+    // untouched and the guard received the deployment chain.
+    const { ctx, calls } = makeSubmitCtx()
+    const target = uid(0x777)
+    let pinnedChainId: number | undefined
+    const lists = makeListsWriteNs({
+      getDeployment: () => deployment,
+      publicClient: {
+        async readContract() {
+          throw new Error('unguarded publicClient used by config read')
+        },
+      } as never,
+      guardReadClient: (chainId: number) => {
+        pinnedChainId = chainId
+        return guardClientFor({ exists: true, targetType: 0 })(chainId)
+      },
+      submitContext: () => ctx,
+      revoke: async () => uid(0),
+    })
+    const receipt = await lists.add(LIST, target)
+    expect(pinnedChainId).toBe(deployment.chainId)
+    expect(receipt.signatureCount).toBe(1)
+    expect(calls[0]?.[0]?.data[0]?.data).toBe(listEntryEnc.encodeData([LIST, target]))
   })
 
   it('guards the live chain BEFORE the config read that routes the plan (WrongChain, no read, no submit)', async () => {
@@ -459,16 +485,12 @@ describe('makeListsWriteNs.add', () => {
     const lists = makeListsWriteNs({
       getDeployment: () => deployment,
       publicClient: { async readContract() {} } as never,
-      readContext: () =>
+      guardReadClient: () =>
         ({
-          publicClient: {
-            async readContract() {
-              readCalled = true
-              return ZERO_UID
-            },
+          async readContract() {
+            readCalled = true
+            return ZERO_UID
           },
-          deployment,
-          account: ATTESTER,
         }) as never,
       submitContext: () => ({
         ...ctx,
@@ -490,7 +512,7 @@ describe('makeListsWriteNs.add', () => {
     const lists = makeListsWriteNs({
       getDeployment: () => deployment,
       publicClient: { async readContract() {} } as never,
-      readContext: readContextFor({ exists: true, targetType: 2, targetSchema: uid(0x999) }),
+      guardReadClient: guardClientFor({ exists: true, targetType: 2, targetSchema: uid(0x999) }),
       submitContext: () => ctx,
       revoke: async () => uid(0),
     })
@@ -506,7 +528,7 @@ describe('makeListsWriteNs.add', () => {
     const lists = makeListsWriteNs({
       getDeployment: () => deployment,
       publicClient: { async readContract() {} } as never,
-      readContext: readContextFor({ exists: true, targetType: 1 }), // ADDR
+      guardReadClient: guardClientFor({ exists: true, targetType: 1 }), // ADDR
       submitContext: () => ctx,
       revoke: async () => uid(0),
     })
@@ -521,7 +543,7 @@ describe('makeListsWriteNs.add', () => {
     const lists = makeListsWriteNs({
       getDeployment: () => deployment,
       publicClient: { async readContract() {} } as never,
-      readContext: readContextFor({ exists: true, targetType: 1 }),
+      guardReadClient: guardClientFor({ exists: true, targetType: 1 }),
       submitContext: () => ctx,
       revoke: async () => uid(0),
     })
@@ -561,7 +583,7 @@ describe('makeListsWriteNs.add', () => {
     const lists = makeListsWriteNs({
       getDeployment: () => deployment,
       publicClient: { async readContract() {} } as never,
-      readContext: readContextFor({ exists: true, targetType: 1 }), // ADDR
+      guardReadClient: guardClientFor({ exists: true, targetType: 1 }), // ADDR
       submitContext: () => ctx,
       revoke: async () => uid(0),
     })
@@ -575,7 +597,7 @@ describe('makeListsWriteNs.add', () => {
     const lists = makeListsWriteNs({
       getDeployment: () => deployment,
       publicClient: { async readContract() {} } as never,
-      readContext: readContextFor({ exists: false }),
+      guardReadClient: guardClientFor({ exists: false }),
       submitContext: () => ctx,
       revoke: async () => uid(0),
     })
@@ -592,7 +614,7 @@ describe('makeListsWriteNs.remove', () => {
     const lists = makeListsWriteNs({
       getDeployment: () => deployment,
       publicClient: { async readContract() {} } as never,
-      readContext: readContextFor({ exists: true }),
+      guardReadClient: guardClientFor({ exists: true }),
       submitContext: () => makeSubmitCtx().ctx,
       revoke: async (schema, u) => {
         revokeCall = { schema, uid: u }
@@ -609,7 +631,7 @@ describe('makeListsWriteNs.remove', () => {
     const lists = makeListsWriteNs({
       getDeployment: () => deployment,
       publicClient: { async readContract() {} } as never,
-      readContext: readContextFor({ exists: true, appendOnly: true }),
+      guardReadClient: guardClientFor({ exists: true, appendOnly: true }),
       submitContext: () => makeSubmitCtx().ctx,
       revoke: async () => {
         revoked = true
@@ -625,7 +647,7 @@ describe('makeListsWriteNs.remove', () => {
     const lists = makeListsWriteNs({
       getDeployment: () => deployment,
       publicClient: { async readContract() {} } as never,
-      readContext: readContextFor({ exists: true, appendOnly: false }),
+      guardReadClient: guardClientFor({ exists: true, appendOnly: false }),
       submitContext: () => makeSubmitCtx().ctx,
       revoke: async (schema, u) => {
         revokeCall = { schema, uid: u }
@@ -640,7 +662,7 @@ describe('makeListsWriteNs.remove', () => {
     const lists = makeListsWriteNs({
       getDeployment: () => deployment,
       publicClient: { async readContract() {} } as never,
-      readContext: readContextFor({ exists: false }),
+      guardReadClient: guardClientFor({ exists: false }),
       submitContext: () => makeSubmitCtx().ctx,
       revoke: async () => uid(0xfee),
     })

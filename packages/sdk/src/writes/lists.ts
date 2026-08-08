@@ -88,8 +88,10 @@ export interface ListsWriteNs {
 export interface ListsWriteNsDeps {
   readonly getDeployment: () => EfsDeployment
   readonly publicClient: ReadPublicClient
-  /** Build the read context (for the `lists.get` config read used by add/remove). */
-  readonly readContext: () => ReadContext | Promise<ReadContext>
+  /** Drift-guarded read client pinned to a chainId (for the `lists.get` config
+   * read add/remove plan against — write-planning reads must not follow a
+   * drifting provider). */
+  readonly guardReadClient?: (chainId: number) => ReadPublicClient
   /** Build the submit context (wallet/public clients + EAS addr + attester). */
   readonly submitContext: () => EdgeSubmitContext
   /** Revoke a UID under a schema (wired to `efs.eas.revoke`). */
@@ -99,9 +101,19 @@ export interface ListsWriteNsDeps {
 /** Construct the `efs.lists` write namespace bound to a client's deps. */
 export function makeListsWriteNs(deps: ListsWriteNsDeps): ListsWriteNs {
   /** Resolve the list config or throw {@link ListNotFound} (a write against a
-   * non-existent list is a caller error). */
-  const requireConfig = async (listUID: Hex) => {
-    const config = await getList(await deps.readContext(), listUID)
+   * non-existent list is a caller error). The config read is a WRITE-PLANNING
+   * read: it is pinned to the already-selected deployment and its drift-guarded
+   * client (like every other planner) — a live readContext() would re-resolve
+   * the CURRENT chain, so a provider drifting after add/remove's one-time
+   * assertChain could serve a chain-B mode into a chain-A plan (a wrong-mode
+   * entry encoding, a false/skipped append-only rejection, or a submit that can
+   * only revert). */
+  const requireConfig = async (dep: EfsDeployment, listUID: Hex) => {
+    const ctx: ReadContext = {
+      publicClient: deps.guardReadClient?.(dep.chainId) ?? deps.publicClient,
+      deployment: dep,
+    }
+    const config = await getList(ctx, listUID)
     if (!config.exists) throw new ListNotFound(listUID)
     return config
   }
@@ -128,7 +140,7 @@ export function makeListsWriteNs(deps: ListsWriteNsDeps): ListsWriteNs {
       const dep = deps.getDeployment()
       // Route by targetType: use the explicit hint, else read the list config once.
       const targetType: ListTargetType =
-        opts?.targetType ?? (await requireConfig(listUID)).targetType
+        opts?.targetType ?? (await requireConfig(dep, listUID)).targetType
       // Validate the target shape vs the mode BEFORE submit (throws InvalidListConfig).
       const validated = validateAddTarget(targetType, target)
       const plan = buildAddEntryPlan(dep.schemas, listUID, targetType, validated)
@@ -146,7 +158,7 @@ export function makeListsWriteNs(deps: ListsWriteNsDeps): ListsWriteNs {
         // throw. The revoke itself is chain-guarded (easVerbs); this keeps the early check
         // honest so it surfaces WrongChain rather than a misleading ListNotFound/AppendOnly.
         await deps.submitContext().assertChain?.()
-        const config = await requireConfig(opts.listUID)
+        const config = await requireConfig(dep, opts.listUID)
         if (config.appendOnly) throw new ListAppendOnly(opts.listUID)
       }
       return deps.revoke(dep.schemas.listEntry, entryUID)

@@ -838,6 +838,9 @@ describe('makeRedirectsNs', () => {
     expect(ii.receipt?.status).toBe('partial')
     expect(ii.receipt?.steps.at(-1)).toEqual({ id: 'index', uid: uid(0xd000), done: false })
     expect(ii.code).toBe('PartialBatchFailure')
+    // The index leg NEVER broadcast here (plain failure, no IndexUnconfirmed) —
+    // no signature was spent on it, so the count stays at the attest layer's 1.
+    expect(ii.receipt?.signatureCount).toBe(1)
   })
 
   it('set preserves the in-flight index tx hash (IndexUnconfirmed → IndexingIncomplete.indexTx)', async () => {
@@ -859,6 +862,9 @@ describe('makeRedirectsNs', () => {
     expect(ii.uid).toBe(uid(0xd000))
     expect(ii.indexTx).toBe(uid(0x77)) // the in-flight indexer tx, never discarded
     expect(ii.receipt?.status).toBe('partial')
+    // The user SIGNED AND SENT the index tx — the recovery artifact counts it
+    // (r3740796049): 1 attest layer + 1 broadcast index tx.
+    expect(ii.receipt?.signatureCount).toBe(2)
   })
 
   it('remove preserves the in-flight indexRevocation tx hash alongside the revoke tx', async () => {

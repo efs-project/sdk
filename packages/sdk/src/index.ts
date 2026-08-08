@@ -972,7 +972,7 @@ export function createEfsV1Client(config: EfsClientConfig): EfsClient {
   const listsWriteNs = makeListsWriteNs({
     getDeployment,
     publicClient: publicClient as unknown as ReadContext['publicClient'],
-    readContext,
+    guardReadClient,
     submitContext: edgeSubmitContext,
     revoke: (schema, uid) => easVerbs.revoke({ schema, uid }),
   })
