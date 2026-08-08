@@ -416,7 +416,18 @@ export function buildMirrorPlan(
     refUID: dataUID, // MirrorResolver.sol:153-156 — refUID must be a DATA attestation (concrete)
     dataRefs: [], // no fresh siblings — DATA + transport anchor are both concrete
   }
-  return { profile: 'efs/v1', hardlink: false, attestations: [mirror] }
+  // STAMPED so the layered boundary runs the transport-anchor gate on this
+  // standalone plan too (r3741818438): the exported builder + submitEdgePlan
+  // pair — and `mirrors.add({ transport })`, which takes the caller's UID
+  // verbatim — would otherwise send an arbitrary or stale definition straight
+  // to MirrorResolver and pay for a reverted transaction.
+  return {
+    profile: 'efs/v1',
+    hardlink: false,
+    anchorSchemaUID: schemas.anchor,
+    mirrorTransportUIDs: [transportDefinition],
+    attestations: [mirror],
+  }
 }
 
 // ── LIST / LIST_ENTRY (curated collections — ADR-0044/0046/0047) ──────────────────

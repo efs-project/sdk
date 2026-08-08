@@ -42,6 +42,7 @@ const SCHEMAS: EfsSchemaUIDs = {
 }
 
 const EAS = addr(0xea51)
+const INDEXER_ADDR = addr(0x1dc5)
 const INDEXER = addr(0x1de7)
 const FILE_VIEW = addr(0x202)
 const ATTESTER = addr(0xacc01)
@@ -152,7 +153,22 @@ function makeSubmitCtx(): {
       return txHash
     },
   }
+  const TRANSPORTS_ROOT = uid(0x2b)
   const publicClient = {
+    // The boundary transport gate's reads: /transports resolves to a fixed root
+    // and every transport anchor in this harness hangs directly under it.
+    async readContract(a: { functionName: string }) {
+      if (a.functionName === 'rootAnchorUID') return uid(0x1)
+      if (a.functionName === 'resolvePath') return TRANSPORTS_ROOT
+      if (a.functionName === 'getAttestation') {
+        return {
+          schema: SCHEMAS.anchor,
+          refUID: TRANSPORTS_ROOT,
+          data: encodeAbiParameters([{ type: 'string' }, { type: 'bytes32' }], ['ipfs', uid(0)]),
+        }
+      }
+      throw new Error(`mirrors submit-ctx mock: unexpected ${a.functionName}`)
+    },
     async waitForTransactionReceipt({ hash }: { hash: Hex }) {
       const r = receipts.get(hash)
       if (!r) throw new Error(`no receipt for ${hash}`)
@@ -165,6 +181,7 @@ function makeSubmitCtx(): {
       walletClient: walletClient as unknown as EdgeSubmitContext['walletClient'],
       publicClient: publicClient as unknown as EdgeSubmitContext['publicClient'],
       easAddress: EAS,
+      indexerAddress: INDEXER_ADDR,
       chainId: 11155111,
       attester: ATTESTER,
       account: ATTESTER,
@@ -320,6 +337,40 @@ describe('makeMirrorsNs', () => {
     expect(entry?.refUID).toBe(DATA)
     expect(entry?.revocable).toBe(true)
     expect(entry?.data).toBe(mirrorEnc.encodeData([uid(0xe5b1), 'ipfs://Qm999']))
+  })
+
+  it('REFUSES an explicit transport outside /transports/ before broadcasting (r3741818438)', async () => {
+    // mirrors.add takes `opts.transport` verbatim; the standalone plan is now
+    // stamped so the boundary gate runs — an arbitrary/stale UID must not
+    // reach MirrorResolver and pay for a reverted transaction.
+    const { ctx, calls } = makeSubmitCtx()
+    const orphan = uid(0xbad0)
+    const orig = (ctx.publicClient as unknown as { readContract: (a: unknown) => Promise<unknown> })
+      .readContract
+    const gated = {
+      ...ctx,
+      publicClient: {
+        ...ctx.publicClient,
+        async readContract(a: { functionName: string }) {
+          // A REAL anchor whose parent chain never reaches /transports.
+          if (a.functionName === 'getAttestation') {
+            return { schema: SCHEMAS.anchor, refUID: uid(0) }
+          }
+          return orig(a)
+        },
+      },
+    } as typeof ctx
+    const mirrors = makeMirrorsNs({
+      getDeployment: () => deployment,
+      publicClient: makeReadClient(() => uid(0)) as never,
+      submitContext: () => gated,
+      attester: () => ATTESTER,
+      revoke: async () => uid(0),
+    })
+    const err = await mirrors.add(DATA, { uri: 'ipfs://QmX', transport: orphan }).catch((e) => e)
+    expect((err as { code?: string }).code).toBe('InvalidArgument')
+    expect(String((err as Error).message)).toMatch(/not a descendant of \/transports\//)
+    expect(calls).toHaveLength(0)
   })
 
   it('add (scheme-derived transport) resolves the anchor from the deployment map', async () => {
