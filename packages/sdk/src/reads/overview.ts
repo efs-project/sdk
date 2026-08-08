@@ -58,27 +58,6 @@ function isMarkdownContentType(contentType: string | undefined): boolean {
   return ct.startsWith('text/markdown') || ct.startsWith('text/') || ct === 'text/x-markdown'
 }
 
-/** One row of `getDataMirrors` (lens-scoped). We only need the URI here. */
-type MirrorRow = { uri: string }
-
-/** Decide the Overview `source` from the winning lens's active mirrors: a `web3://`
- * mirror is on-chain (SSTORE2, editable via `setOverview`); anything else is mirror-
- * hosted. Reads at most one small window — an Overview has few mirrors. Defaults to
- * `'mirror'` when no mirror is found (a degenerate placement). */
-async function overviewSource(
-  ctx: ReadContext,
-  dataUID: Hex,
-  resolvedBy: Address,
-): Promise<'onchain' | 'mirror'> {
-  const rows = await read<readonly MirrorRow[]>(ctx.publicClient, {
-    address: ctx.deployment.contracts.fileView,
-    abi: fileViewAbi,
-    functionName: 'getDataMirrors',
-    args: [dataUID, resolvedBy, 0n, 50n],
-  })
-  return rows.some((m) => /^web3:/i.test(m.uri)) ? 'onchain' : 'mirror'
-}
-
 /** Parse the `size` reserved PROPERTY (decimal byte count) → bigint, tolerant of a
  * malformed/absent value (→ undefined). */
 function parseSize(s: string | undefined): bigint | undefined {
@@ -123,9 +102,6 @@ export async function overview(
     return { kind: 'too-large', size }
   }
 
-  // Determine the source (on-chain vs mirror) and fetch the bytes. The fetch is
-  // verified by default (the value path is never trust-blind), mirroring `read`.
-  const source = await overviewSource(ctx, dataUID, resolvedBy)
   // Cap the fetch at the render limit: the `size`-PROPERTY pre-check above is a
   // best-effort signal an UNTRUSTED Overview can lie about (missing/malformed/under-
   // reported), so enforce MAX_RENDER_BYTES during the fetch too — the reader stops
@@ -147,6 +123,15 @@ export async function overview(
   // would render them with no warning. Throw on mismatch / malformed / missing-claim
   // (the same posture as the bare-value read helpers) unless `verify:false` was asked.
   assertVerified(file, path, opts?.verify !== false)
+
+  // The `source` distinguishes the RETURNED body's origin — editable on-chain
+  // (SSTORE2 via `web3://`, rewritable through `setOverview`) vs a read-only
+  // mirror — so it derives from the mirror the fetch ACTUALLY used, never from
+  // mere mirror PRESENCE (an Overview with both kinds could serve HTTPS bytes
+  // while a presence check claimed 'onchain', inviting consumers to offer
+  // editing for mirror-hosted bytes; `transports` filters and failovers change
+  // the winner per read).
+  const source: 'onchain' | 'mirror' = /^web3:/i.test(file.mirrorUsed ?? '') ? 'onchain' : 'mirror'
 
   if (isMarkdownContentType(contentType)) {
     return { kind: 'markdown', text: file.text(), source }

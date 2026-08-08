@@ -271,7 +271,7 @@ describe('fs.overview — read (ADR-0011)', () => {
     expect(res).toEqual({ kind: 'none' })
   })
 
-  it('returns markdown with decoded text + onchain source for a web3:// README', async () => {
+  it('REGRESSION (r3740705436): source derives from the mirror USED — a present-but-unserved web3:// mirror does NOT claim onchain', async () => {
     const md = '# Docs\n\nWelcome.'
     const hash = hashContent(new TextEncoder().encode(md))
     // List the web3:// mirror FIRST (so `source` = onchain) plus a data: mirror the
@@ -289,7 +289,11 @@ describe('fs.overview — read (ADR-0011)', () => {
     expect(res.kind).toBe('markdown')
     if (res.kind === 'markdown') {
       expect(res.text).toBe(md)
-      expect(res.source).toBe('onchain')
+      // The web3:// mirror is PRESENT but the bytes were served by the data:
+      // fallback (no web3 reader in this harness) — the old presence-based
+      // check claimed 'onchain' here, inviting consumers to offer editing for
+      // mirror-hosted bytes. The honest source is the mirror actually used.
+      expect(res.source).toBe('mirror')
     }
   })
 

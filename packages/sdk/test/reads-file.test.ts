@@ -696,6 +696,11 @@ describe('read + read(ref)', () => {
     // …and a GENUINELY empty file with size 0 still verifies (the carve-out).
   })
 
+  it('EfsFile.mirrorUsed reports the winning mirror URI (source provenance)', async () => {
+    const file = await read(ctxWithMirror(GOOD_HASH), '/docs/readme.md', { lens: LENS })
+    expect(file.mirrorUsed).toBe(dataUri)
+  })
+
   it('reports no-claim when verify:false (no contentHash lookup)', async () => {
     const file = await read(ctxWithMirror(GOOD_HASH), '/docs/readme.md', {
       lens: LENS,

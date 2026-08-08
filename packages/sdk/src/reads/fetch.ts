@@ -219,7 +219,13 @@ export async function fetchRef(
         ? ('mismatch' as const)
         : result.verification
     // Use the ATTESTED contentType (or omit) — never the untrusted transport header.
-    return makeEfsFile(result.bytes, verification, attestedContentType, resolvedBy)
+    return makeEfsFile(
+      result.bytes,
+      verification,
+      attestedContentType,
+      resolvedBy,
+      result.mirrorUsed,
+    )
   } catch (err) {
     // A caller CANCELLATION is not a mirror failure — it propagates
     // unclassified, matching the abort convention everywhere else in the SDK,
@@ -241,6 +247,7 @@ function makeEfsFile(
   verification: EfsFile['verification'],
   contentType: string | undefined,
   hashAuthor: Address | undefined,
+  mirrorUsed?: string,
 ): EfsFile {
   return {
     bytes,
@@ -252,6 +259,7 @@ function makeEfsFile(
     trust: LIVE_TRUST,
     ...(contentType !== undefined ? { contentType } : {}),
     ...(hashAuthor !== undefined ? { hashAuthor } : {}),
+    ...(mirrorUsed !== undefined ? { mirrorUsed } : {}),
     text() {
       return new TextDecoder().decode(bytes)
     },

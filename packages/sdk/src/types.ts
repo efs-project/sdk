@@ -823,6 +823,11 @@ export type EfsFile = {
   trust: TrustDescriptor
   /** Whose contentHash claim was checked against (the winning lens attester). */
   hashAuthor?: Address
+  /** The mirror URI the bytes ACTUALLY came from (the fetch engine's winning
+   * attempt) — e.g. `web3://…` for on-chain SSTORE2 bytes vs an `https://…`/
+   * `ipfs://…` gateway. Provenance for consumers that branch on the byte
+   * source; absent only when the fetch path didn't report one. */
+  mirrorUsed?: string
   /** Pure UTF-8 decode of `bytes` (no I/O). */
   text(): string
   /** Pure JSON parse of the UTF-8-decoded `bytes` (no I/O). */
