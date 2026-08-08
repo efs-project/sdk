@@ -352,6 +352,20 @@ export function buildRedirectPlan(
     refUID: from, // AliasResolver — the SOURCE rides in refUID (concrete pre-existing UID)
     dataRefs: [], // no fresh siblings — both endpoints are concrete, encoded in data/refUID
   }
+  // SYMLINK plans carry the readability-gate stamps (r3741562776): the
+  // exported builder pairs with the exported submitters, and the layered
+  // boundary re-runs the direct-DATA mirror proof off these — without them the
+  // raw pair could author an unreadable symlink the namespace verb refuses.
+  if (kind === REDIRECT_KIND.symlink) {
+    return {
+      profile: 'efs/v1',
+      hardlink: false,
+      symlinkTargetUID: to,
+      dataSchemaUID: schemas.data,
+      mirrorSchemaUID: schemas.mirror,
+      attestations: [redirect],
+    }
+  }
   return { profile: 'efs/v1', hardlink: false, attestations: [redirect] }
 }
 

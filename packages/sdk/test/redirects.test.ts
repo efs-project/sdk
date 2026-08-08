@@ -46,7 +46,7 @@ import {
   walkSupersededBy,
   walkSymlinks,
 } from '../src/reads/redirects.js'
-import type { EdgeSubmitContext } from '../src/writes/edge-submit.js'
+import { type EdgeSubmitContext, submitEdgePlan } from '../src/writes/edge-submit.js'
 import { REDIRECT_KIND, buildRedirectPlan } from '../src/writes/edge.js'
 import { makeRedirectsNs } from '../src/writes/redirects.js'
 
@@ -754,6 +754,16 @@ function makeSubmitCtx(): {
     },
   }
   const publicClient = {
+    // The layered boundary's symlink gate reads through the SUBMIT context's
+    // client. Default: the target reads as an ANCHOR (gate no-ops) — the ns
+    // verb's inline gate (deps.publicClient) carries the real logic; the
+    // boundary is exercised directly by the raw-pair regression.
+    async readContract(a: { functionName: string }) {
+      if (a.functionName === 'getAttestation') return { schema: SCHEMAS.anchor }
+      if (a.functionName === 'getReferencingBySchemaAndAttesterCount') return 0n
+      if (a.functionName === 'getReferencingBySchemaAndAttester') return []
+      throw new Error(`submit-ctx mock: unexpected ${a.functionName}`)
+    },
     async waitForTransactionReceipt({ hash }: { hash: Hex }) {
       const r = receipts.get(hash)
       if (!r) throw new Error(`no receipt for ${hash}`)
@@ -766,6 +776,7 @@ function makeSubmitCtx(): {
       walletClient: walletClient as unknown as EdgeSubmitContext['walletClient'],
       publicClient: publicClient as unknown as EdgeSubmitContext['publicClient'],
       easAddress: EAS,
+      indexerAddress: INDEXER,
       chainId: 11155111,
       attester: ATTESTER,
       account: ATTESTER,
@@ -978,6 +989,30 @@ describe('makeRedirectsNs', () => {
     const { ns } = harness(makeChain({}), ctx) // default: target reads as ANCHOR
     const receipt = await ns.set(FROM, TO, { kind: 'symlink' })
     expect(receipt.signatureCount).toBe(2)
+  })
+
+  it('the RAW builder+executor pair is gated too — a bare-DATA symlink refuses at the boundary (r3741562776)', async () => {
+    // buildRedirectPlan + submitEdgePlan bypasses the ns verb's inline gate;
+    // the plan's symlinkTargetUID stamp makes the layered boundary re-run the
+    // direct-DATA mirror proof.
+    const { ctx, calls } = makeSubmitCtx()
+    const gatedCtx = {
+      ...ctx,
+      publicClient: {
+        ...ctx.publicClient,
+        async readContract(a: { functionName: string }) {
+          if (a.functionName === 'getAttestation') return { schema: SCHEMAS.data }
+          if (a.functionName === 'getReferencingBySchemaAndAttesterCount') return 0n
+          if (a.functionName === 'getReferencingBySchemaAndAttester') return []
+          throw new Error(`unexpected ${a.functionName}`)
+        },
+      },
+    } as typeof ctx
+    const plan = buildRedirectPlan(SCHEMAS, FROM, TO, REDIRECT_KIND.symlink)
+    const err = await submitEdgePlan(plan, gatedCtx).catch((e) => e)
+    expect((err as { code?: string }).code).toBe('InvalidArgument')
+    expect(String((err as Error).message)).toMatch(/NO active mirror/)
+    expect(calls).toHaveLength(0)
   })
 
   it('set defaults kind to sameAs', async () => {

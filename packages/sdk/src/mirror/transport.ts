@@ -18,6 +18,7 @@
  */
 
 import type { TransportName } from '../types.js'
+import { DEFAULT_MAX_BYTES } from './fetch.js'
 
 /** Value-level allowlist of known transports (ADR-0010). Keys match
  * `TransportName`. This is the *recognized* set; `TransportName` stays an open
@@ -205,7 +206,11 @@ export function resolveTransport(
       return resolveArweave(uri)
 
     case 'data':
-      return resolveData(uri, opts.maxBytes)
+      // The DEFAULT ceiling applies here too (r3741562782): the standalone
+      // exported parser previously forwarded `undefined`, letting an untrusted
+      // data: URI materialize an arbitrarily large payload — only callers
+      // routed through fetchVerified got the 50 MB default.
+      return resolveData(uri, opts.maxBytes ?? DEFAULT_MAX_BYTES)
 
     case 'magnet':
       // Parse-only: BitTorrent has no synchronous HTTP resolution path here.

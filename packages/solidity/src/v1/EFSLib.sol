@@ -819,6 +819,19 @@ library EFSLib {
         bytes32 target,
         uint16 kind
     ) internal returns (bytes32 redirectUID) {
+        // SYMLINK→DATA readability gate (r3741562779): path resolution reports the
+        // redirect AUTHOR as the resolved lens, and reads scope retrieval metadata
+        // to that address — a symlink pointing DIRECTLY at a DATA whose mirrors
+        // live under another attester (or a bare DATA) resolves but can never be
+        // read. Require the author's own active mirror on a DATA target; ANCHOR
+        // targets are unaffected (the walk continues into that anchor's own
+        // placements, whose winners carry their metadata).
+        if (kind == REDIRECT_KIND_SYMLINK) {
+            Attestation memory targetAtt = eas.getAttestation(target);
+            if (targetAtt.schema == schemas.data) {
+                _requireActiveMirror(indexer, schemas, target);
+            }
+        }
         redirectUID = eas.attest(
             AttestationRequest({
                 schema: schemas.redirect,

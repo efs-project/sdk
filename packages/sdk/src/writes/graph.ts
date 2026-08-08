@@ -341,6 +341,10 @@ export interface FileWriteGraph {
   /** The hardlink target DATA UID, stamped so the submitter's gates need no
    * placement-PIN ref lookup (and so STAMPED edge plans can be gated). */
   readonly hardlinkDataUID?: Hex
+  /** A SYMLINK redirect plan's target, stamped by `buildRedirectPlan` so the
+   * layered boundary re-runs the direct-DATA readability proof (the author
+   * must hold an active mirror on a DATA target — r3741562776). */
+  readonly symlinkTargetUID?: Hex
   /** Every planned attestation, ordered by layer (L1 → L2 → L3). The submitter
    * groups by {@link PlannedAttestation.layer} into `multiAttest` batches. */
   readonly attestations: readonly PlannedAttestation[]

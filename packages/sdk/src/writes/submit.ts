@@ -618,6 +618,81 @@ async function assertConcreteAnchorIsAnchor(
   }
 }
 
+/** r3741562776: a SYMLINK plan pointing DIRECTLY at a DATA must prove the
+ * submitting author holds an active mirror on it — path resolution reports the
+ * symlink author as `resolvedBy` and reads scope retrieval metadata to that
+ * address, so a foreign-metadata (or bare) DATA target yields a discoverable
+ * path whose every read fails. Keyed on the builder's `symlinkTargetUID` stamp;
+ * ANCHOR targets no-op (the walk continues into their own placements). Fails
+ * CLOSED on a context that cannot run the reads. The namespace verb runs the
+ * same proof inline (guarded reads, tailored errors); this boundary is the
+ * backstop for the exported builder + executor pair. */
+async function assertSymlinkTargetReadable(
+  plan: FileWriteGraph,
+  ctx: SubmitContext,
+): Promise<void> {
+  const target = plan.symlinkTargetUID
+  if (target === undefined) return
+  const ctxAccount =
+    typeof ctx.account === 'string'
+      ? (ctx.account as Address)
+      : (ctx.account as { address?: Address } | undefined)?.address
+  const walletAccount = (ctx.walletClient as { account?: { address?: Address } }).account?.address
+  const submitter = ctxAccount ?? walletAccount
+  if (submitter === undefined) {
+    throw new EfsError(
+      'EFS write: a SYMLINK plan requires a resolvable signing account — the readability gate must verify the author mirrors a DATA target.',
+      { code: 'InvalidArgument' },
+    )
+  }
+  if (ctx.publicClient.readContract === undefined) {
+    throw new EfsError(
+      'EFS write: a SYMLINK plan requires a publicClient with readContract — the readability gate must inspect the target before broadcasting.',
+      { code: 'InvalidArgument' },
+    )
+  }
+  const att = (await ctx.publicClient.readContract({
+    address: ctx.easAddress,
+    abi: getAttestationAbi,
+    functionName: 'getAttestation',
+    args: [target],
+  })) as { schema?: Hex } | undefined
+  const expected = plan.dataSchemaUID
+  if (expected === undefined || att?.schema?.toLowerCase() !== expected.toLowerCase()) {
+    return // not a DATA target — the walk carries the placement winner's metadata
+  }
+  const mirrorSchema = plan.mirrorSchemaUID
+  if (mirrorSchema === undefined || ctx.indexerAddress === undefined) {
+    throw new EfsError(
+      "EFS write: a SYMLINK plan targeting DATA requires the mirrorSchemaUID stamp and ctx.indexerAddress — the readability gate must scan the author's active mirrors.",
+      { code: 'InvalidArgument' },
+    )
+  }
+  const rawCount = (await ctx.publicClient.readContract({
+    address: ctx.indexerAddress,
+    abi: getReferencingBySchemaAndAttesterCountAbi,
+    functionName: 'getReferencingBySchemaAndAttesterCount',
+    args: [target, mirrorSchema, submitter],
+  })) as bigint
+  let hasActiveMirror = false
+  const total = Math.min(Number(rawCount), 500)
+  for (let start = 0; start < total && !hasActiveMirror; start += 50) {
+    const page = (await ctx.publicClient.readContract({
+      address: ctx.indexerAddress,
+      abi: getReferencingBySchemaAndAttesterAbi,
+      functionName: 'getReferencingBySchemaAndAttester',
+      args: [target, mirrorSchema, submitter, BigInt(start), 50n, false, false],
+    })) as readonly Hex[]
+    hasActiveMirror = page.length > 0
+  }
+  if (!hasActiveMirror) {
+    throw new EfsError(
+      `EFS write: the symlink target ${target} is a DATA with NO active mirror authored by ${submitter} — the link would resolve but never be readable (resolvedBy is the symlink author). Attest a mirror via efs.mirrors.add first, or symlink to the file's ANCHOR instead.`,
+      { code: 'InvalidArgument' },
+    )
+  }
+}
+
 // One PIN encoder, reused to re-encode `definition` once it's resolved. The PIN
 // schema is `bytes32 definition` (EFS_SCHEMA_FIELDS.pin).
 const pinEncoder = new SchemaEncoder(EFS_SCHEMA_FIELDS.pin)
@@ -841,6 +916,7 @@ export async function submitLayeredTier1(
   // same gates on-chain (ForeignDataUID / NotDataUID).
   await assertHardlinkSelfAuthored(plan, ctx)
   await assertConcreteAnchorIsAnchor(plan, ctx)
+  await assertSymlinkTargetReadable(plan, ctx)
   const resolved = new Map<string, Hex>()
   const layerTxHashes: Hex[] = []
   const layers: LayerResult[] = []

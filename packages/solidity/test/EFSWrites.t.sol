@@ -478,6 +478,53 @@ contract EFSWritesTest is Test {
         assertEq(gotKind, EFSLib.REDIRECT_KIND_SYMLINK, "kind round-trips");
     }
 
+    /// @notice A symlink DIRECTLY at a bare/foreign-metadata DATA is refused
+    ///         (r3741562779): resolvedBy is the redirect author, whose lens then has
+    ///         no retrieval URI — the same NoActiveMirror floor as the placements.
+    function test_SetRedirect_RevertsOnSymlinkToBareData() public {
+        bytes32 bareData = keccak256("BARE_DATA_SYMLINK_TARGET");
+        eas.seedSchema(bareData, schemas.data);
+        // no seedActiveMirrors — the author holds none
+        vm.prank(ALICE);
+        vm.expectRevert(
+            abi.encodeWithSelector(EFSLib.NoActiveMirror.selector, bareData, address(consumer))
+        );
+        consumer.setRedirect(
+            IEFSIndexerWrite(address(indexer)),
+            schemas,
+            keccak256("SRC_ANCHOR"),
+            bareData,
+            EFSLib.REDIRECT_KIND_SYMLINK
+        );
+    }
+
+    /// @notice A symlink at a DATA the author mirrors passes; ANCHOR targets skip the gate.
+    function test_SetRedirect_SymlinkGatePassesWithMirrorOrAnchorTarget() public {
+        bytes32 mirroredData = keccak256("MIRRORED_DATA_TARGET");
+        eas.seedSchema(mirroredData, schemas.data);
+        indexer.seedActiveMirrors(mirroredData, 1);
+        vm.prank(ALICE);
+        consumer.setRedirect(
+            IEFSIndexerWrite(address(indexer)),
+            schemas,
+            keccak256("SRC_A"),
+            mirroredData,
+            EFSLib.REDIRECT_KIND_SYMLINK
+        );
+        // ANCHOR target (seeded as anchor schema): the walk carries its own metadata.
+        bytes32 anchorTarget = keccak256("ANCHOR_TARGET");
+        eas.seedSchema(anchorTarget, schemas.anchor);
+        vm.prank(ALICE);
+        consumer.setRedirect(
+            IEFSIndexerWrite(address(indexer)),
+            schemas,
+            keccak256("SRC_B"),
+            anchorTarget,
+            EFSLib.REDIRECT_KIND_SYMLINK
+        );
+        assertEq(indexer.indexedCount(), 2, "both symlinks attested + indexed");
+    }
+
     /// @notice ADR-0017 lifecycle, first leg (r3741057696): setRedirect must call
     ///         `indexer.index(redirectUID)` in the SAME transaction — AliasResolver never
     ///         populates the referencing index, so an un-indexed redirect is invisible to
