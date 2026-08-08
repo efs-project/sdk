@@ -217,7 +217,17 @@ export function makePropsNs(deps: PropsNsDeps): PropsNs {
       // keys have a binding under the requested lens. The scan is capped; the
       // index is append-ordered, so a DATA's genuine (earlier-minted) keys are
       // the ones that survive. `opts.maxKeys` lets a caller bound it further.
-      const scanCap = opts?.maxKeys !== undefined ? BigInt(opts.maxKeys) : MAX_PROPERTY_SCAN
+      // `maxKeys` LOWERS the ceiling; it can never raise it (r3741983478) —
+      // otherwise `maxKeys: 1_000_000` would re-open the very unbounded scan
+      // the default exists to prevent.
+      if (opts?.maxKeys !== undefined && (!Number.isInteger(opts.maxKeys) || opts.maxKeys <= 0)) {
+        throw new EfsError(
+          `efs.props.list: maxKeys must be a positive integer (got ${opts.maxKeys}).`,
+          { code: 'InvalidArgument' },
+        )
+      }
+      const requested = opts?.maxKeys !== undefined ? BigInt(opts.maxKeys) : MAX_PROPERTY_SCAN
+      const scanCap = requested < MAX_PROPERTY_SCAN ? requested : MAX_PROPERTY_SCAN
       const limit = rawCount < scanCap ? rawCount : scanCap
       const anchorUIDs: Hex[] = []
       for (let start = 0n; start < limit; start += PAGE) {

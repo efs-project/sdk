@@ -670,10 +670,18 @@ export function validateMirrorUri(uri: string, verb: string): void {
   // here; UNKNOWN schemes stay untouched (the custom-transport escape hatch the
   // ADR protects).
   const scheme = /^([a-z][a-z0-9+.-]*):/i.exec(uri)?.[1]?.toLowerCase()
-  const known = scheme !== undefined && (scheme === 'ar' || scheme in TRANSPORT)
+  // `ar` is the arweave alias and `http` is resolveTransport's OPT-IN insecure
+  // variant (r3741983482) — neither is a TRANSPORT key, but both are schemes the
+  // SDK structurally parses, so a malformed one must not slip through as a
+  // "custom" scheme.
+  const known =
+    scheme !== undefined && (scheme === 'ar' || scheme === 'http' || scheme in TRANSPORT)
   if (known) {
     try {
-      resolveTransport(uri, {})
+      // Parse http:// with the opt-in ENABLED: the mirror is legitimate for a
+      // reader that sets `allowInsecureHttp`, so preflight validates its
+      // STRUCTURE without imposing the read-time policy choice on the write.
+      resolveTransport(uri, scheme === 'http' ? { allowInsecureHttp: true } : {})
       // `resolveTransport`'s web3 branch defers ADDRESS parsing to the reader
       // (resolution needs a chain client), so it accepts `web3://0x1234` —
       // which then fails every read at `parseWeb3Uri` (r3741771347). Run that

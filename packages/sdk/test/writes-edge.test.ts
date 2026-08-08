@@ -912,6 +912,36 @@ describe('makePropsNs', () => {
     expect(out).toEqual([{ key: KEY, value: VALUE, propertyUID: PROP_UID }])
   })
 
+  it('maxKeys can only LOWER the ceiling, never raise it (r3741983478)', async () => {
+    const windows: bigint[] = []
+    const props = makePropsNs({
+      getDeployment: () => deployment,
+      publicClient: makeReadClient((fn, args) => {
+        if (fn === 'getChildCountBySchema') return 10_000_000n
+        if (fn === 'getAnchorsBySchema') {
+          windows.push(args[3] as bigint)
+          return (args[2] as bigint) === 0n ? [KEY_ANCHOR] : []
+        }
+        if (fn === 'resolveAnchor') return args[1] === KEY ? KEY_ANCHOR : uid(0)
+        if (fn === 'getActivePinTarget') return args[0] === KEY_ANCHOR ? PROP_UID : uid(0)
+        if (fn === 'getAttestation') {
+          if (args[0] === KEY_ANCHOR) return { data: anchorEnc.encodeData([KEY, SCHEMAS.property]) }
+          return { data: propEnc.encodeData([VALUE]) }
+        }
+        return uid(0)
+      }) as never,
+      readContext,
+      submitContext: () => makeSubmitCtx().ctx,
+      attester: () => ATTESTER,
+    })
+    await props.list(DATA, { maxKeys: 1_000_000 })
+    // Still the DEFAULT 1024-row ceiling: 4 full windows, not 3907.
+    expect(windows).toEqual([256n, 256n, 256n, 256n])
+    await expect(props.list(DATA, { maxKeys: 0 })).rejects.toMatchObject({
+      code: 'InvalidArgument',
+    })
+  })
+
   it('clamps only the FINAL window of a non-page-aligned budget', async () => {
     const windows: bigint[] = []
     const props = makePropsNs({

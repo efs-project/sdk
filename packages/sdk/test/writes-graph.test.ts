@@ -587,6 +587,32 @@ describe('byte-plan builder preflight (reviews r3741586928 / r3741586938)', () =
     expect(g.attestations.some((a) => a.kind === 'MIRROR')).toBe(true)
   })
 
+  it('REJECTS a malformed http:// locator — an opt-in scheme, not a custom one (r3741983482)', () => {
+    // resolveTransport supports http:// behind `allowInsecureHttp`, so a
+    // malformed one must not slip through as an unknown/custom scheme.
+    expect(() =>
+      buildFileWriteGraph({
+        ...good,
+        mirrors: [
+          { uri: 'http://', transportDefinition: baseInput.mirrors[0]!.transportDefinition },
+        ],
+      }),
+    ).toThrowError(/not a valid http: locator/)
+  })
+
+  it('ACCEPTS a well-formed http:// mirror (the reader opts in at read time)', () => {
+    const g = buildFileWriteGraph({
+      ...good,
+      mirrors: [
+        {
+          uri: 'http://legacy.example/f',
+          transportDefinition: baseInput.mirrors[0]!.transportDefinition,
+        },
+      ],
+    })
+    expect(g.attestations.some((a) => a.kind === 'MIRROR')).toBe(true)
+  })
+
   it('ACCEPTS an unknown/custom scheme untouched (the ADR-0056 escape hatch)', () => {
     const g = buildFileWriteGraph({
       ...good,
