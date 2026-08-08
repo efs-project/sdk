@@ -341,3 +341,14 @@ describe('the v1 profile boundary (ADR-0019)', () => {
     expectTypeOf<DataRef['profile']>().toEqualTypeOf<'efs/v1'>()
   })
 })
+
+describe('raw namespace type gate (review r3740599136)', () => {
+  it('a read-only client has NO .write surface on raw instances at the type level', async () => {
+    const { expectTypeOf } = await import('vitest')
+    type ReadRaw = import('../src/index.js').EfsRawReadNs
+    type WriteRaw = import('../src/index.js').EfsRawNs
+    // The wallet-backed instances carry .write; the read-only ones must NOT.
+    expectTypeOf<WriteRaw['eas']>().toHaveProperty('write')
+    expectTypeOf<keyof ReadRaw['eas'] & 'write'>().toEqualTypeOf<never>()
+  })
+})

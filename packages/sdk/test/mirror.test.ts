@@ -726,28 +726,31 @@ describe('fetchVerified - AbortSignal', () => {
   })
 })
 
-describe('browser opaqueredirect provenance (review r3740482355)', () => {
-  it('urlUsed reports the FOLLOWED final URL, not the pre-redirect one', async () => {
-    const bytes = new TextEncoder().encode('follow me')
+describe('browser opaqueredirect fails closed (review r3740599137, supersedes r3740482355)', () => {
+  it('an opaque redirect is REJECTED (not followed unchecked) and failover proceeds', async () => {
+    // The destination of an opaque redirect cannot be safety-checked (no
+    // Location visible), so none of the per-hop SSRF/downgrade guards can run —
+    // and CORS gates response READING, not whether the redirected request
+    // reaches a private-network endpoint. The attempt fails; a direct mirror wins.
+    const bytes = new TextEncoder().encode('direct wins')
     const hash = hashContent(bytes)
-    const FINAL = 'https://cdn.example/final/blob.bin'
-    let call = 0
+    const dataUri = `data:application/octet-stream;base64,${Buffer.from(bytes).toString('base64')}`
+    let followRequests = 0
     const fetchImpl = (async (_url: unknown, init?: { redirect?: string }) => {
-      call += 1
       if (init?.redirect === 'manual') {
-        // Browser path: the manual probe yields an opaque redirect.
         return { type: 'opaqueredirect', ok: false, status: 0 } as unknown as Response
       }
-      // The follow request lands on the redirect target — Response.url carries it.
-      const res = mockResponse(bytes)
-      Object.defineProperty(res, 'url', { value: FINAL })
-      return res
+      followRequests += 1
+      return mockResponse(bytes)
     }) as typeof fetch
     const { fetchVerified } = await import('../src/mirror/fetch.js')
-    const out = await fetchVerified(['https://gateway.example/start'], hash, { fetchImpl })
+    const out = await fetchVerified(['https://gateway.example/redirects', dataUri], hash, {
+      fetchImpl,
+    })
     expect(out.verification).toBe('matches-author')
-    expect(out.urlUsed).toBe(FINAL) // was: the pre-redirect start URL
-    expect(call).toBe(2)
+    expect(out.mirrorUsed).toBe(dataUri) // the redirecting mirror was skipped
+    expect(out.attempts[0]?.reason).toMatch(/opaque redirect/i)
+    expect(followRequests).toBe(0) // the unchecked follow never happened
   })
 })
 

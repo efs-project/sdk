@@ -281,27 +281,17 @@ async function fetchOne(
       })
 
       if (res.type === 'opaqueredirect') {
-        // Browser path: the redirect chain is opaque, so we cannot re-check an
-        // intermediate/final http:// hop here. The browser enforces this for us —
-        // it blocks the SSRF surface (CORS) AND mixed-content (an https document
-        // following a redirect to http:// is blocked by the user agent). So the
-        // `allowInsecureHttp` http-downgrade check is authoritative only on the
-        // Node/undici manual-redirect path below; in the browser the platform owns
-        // it. The initial URL is already https (resolveTransport rejected http).
-        const followed = await doFetch(current.href, {
-          signal: controller.signal,
-          redirect: 'follow',
-          headers: { accept: 'application/octet-stream, */*', 'accept-encoding': 'identity' },
-        })
-        if (!followed.ok) throw new Error(`HTTP ${followed.status} ${followed.statusText}`)
-        // Provenance: the browser followed the chain, so the bytes came from the
-        // FOLLOWED response's final URL, not the pre-redirect one — `urlUsed`
-        // must name the endpoint that actually supplied them. (An empty
-        // `followed.url` — an opaque response — falls back to the request URL.)
-        return {
-          ...(await finishResponse(followed, maxBytes, controller)),
-          finalUrl: followed.url !== '' ? followed.url : current.href,
-        }
+        // Browser path: the redirect chain is OPAQUE — the destination cannot be
+        // inspected, so none of the per-hop guards the Node path runs (SSRF
+        // private-host check, http-downgrade check, hop cap) can be applied.
+        // Following it "because the browser enforces safety" is NOT sound: CORS
+        // gates response READING, not whether the redirected request REACHES a
+        // private-network endpoint, and Private Network Access is not universal —
+        // a malicious mirror could still aim requests at local services. Fail
+        // this attempt closed; a non-redirecting mirror/gateway can still win.
+        throw new Error(
+          'opaque redirect (browser): destination cannot be safety-checked (SSRF/downgrade guards need the Location) — refusing to follow; use a direct (non-redirecting) gateway',
+        )
       }
 
       if (res.status >= 300 && res.status < 400) {

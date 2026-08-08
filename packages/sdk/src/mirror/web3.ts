@@ -159,7 +159,7 @@ export async function readWeb3Bytes(
       err.walk(
         (e) => e instanceof ContractFunctionZeroDataError || e instanceof AbiDecodingZeroDataError,
       ) !== null
-    if (returnedNoData) return readRawSstore2(manager, client, maxBytes)
+    if (returnedNoData) return readRawSstore2(manager, client, maxBytes, signal)
 
     throw new Web3ReadError(`chunkCount() unreadable on ${manager}: ${errMsg(err)}`)
   }
@@ -238,7 +238,12 @@ async function readRawSstore2(
   addr: Address,
   client: Web3ReadClient,
   maxBytes?: number,
+  signal?: AbortSignal,
 ): Promise<Uint8Array> {
+  // The fallback is reached AFTER chunkCount() settles — which may be well
+  // after the caller aborted (the expected zero-data rejection can arrive
+  // late). Re-check before starting more RPC work.
+  signal?.throwIfAborted()
   const code = await client.getCode({ address: addr })
   if (code === undefined || code === '0x' || code.length <= 2) {
     throw new Web3ReadError(`web3:// target ${addr} has no code`)

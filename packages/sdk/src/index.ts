@@ -46,7 +46,11 @@ import { type EasVerbs, type RevocationRequest, makeEasVerbs } from './eas/verbs
 import { EfsError, NotImplemented, WalletRequired } from './errors.js'
 import { toJSON } from './json.js'
 import { type Lens, identity, lens, resolveLens } from './lenses/resolve.js'
-import { type EfsRawContracts, buildRawContracts } from './raw/contracts.js'
+import {
+  type EfsRawContracts,
+  type EfsRawReadContracts,
+  buildRawContracts,
+} from './raw/contracts.js'
 import {
   type HasSourceUIDs,
   type HydratedItem,
@@ -378,7 +382,7 @@ export type EfsDecodeNs = {
 
 /** Read-capable `raw` namespace: the deployment + the pre-wired read-only contract
  * instances (write methods absent until a wallet is supplied — see {@link EfsRawNs}). */
-export type EfsRawReadNs = EfsRawContracts & {
+export type EfsRawReadNs = EfsRawReadContracts & {
   deployment(): EfsDeployment
   /**
    * Run the full deployment trust gate: bytecode presence **then** schema-UID
@@ -391,9 +395,16 @@ export type EfsRawReadNs = EfsRawContracts & {
   verifyDeployment(): Promise<void>
 }
 
-/** The `raw` namespace. Same shape read or write — the contract instances carry
- * `.write.*` only when a wallet was supplied (viem's own getContract split). */
-export type EfsRawNs = EfsRawReadNs
+/** The wallet-backed `raw` namespace: the same deployment/verify surface with
+ * contract instances that ALSO carry `.write.*` (viem's getContract with a
+ * wallet). Distinct from {@link EfsRawReadNs} so the type gate is real — a
+ * read-only client's instances have NO `.write` at the type level, matching
+ * the runtime (viem generates none without a wallet). */
+export type EfsRawNs = EfsRawContracts & {
+  deployment(): EfsDeployment
+  /** See {@link EfsRawReadNs.verifyDeployment}. */
+  verifyDeployment(): Promise<void>
+}
 
 // Read-only VIEWS of the standalone graph/value namespaces. Their read verbs are lens-scoped
 // and need no wallet, so a read-only client exposes them; the write verbs (add/remove/set/
@@ -1105,6 +1116,11 @@ export function createEfsV1Client(config: EfsClientConfig): EfsClient {
       multiAttest: easVerbs.multiAttest,
       revoke: easVerbs.revoke,
     },
+    // The `as unknown as EfsRawNs` below: the getters return the SAME viem
+    // instantiations the type names, but TS treats the two deferred
+    // GetContractReturnType expansions as unrelated (TS2719) — a known
+    // deep-generic comparison limit, not a shape difference. The builder is the
+    // single source of the runtime shape.
     raw: {
       deployment: getDeployment,
       verifyDeployment: async () => {
@@ -1147,7 +1163,7 @@ export function createEfsV1Client(config: EfsClientConfig): EfsClient {
       get eas() {
         return rawContracts.eas
       },
-    },
+    } as unknown as EfsRawNs & EfsRawReadNs,
     decode,
     toJSON,
     account: {
@@ -1318,7 +1334,12 @@ export {
   type RevocationRequest,
 } from './eas/verbs.js'
 // `efs.raw.*` pre-wired contract instances — escape hatch (P1-4).
-export { buildRawContracts, type EfsRawContracts, type RawClients } from './raw/contracts.js'
+export {
+  buildRawContracts,
+  type EfsRawContracts,
+  type EfsRawReadContracts,
+  type RawClients,
+} from './raw/contracts.js'
 // `efs.decode` round-trip bridge — raw Attestation → typed view (P1-4).
 export {
   decodeAttestation,

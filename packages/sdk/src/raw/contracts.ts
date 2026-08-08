@@ -40,37 +40,50 @@ export type RawClients = {
   wallet: WalletClient | undefined
 }
 
-/** The client shape viem's `getContract` accepts (public always, wallet optional). */
-type RawClient = { public: PublicClient; wallet?: WalletClient }
+/** The wallet-backed client shape (`.write.*` present on every instance). */
+type RawWriteClient = { public: PublicClient; wallet: WalletClient }
+/** The read-only client shape (NO `.write.*` — viem generates none without a
+ * wallet, and the type must say so: a `wallet?:` optional here would make viem
+ * include the write surface on the READ type, letting a no-wallet client
+ * type-check `raw.eas.write.revoke(...)` that is `undefined` at runtime). */
+type RawReadClient = { public: PublicClient }
 
 /**
- * One pre-wired instance per EFS/EAS contract the SDK vendors an ABI for. The
- * concrete `GetContractReturnType` is what viem infers from each `as const` ABI +
- * the supplied client(s), so `.read.*` / (`.write.*` when a wallet is set) are
- * fully typed — the same surface a dev would get from `getContract` by hand.
+ * One pre-wired instance per EFS/EAS contract the SDK vendors an ABI for,
+ * parameterized by the client shape so the read-only and wallet-backed
+ * namespaces get DISTINCT viem-inferred surfaces. The concrete
+ * `GetContractReturnType` is what viem infers from each `as const` ABI + the
+ * client type — the same surface a dev would get from `getContract` by hand.
  */
-export type EfsRawContracts = {
+type RawContractsFor<C extends RawReadClient> = {
   /** EFS Indexer (kernel reads + the frozen schema-UID getters). */
-  indexer: GetContractReturnType<typeof indexerAbi, RawClient>
+  indexer: GetContractReturnType<typeof indexerAbi, C>
   /** EFS Router (request classification / resolve mode). */
-  router: GetContractReturnType<typeof routerAbi, RawClient>
+  router: GetContractReturnType<typeof routerAbi, C>
   /** EFSFileView (directory pages, path resolution, data-mirror reads). */
-  fileView: GetContractReturnType<typeof fileViewAbi, RawClient>
+  fileView: GetContractReturnType<typeof fileViewAbi, C>
   /** EdgeResolver (active PIN/TAG edge reads). */
-  edgeResolver: GetContractReturnType<typeof edgeResolverAbi, RawClient>
+  edgeResolver: GetContractReturnType<typeof edgeResolverAbi, C>
   /** MirrorResolver (transport anchors, max-URI length). */
-  mirrorResolver: GetContractReturnType<typeof mirrorResolverAbi, RawClient>
+  mirrorResolver: GetContractReturnType<typeof mirrorResolverAbi, C>
   /** ListReader (list mode / entries / membership reads). */
-  listReader: GetContractReturnType<typeof listReaderAbi, RawClient>
+  listReader: GetContractReturnType<typeof listReaderAbi, C>
   /** AliasResolver (REDIRECT schema UID + redirect resolution). */
-  aliasResolver: GetContractReturnType<typeof aliasResolverAbi, RawClient>
+  aliasResolver: GetContractReturnType<typeof aliasResolverAbi, C>
   /** The external EAS contract (attest/multiAttest/revoke/getAttestation). */
-  eas: GetContractReturnType<typeof easAbi, RawClient>
+  eas: GetContractReturnType<typeof easAbi, C>
 }
+
+/** The wallet-backed raw instances (`.read.*` AND `.write.*`). */
+export type EfsRawContracts = RawContractsFor<RawWriteClient>
+/** The read-only raw instances — `.write.*` is ABSENT at the type level, so a
+ * no-wallet client cannot type-check a write that would be a runtime
+ * `TypeError` (the documented wallet gate, made real). */
+export type EfsRawReadContracts = RawContractsFor<RawReadClient>
 
 /** Build the `{ public, wallet? }` arg viem's `getContract` expects, wallet omitted
  * for a read-only client (so no `.write` surface is generated). */
-function clientArg(clients: RawClients): RawClient {
+function clientArg(clients: RawClients): RawReadClient | RawWriteClient {
   return clients.wallet
     ? { public: clients.public, wallet: clients.wallet }
     : { public: clients.public }
@@ -94,12 +107,12 @@ export function buildRawContracts(
   const at = <const TAbi extends readonly unknown[]>(
     pick: (d: EfsDeployment) => `0x${string}`,
     abi: TAbi,
-  ): GetContractReturnType<TAbi, RawClient> =>
+  ): GetContractReturnType<TAbi, RawWriteClient> =>
     getContract({
       address: pick(getDeployment()),
       abi,
       client,
-    }) as unknown as GetContractReturnType<TAbi, RawClient>
+    }) as unknown as GetContractReturnType<TAbi, RawWriteClient>
 
   // Lazy getters: each access re-resolves the deployment RECORD (an override is
   // reflected; a missing deployment throws DeploymentNotFound here, not at
