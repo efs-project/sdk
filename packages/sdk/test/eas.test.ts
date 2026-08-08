@@ -216,3 +216,32 @@ describe('attest builders forward resolver value (msg.value)', () => {
     expect(call.value).toBe(9n)
   })
 })
+
+describe('verifyAttestationUID maxBump bounds (review r3740495865)', () => {
+  it('rejects NaN/Infinity/negative/fractional/over-uint32 maxBump before any keccak work', async () => {
+    const { verifyAttestationUID } = await import('../src/eas/uid.js')
+    const att = {
+      uid: `0x${'0'.repeat(64)}`,
+      schema: `0x${'0'.repeat(64)}`,
+      time: 0n,
+      expirationTime: 0n,
+      revocationTime: 0n,
+      refUID: `0x${'0'.repeat(64)}`,
+      recipient: `0x${'0'.repeat(40)}`,
+      attester: `0x${'0'.repeat(40)}`,
+      revocable: true,
+      data: '0x',
+    } as never
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, -1, 1.5, 0x1_0000_0000]) {
+      const err = (() => {
+        try {
+          verifyAttestationUID(att, bad)
+          return undefined
+        } catch (e) {
+          return e as { code?: string }
+        }
+      })()
+      expect(err?.code, String(bad)).toBe('InvalidArgument')
+    }
+  })
+})

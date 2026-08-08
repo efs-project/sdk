@@ -608,6 +608,31 @@ describe('canonicalizeSameAs', () => {
 
 // ── The deliberate supersededBy walk (§2 breadcrumb) ────────────────────────────
 
+describe('walkSupersededBy — maxHops validation (review r3740495862)', () => {
+  it('throws InvalidArgument on a non-finite cap; floors a fractional one', async () => {
+    const D1 = uid(0xd1)
+    const D2 = uid(0xd2)
+    const D3 = uid(0xd3)
+    const chain = makeChain(
+      {
+        [D1]: [{ attester: ATTESTER, redirectUID: uid(0xe1), target: D2, kind: 1 }],
+        [D2]: [{ attester: ATTESTER, redirectUID: uid(0xe2), target: D3, kind: 1 }],
+      },
+      { [D2]: { schema: SCHEMAS.data }, [D3]: { schema: SCHEMAS.data } },
+    )
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, -1]) {
+      const err = await walkSupersededBy(ctxWith(chain), D1, [ATTESTER], { maxHops: bad }).catch(
+        (e) => e,
+      )
+      expect((err as { code?: string }).code, String(bad)).toBe('InvalidArgument')
+    }
+    // Fractional floors: 1.5 → exactly ONE hop, never two.
+    const out = await walkSupersededBy(ctxWith(chain), D1, [ATTESTER], { maxHops: 1.5 })
+    expect(out.chain).toHaveLength(1)
+    expect(out.latest).toBe(D2)
+  })
+})
+
 describe('walkSupersededBy', () => {
   const D1 = uid(0xd1)
   const D2 = uid(0xd2)

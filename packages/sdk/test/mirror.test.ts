@@ -750,3 +750,20 @@ describe('browser opaqueredirect provenance (review r3740482355)', () => {
     expect(call).toBe(2)
   })
 })
+
+describe('numeric-option validation (review r3740495860 + sweep)', () => {
+  it('resolveTransport rejects non-finite/non-positive maxBytes at the public entry', () => {
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, 0, -5]) {
+      expect(() => resolveTransport('data:text/plain;base64,aGk=', { maxBytes: bad })).toThrow(
+        RangeError,
+      )
+    }
+  })
+
+  it('fetchVerified rejects a non-finite/non-positive timeoutMs (would abort every attempt instantly)', async () => {
+    const { fetchVerified } = await import('../src/mirror/fetch.js')
+    await expect(
+      fetchVerified(['https://x.example/a'], undefined, { timeoutMs: Number.NaN }),
+    ).rejects.toThrow(RangeError)
+  })
+})

@@ -155,6 +155,15 @@ export function resolveTransport(
   uri: string,
   opts: { maxBytes?: number; allowInsecureHttp?: boolean } = {},
 ): ResolvedTransport {
+  // Direct callers of this PUBLIC resolver bypass fetchVerified's cap check, and
+  // every downstream size comparison in `resolveData` is a `>` — NaN never
+  // rejects an oversized `data:` payload and Infinity disables the ceiling.
+  // Same fail-loud rule as fetchVerified, at this entry point too.
+  if (opts.maxBytes !== undefined && (!Number.isFinite(opts.maxBytes) || opts.maxBytes <= 0)) {
+    throw new RangeError(
+      `resolveTransport: \`maxBytes\` must be a finite positive number (got ${opts.maxBytes}). Omit it for the default ceiling.`,
+    )
+  }
   const scheme = SCHEME_RE.exec(uri)?.[1]?.toLowerCase()
   if (!scheme) {
     throw new UnsupportedUriError(uri, 'no URI scheme')

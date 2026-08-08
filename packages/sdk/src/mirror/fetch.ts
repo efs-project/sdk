@@ -333,6 +333,14 @@ export async function fetchVerified(
       `fetchVerified: \`maxBytes\` must be a finite positive number (got ${opts.maxBytes}). Omit it for the ${DEFAULT_MAX_BYTES}-byte default ceiling.`,
     )
   }
+  // Same class (proactive sweep): a NaN timeout makes `setTimeout` fire
+  // IMMEDIATELY (treated as 0), aborting every attempt before its first byte —
+  // a confusing all-mirrors-failed instead of a config error.
+  if (opts.timeoutMs !== undefined && (!Number.isFinite(opts.timeoutMs) || opts.timeoutMs <= 0)) {
+    throw new RangeError(
+      `fetchVerified: \`timeoutMs\` must be a finite positive number (got ${opts.timeoutMs}). Omit it for the ${DEFAULT_TIMEOUT_MS} ms default.`,
+    )
+  }
   const attempts: AttemptError[] = []
 
   for (const mirror of mirrors) {

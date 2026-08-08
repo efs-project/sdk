@@ -460,7 +460,17 @@ export async function walkSupersededBy(
   opts?: { maxHops?: number },
 ): Promise<{ latest: Hex; chain: readonly RedirectRecord[]; complete: boolean }> {
   const { schemas } = ctx.deployment
-  const cap = Math.min(opts?.maxHops ?? DEFAULT_REDIRECT_HOPS, MAX_REDIRECT_HOPS)
+  // Same validation rule as resolveHopCap: a NaN cap would walk ZERO edges and
+  // report the start as an (incomplete-looking) history; a fractional cap
+  // exceeds the requested bound in the `<` loop. Finite check + floor + clamp.
+  const requested = opts?.maxHops ?? DEFAULT_REDIRECT_HOPS
+  if (!Number.isFinite(requested) || requested < 0) {
+    throw new EfsError(
+      `EFS redirects.history: \`maxHops\` is ${String(requested)} — pass a finite non-negative hop count (≤ ${MAX_REDIRECT_HOPS}).`,
+      { code: 'InvalidArgument' },
+    )
+  }
+  const cap = Math.min(Math.floor(requested), MAX_REDIRECT_HOPS)
   const visited = new Set<string>([dataUID.toLowerCase()])
   const chain: RedirectRecord[] = []
   let current = dataUID

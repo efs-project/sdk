@@ -544,3 +544,34 @@ describe('efs.index (repair verb) — honesty regressions', () => {
     expect((err as { code?: string }).code).toBe('ContractReverted')
   })
 })
+
+describe('capability probe chain-pinning (review r3740495867)', () => {
+  it('a provider that drifts between the chain sample and the getCode probe fails closed (WrongChain) — never caches chain-B code under chain A', async () => {
+    // eth_chainId: first call (the sample) reports chain A; every later call
+    // (the guarded probe's re-check) reports chain B — the drift window the
+    // guard exists for.
+    let chainCalls = 0
+    const provider = createMockProvider({
+      chainId: 31337, // unused — handler below overrides
+      handlers: {
+        eth_chainId: () => {
+          chainCalls += 1
+          return chainCalls === 1 ? '0x7a69' : '0x3e7' // 31337 then 999
+        },
+        eth_getCode: () => '0x6080604052', // would read as smart-account if trusted
+      },
+    })
+    const chain31337 = { ...sepolia, id: 31337 }
+    const pc = createPublicClient({ chain: chain31337, transport: custom(provider) })
+    const wc = createWalletClient({
+      chain: chain31337,
+      account: addr(0xbee),
+      transport: custom(provider),
+    }) as WalletClient
+    const efs = createEfsClient({ publicClient: pc, walletClient: wc }) as unknown as {
+      account: { capabilities(): Promise<unknown> }
+    }
+    const err = await efs.account.capabilities().catch((e) => e)
+    expect((err as { code?: string }).code).toBe('WrongChain')
+  })
+})

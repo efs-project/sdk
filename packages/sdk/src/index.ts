@@ -1161,12 +1161,24 @@ export function createEfsV1Client(config: EfsClientConfig): EfsClient {
             { code: 'WalletRequired' },
           )
         }
-        // Compose the narrow DetectClient: `getCode` from the public client, the
-        // optional EIP-5792 `getCapabilities` from the wallet (absent on wallets
-        // that don't implement it — detection tolerates that). Lazy + cached per
-        // (address, chainId); never on the write hot path.
+        // Key the probe by the LIVE chain, not the construction-time `publicClient.chain.id`.
+        // A mutable EIP-1193 provider can switch networks after the client is built, and
+        // EIP-5792 `getCapabilities` is reported per the live chain too. Keying
+        // detectAccount's cache with the stale construction-time id would mix new-chain
+        // bytecode/capabilities into an old-chain cache slot and return the wrong
+        // `kind`/gasless status after a switch. Sample FIRST, then pin the probe to it.
+        const liveChainId = await publicClient.getChainId()
+        // Compose the narrow DetectClient: `getCode` routes through the chain-GUARDED
+        // client pinned to the sampled `liveChainId` — a provider that drifts between the
+        // sample above and the probe read would otherwise return chain-B bytecode that gets
+        // cached under chain A's key (and keeps mis-reporting `kind` from the cache). The
+        // guard fails the probe closed (`WrongChain`) instead. The optional EIP-5792
+        // `getCapabilities` comes from the wallet (absent on wallets that don't implement
+        // it — detection tolerates that). Lazy + cached per (address, chainId); never on
+        // the write hot path.
+        const guardedForProbe = guardReadClient(liveChainId)
         const detectClient: DetectClient = {
-          getCode: (args) => (publicClient as unknown as DetectClient).getCode(args),
+          getCode: (args) => (guardedForProbe as unknown as DetectClient).getCode(args),
           ...(typeof (wallet as unknown as DetectClient).getCapabilities === 'function'
             ? {
                 getCapabilities: (args) =>
@@ -1174,13 +1186,6 @@ export function createEfsV1Client(config: EfsClientConfig): EfsClient {
               }
             : {}),
         }
-        // Key the probe by the LIVE chain, not the construction-time `publicClient.chain.id`.
-        // A mutable EIP-1193 provider can switch networks after the client is built; the
-        // `getCode` call above already lands on the provider's CURRENT chain, and EIP-5792
-        // `getCapabilities` is reported per the live chain too. Keying detectAccount's cache
-        // with the stale construction-time id would mix new-chain bytecode/capabilities into
-        // an old-chain cache slot and return the wrong `kind`/gasless status after a switch.
-        const liveChainId = await publicClient.getChainId()
         // Scope the cache by the CONNECTOR (the wallet client) — `getCapabilities` is
         // connector-dependent, so a reconnect with a different wallet must not reuse another
         // connector's cached `gasless`/batch profile for the same account+chain.

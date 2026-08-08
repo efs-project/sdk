@@ -25,6 +25,7 @@
  */
 
 import { type Address, type Hex, encodePacked, keccak256 } from 'viem'
+import { EfsError } from '../errors.js'
 
 /** Inputs to `computeAttestationUID`, named to match the `Attestation` struct. */
 export interface AttestationUIDInput {
@@ -105,6 +106,16 @@ export interface MinedAttestation {
  * Returns `true` iff some `bump` in `[0, maxBump]` reproduces `attestation.uid`.
  */
 export function verifyAttestationUID(attestation: MinedAttestation, maxBump = 0): boolean {
+  // This loop is SYNCHRONOUS keccak work: `Infinity` (or a huge finite value)
+  // would block the event loop for billions of hashes before the uint32 bump
+  // encoder ever objected, and `NaN` skips even bump 0 (a false negative).
+  // The bump is a uint32 on the wire — bound the scan to that range.
+  if (!Number.isInteger(maxBump) || maxBump < 0 || maxBump > 0xffffffff) {
+    throw new EfsError(
+      `verifyAttestationUID: \`maxBump\` is ${String(maxBump)} — pass an integer in [0, 4294967295] (the uint32 bump range). The default 0 covers the common one-attestation-per-tx case.`,
+      { code: 'InvalidArgument' },
+    )
+  }
   for (let bump = 0; bump <= maxBump; bump++) {
     const derived = computeAttestationUID({
       schema: attestation.schema,
