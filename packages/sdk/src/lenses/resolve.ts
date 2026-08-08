@@ -64,8 +64,18 @@ export function identity(ensOrAddress: string): Lens {
 }
 
 /** Coerce a Lens or a raw address into resolved attesters. A raw address is
- * treated as a literal single-address lens. */
-export function resolveLens(input: Lens | Address, ctx: LensContext): Promise<readonly Address[]> {
+ * treated as a literal single-address lens. The output is ALWAYS finalized
+ * (deduped + capped) here: the `Lens` type is structurally open, so a CUSTOM
+ * lens's `resolve()` can return duplicates or an over-cap set that the
+ * built-in constructors finalize internally — this common boundary is where
+ * every read's attester set is produced, so it enforces the same contract for
+ * every lens source (the documented {@link MaxLensesExceeded}, never a
+ * downstream contract/RPC failure; `resolveAttesters()`' promised dedup holds).
+ * Idempotent for the built-ins. */
+export async function resolveLens(
+  input: Lens | Address,
+  ctx: LensContext,
+): Promise<readonly Address[]> {
   const l = typeof input === 'string' ? lens(input) : input
-  return l.resolve(ctx)
+  return finalize(await l.resolve(ctx))
 }

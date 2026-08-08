@@ -13,11 +13,13 @@ import { describe, expect, it } from 'vitest'
 import { IndexUnconfirmed } from '../src/errors.js'
 import {
   DeploymentNotFound,
+  type Lens,
   MaxLensesExceeded,
   WalletRequired,
   createEfsClient,
   identity,
   lens,
+  resolveLens,
 } from '../src/index.js'
 import { createMockProvider } from './helpers/mock-eip1193.js'
 
@@ -381,6 +383,25 @@ describe('lenses', () => {
   it('throws (never truncates) above MAX_LENSES', () => {
     const many = Array.from({ length: 21 }, (_, i) => addr(i + 1))
     expect(() => lens(many)).toThrow(MaxLensesExceeded)
+  })
+
+  it('a CUSTOM lens is finalized at the resolveLens boundary (r3740850457)', async () => {
+    // The Lens type is structurally open — a custom object's resolve() bypasses
+    // the built-in constructors' internal finalize. The common boundary must
+    // dedupe (resolveAttesters' documented contract) and enforce the cap with
+    // the typed MaxLensesExceeded, never let 21+ attesters reach the on-chain
+    // views to die as a contract/RPC error.
+    const dupes: Lens = {
+      __brand: 'Lens',
+      resolve: async () => [addr(1), addr(2), addr(1), addr(2)],
+    }
+    expect(await resolveLens(dupes, {})).toEqual([addr(1), addr(2)])
+
+    const overCap: Lens = {
+      __brand: 'Lens',
+      resolve: async () => Array.from({ length: 21 }, (_, i) => addr(i + 1)),
+    }
+    await expect(resolveLens(overCap, {})).rejects.toThrow(MaxLensesExceeded)
   })
 })
 
