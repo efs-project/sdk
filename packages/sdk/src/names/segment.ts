@@ -49,6 +49,7 @@ export type CanonicalName = string & { readonly __brand: 'CanonicalName' }
 export type InvalidNameReason =
   | 'empty'
   | 'dot-segment'
+  | 'not-nfc'
   | 'bare-reserved-byte'
   | 'malformed-escape'
   | 'lowercase-escape'
@@ -66,7 +67,9 @@ export class InvalidAnchorNameError extends EfsError {
     const rule =
       reason === 'empty' || reason === 'dot-segment'
         ? "Empty, '.' and '..' segments are reserved (specs/02)."
-        : 'Canonical names have exactly one spelling: reserved bytes are %XX-escaped (UPPERCASE hex), unreserved bytes appear bare (specs/02).'
+        : reason === 'not-nfc'
+          ? 'Canonical names are Unicode-NFC-normalized (specs/02 step 1) — pass the human form through encodeName() instead.'
+          : 'Canonical names have exactly one spelling: reserved bytes are %XX-escaped (UPPERCASE hex), unreserved bytes appear bare (specs/02).'
     super(`EFS name: segment '${segment}' is not a valid anchor name (${reason}). ${rule}`, {
       code: 'InvalidAnchorName',
     })
@@ -140,11 +143,16 @@ export function encodeName(human: string): CanonicalName {
 }
 
 /** Validation verdict for a claimed-canonical string — mirrors
- * `EFSIndexer._isValidAnchorName` byte-for-byte, including the over-escape
- * rejection. Returns the failing rule, or `undefined` when canonical. */
+ * `EFSIndexer._isValidAnchorName` byte-for-byte (over-escape rejection
+ * included) PLUS the NFC rule the contract cannot check but the SDK can:
+ * specs/02 canonical = NFC + escaping, so a non-NFC string is NOT canonical —
+ * admitting one would let `asCanonicalName`/the graph dev-guard pass an NFD
+ * segment that mints a permanent anchor slot the (NFC-normalizing) path
+ * pipeline can never resolve. Returns the failing rule, or `undefined`. */
 function validateCanonical(s: string): InvalidNameReason | undefined {
   if (s.length === 0) return 'empty'
   if (s === '.' || s === '..') return 'dot-segment'
+  if (s !== s.normalize('NFC')) return 'not-nfc'
   const bytes = new TextEncoder().encode(s)
   for (let i = 0; i < bytes.length; i++) {
     const b = bytes[i] as number

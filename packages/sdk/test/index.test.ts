@@ -5,6 +5,8 @@ import {
   createPublicClient,
   createWalletClient,
   custom,
+  encodeFunctionResult,
+  toFunctionSelector,
 } from 'viem'
 import { sepolia } from 'viem/chains'
 import { describe, expect, it } from 'vitest'
@@ -378,5 +380,167 @@ describe('lenses', () => {
   it('throws (never truncates) above MAX_LENSES', () => {
     const many = Array.from({ length: 21 }, (_, i) => addr(i + 1))
     expect(() => lens(many)).toThrow(MaxLensesExceeded)
+  })
+})
+
+// ── efs.index repair verb — end-to-end over a mock EIP-1193 provider ────────────
+// Regressions for the adversarial-review findings: (a) EFS-native-schema UIDs must
+// short-circuit to 'already-indexed' (EFSIndexer.index() provably no-ops for them,
+// EFSIndexer.sol:1272-1276 — sending a tx burns gas and reports a false 'indexed');
+// (b) a mined-but-REVERTED indexer tx must throw (viem returns status:'reverted'
+// without throwing), never report success.
+
+describe('efs.index (repair verb) — honesty regressions', () => {
+  const A = (n: number) => `0x${n.toString(16).padStart(40, '0')}` as Address
+  const U = (n: number) => `0x${n.toString(16).padStart(64, '0')}` as `0x${string}`
+
+  const DEP = {
+    chainId: 31337,
+    contracts: {
+      eas: A(0xea5),
+      schemaRegistry: A(0x5c4),
+      indexer: A(0x1dc),
+      router: A(0x707),
+      fileView: A(0xf17),
+      edgeResolver: A(0xed6),
+      mirrorResolver: A(0x319),
+      listResolver: A(0x715),
+      listEntryResolver: A(0x71e),
+      listReader: A(0x71a),
+      aliasResolver: A(0xa11),
+      systemAccount: A(0x5e5),
+    },
+    schemas: {
+      anchor: U(0xa),
+      property: U(0xb),
+      data: U(0xc),
+      pin: U(0xd),
+      tag: U(0xe),
+      mirror: U(0xf),
+      list: U(0x100),
+      listEntry: U(0x101),
+      redirect: U(0x102),
+    },
+    transports: {},
+  }
+
+  /** Build a provider whose eth_call dispatches on (to, selector) and whose
+   * tx/receipt methods drive the write leg. */
+  function harness(opts: { attSchema: `0x${string}`; receiptStatus: '0x0' | '0x1' }) {
+    const selGetAttestation = toFunctionSelector('getAttestation(bytes32)')
+    const selIsIndexed = toFunctionSelector('isIndexed(bytes32)')
+    const selIsRevoked = toFunctionSelector('isRevoked(bytes32)')
+    const provider = createMockProvider({
+      chainId: 31337,
+      handlers: {
+        eth_call: (params) => {
+          const call = params[0] as { to: string; data: string }
+          const sel = call.data.slice(0, 10)
+          if (sel === selGetAttestation) {
+            return encodeFunctionResult({
+              abi: [
+                {
+                  type: 'function',
+                  name: 'getAttestation',
+                  stateMutability: 'view',
+                  inputs: [{ name: 'uid', type: 'bytes32' }],
+                  outputs: [
+                    {
+                      name: '',
+                      type: 'tuple',
+                      components: [
+                        { name: 'uid', type: 'bytes32' },
+                        { name: 'schema', type: 'bytes32' },
+                        { name: 'time', type: 'uint64' },
+                        { name: 'expirationTime', type: 'uint64' },
+                        { name: 'revocationTime', type: 'uint64' },
+                        { name: 'refUID', type: 'bytes32' },
+                        { name: 'recipient', type: 'address' },
+                        { name: 'attester', type: 'address' },
+                        { name: 'revocable', type: 'bool' },
+                        { name: 'data', type: 'bytes' },
+                      ],
+                    },
+                  ],
+                },
+              ],
+              functionName: 'getAttestation',
+              result: {
+                uid: U(0xabc),
+                schema: opts.attSchema,
+                time: 1n,
+                expirationTime: 0n,
+                revocationTime: 0n,
+                refUID: U(0),
+                recipient: A(0),
+                attester: A(0xbee),
+                revocable: true,
+                data: '0x',
+              },
+            })
+          }
+          if (sel === selIsIndexed || sel === selIsRevoked) {
+            return `0x${'0'.repeat(64)}` // false
+          }
+          throw new Error(`unhandled eth_call selector ${sel}`)
+        },
+        eth_sendTransaction: () => U(0x77),
+        eth_getTransactionReceipt: () => ({
+          transactionHash: U(0x77),
+          transactionIndex: '0x0',
+          blockHash: U(0xb10c),
+          blockNumber: '0x1',
+          from: A(0xbee),
+          to: DEP.contracts.indexer,
+          cumulativeGasUsed: '0x5208',
+          gasUsed: '0x5208',
+          contractAddress: null,
+          logs: [],
+          logsBloom: `0x${'0'.repeat(512)}`,
+          status: opts.receiptStatus,
+          effectiveGasPrice: '0x1',
+          type: '0x2',
+        }),
+        eth_estimateGas: () => '0x5208',
+        eth_getBlockByNumber: () => ({
+          number: '0x1',
+          hash: U(0xb10c),
+          timestamp: '0x1',
+          baseFeePerGas: '0x1',
+        }),
+        eth_gasPrice: () => '0x1',
+        eth_maxPriorityFeePerGas: () => '0x1',
+        eth_getTransactionCount: () => '0x0',
+      },
+    })
+    const chain31337 = { ...sepolia, id: 31337 }
+    const pc = createPublicClient({ chain: chain31337, transport: custom(provider) })
+    const wc = createWalletClient({
+      chain: chain31337,
+      account: A(0xbee),
+      transport: custom(provider),
+    }) as WalletClient
+    const efs = createEfsClient({
+      publicClient: pc,
+      walletClient: wc,
+      deployments: { 31337: DEP },
+    }) as unknown as {
+      index(uid: `0x${string}`): Promise<{ status: string; txHash?: `0x${string}` }>
+    }
+    return { efs, provider }
+  }
+
+  it("an EFS-native-schema UID (DATA) short-circuits to 'already-indexed' — NO tx is sent", async () => {
+    const { efs, provider } = harness({ attSchema: DEP.schemas.data, receiptStatus: '0x1' })
+    const out = await efs.index(U(0xabc))
+    expect(out).toEqual({ status: 'already-indexed' })
+    expect(provider.callCount('eth_sendTransaction')).toBe(0)
+  })
+
+  it('a mined-but-REVERTED indexer tx throws (ContractReverted), never a success verdict', async () => {
+    const { efs } = harness({ attSchema: DEP.schemas.redirect, receiptStatus: '0x0' })
+    const err = await efs.index(U(0xabc)).catch((e) => e)
+    expect(err).toBeInstanceOf(Error)
+    expect((err as { code?: string }).code).toBe('ContractReverted')
   })
 })

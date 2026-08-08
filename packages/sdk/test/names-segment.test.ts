@@ -157,3 +157,29 @@ describe('round-trip properties', () => {
     expect(twice).not.toBe(once)
   })
 })
+
+describe('NFC is part of canonicity (SDK-checkable; the contract cannot)', () => {
+  const NFD = 'café' // e + combining acute — NOT NFC
+
+  it('validate/coerce reject a non-NFC string — an NFD "canonical" would mint a permanently path-unreachable slot', () => {
+    expect(isCanonicalName(NFD)).toBe(false)
+    const err = (() => {
+      try {
+        asCanonicalName(NFD)
+        return undefined
+      } catch (e) {
+        return e as InvalidAnchorNameError
+      }
+    })()
+    expect(err).toBeInstanceOf(InvalidAnchorNameError)
+    expect(err?.reason).toBe('not-nfc')
+  })
+
+  it('decodeName rejects NFD input, preserving encodeName(decodeName(c)) === c', () => {
+    expect(() => decodeName(NFD)).toThrow(InvalidAnchorNameError)
+    // …and the NFC form of the same word is canonical and round-trips.
+    const nfc = NFD.normalize('NFC')
+    expect(isCanonicalName(nfc)).toBe(true)
+    expect(encodeName(decodeName(nfc))).toBe(nfc)
+  })
+})

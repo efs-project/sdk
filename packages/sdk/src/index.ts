@@ -896,11 +896,22 @@ export function createEfsV1Client(config: EfsClientConfig): EfsClient {
     return hash
   }
   const waitForReceipt = async (txHash: Hex): Promise<void> => {
-    await (
+    const receipt = (await (
       publicClient as unknown as {
-        waitForTransactionReceipt: (args: { hash: Hex }) => Promise<unknown>
+        waitForTransactionReceipt: (args: { hash: Hex }) => Promise<{ status?: string }>
       }
-    ).waitForTransactionReceipt({ hash: txHash })
+    ).waitForTransactionReceipt({ hash: txHash })) as { status?: string }
+    // A mined-but-reverted tx yields a receipt (viem does NOT throw) with
+    // `status: 'reverted'` — same check the layered submitter runs (submit.ts).
+    // Without it, remove()'s revoke leg would treat a REVERTED revoke as landed,
+    // throw IndexingIncomplete claiming "the revoke landed — efs.index(uid)
+    // repairs it", and the repair would then report 'already-indexed' while the
+    // redirect keeps being served. Fail loud instead.
+    if (receipt.status === 'reverted') {
+      throw new EfsError(`transaction reverted on-chain (tx ${txHash}).`, {
+        code: 'ContractReverted',
+      })
+    }
   }
 
   // The `efs.redirects.*` write verbs (set/remove, each with its follow-up
@@ -1204,6 +1215,15 @@ export function createEfsV1Client(config: EfsClientConfig): EfsClient {
           args: [uidArg],
         }) as Promise<boolean>,
       ])
+      // EFS-native schemas (ANCHOR/DATA/PROPERTY) are indexed atomically in
+      // EFSIndexer.onAttest; the public index() API silently NO-OPS for them
+      // (EFSIndexer.sol:1272-1276) and isIndexed() stays false forever. Sending
+      // a tx would mine a state-free no-op and falsely report 'indexed' every
+      // call — recognize them up front and report the honest terminal.
+      const native = [dep.schemas.anchor, dep.schemas.data, dep.schemas.property]
+      if (native.includes(att.schema)) {
+        return { status: 'already-indexed' }
+      }
       // index() self-mirrors an existing EAS revocation at index time
       // (EFSIndexer.sol:1283-1287), so an unindexed UID needs ONLY index().
       if (!indexed) {

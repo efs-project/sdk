@@ -43,6 +43,7 @@ import {
   getReferencingBySchemaAndAttesterCountAbi,
 } from '../chain/abi/indexer.js'
 import { getAttestationAbi } from '../eas/abi.js'
+import { RedirectScanTruncated } from '../errors.js'
 import type { RedirectKind, RedirectRecord } from '../types.js'
 import { type ReadContext, ZERO_UID, read } from './context.js'
 
@@ -56,9 +57,10 @@ export const DEFAULT_REDIRECT_HOPS = 16
 export const MAX_REDIRECT_HOPS = 32
 
 /** Physical index slots paged per `(source, attester)` during selection — an
- * SDK policy bound the spec doesn't set. Exceeding it surfaces the scan as
- * incomplete rather than silently treating the attester as redirect-free
- * (silent absence would be attacker-influenceable via revoked-spam). */
+ * SDK policy bound the spec doesn't set. Exceeding it throws
+ * {@link RedirectScanTruncated} (fail closed): silently treating the attester
+ * as redirect-free would be attacker-influenceable via revoked-spam, and a
+ * partial window can't even vouch for the lowest-UID tie-break. */
 export const MAX_REDIRECT_SCAN = 512
 
 /** Page size for the physical-window pagination. */
@@ -196,7 +198,13 @@ export async function selectLensRedirect(
   attesters: readonly Address[],
 ): Promise<RedirectRecord | undefined> {
   for (const attester of attesters) {
-    const { uids } = await listActiveRedirectUIDs(ctx, source, attester)
+    const { uids, complete } = await listActiveRedirectUIDs(ctx, source, attester)
+    // Fail CLOSED on a truncated scan: an active record beyond the bound could
+    // hold both the first-attester win and the lowest-UID tie-break, so neither
+    // "this attester asserts nothing" (fall-through — the exact revoked-spam
+    // suppression the paged scan exists to prevent) nor "the lowest found wins"
+    // is a safe verdict.
+    if (!complete) throw new RedirectScanTruncated(source, attester, MAX_REDIRECT_SCAN)
     if (uids.length === 0) continue
     // Lowest UID by bytes32 comparison — lowercase-hex strings compare bytewise.
     const winner = uids.reduce((a, b) => (b.toLowerCase() < a.toLowerCase() ? b : a))
@@ -220,7 +228,11 @@ export async function listLensRedirects(
 ): Promise<RedirectRecord[]> {
   const out: RedirectRecord[] = []
   for (const attester of attesters) {
-    const { uids } = await listActiveRedirectUIDs(ctx, source, attester)
+    const { uids, complete } = await listActiveRedirectUIDs(ctx, source, attester)
+    // Same fail-closed rule as selection: a truncated discovery listing would
+    // silently omit records, and the deliberate walks built on it (canonical/
+    // history) would report confident results over an incomplete edge set.
+    if (!complete) throw new RedirectScanTruncated(source, attester, MAX_REDIRECT_SCAN)
     uids.sort((a, b) => (a.toLowerCase() < b.toLowerCase() ? -1 : 1))
     const records = await Promise.all(
       uids.map((u) => fetchRedirectRecord(ctx, source, u, attester)),

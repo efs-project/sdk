@@ -76,6 +76,13 @@ export type EfsErrorCode =
   // NOTE: the pre-ratification 'RedirectCycle'/'RedirectHopLimit' codes are GONE —
   // specs/09 (Accepted) mandates surfaced-node result STATUSES (Resolved/Dangling/
   // CycleStopped/DepthExceeded), never throws; see reads/redirects.ts.
+  /** A redirect selection scan hit the SDK's physical-slot bound (`MAX_REDIRECT_SCAN`)
+   * before exhausting an attester's (source, attester) window — the attester's stance
+   * is UNKNOWABLE within bounds, so selection fails closed rather than silently
+   * falling through to a lower-priority attester (revoked-spam would otherwise let
+   * an attacker suppress a trusted attester's redirect). NOT a spec walk status —
+   * an SDK resource bound, like MaxLensesExceeded. */
+  | 'RedirectScanTruncated'
   // --- classifier codes (ADR-0007 §Realization) ---------------------------
   /** Wallet rejected by the user (EIP-1193 `4001`). Benign, not a failure. */
   | 'UserRejected'
@@ -159,6 +166,29 @@ export class LensRequired extends EfsError {
     super('No lens given and no wallet connected — a read needs an attester to resolve against.', {
       code: 'LensRequired',
     })
+  }
+}
+
+/** A redirect selection scan hit `MAX_REDIRECT_SCAN` physical slots before
+ * exhausting an attester's (source, attester) window (specs/09 selection over
+ * the EFSIndexer referencing index). We throw rather than fall through: an
+ * active record beyond the bound could hold both the first-attester win and
+ * the lowest-UID tie-break, so a truncated verdict is unreliable in BOTH
+ * directions — and silent absence would let revoked-spam suppress a trusted
+ * attester's redirect (the same trust-downgrade class as lens truncation). */
+export class RedirectScanTruncated extends EfsError {
+  override name = 'RedirectScanTruncated'
+  /** The redirect source node whose scan truncated. */
+  readonly source: string
+  /** The lens attester whose (source, attester) window exceeded the bound. */
+  readonly attester: string
+  constructor(source: string, attester: string, max: number) {
+    super(
+      `EFS redirects: attester ${attester} has more than ${max} physical redirect slots on ${source} — the scan bound was hit before the window was exhausted, so this attester's stance cannot be determined within bounds. Selection fails closed rather than guessing. (This state is pathological — normal rotation stays far below the bound.)`,
+      { code: 'RedirectScanTruncated' },
+    )
+    this.source = source
+    this.attester = attester
   }
 }
 

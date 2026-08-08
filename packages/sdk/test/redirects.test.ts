@@ -26,13 +26,14 @@ import type { EfsDeployment, EfsSchemaUIDs } from '../src/chain/deployments.js'
 import { attestedEventAbi } from '../src/eas/abi.js'
 import { SchemaEncoder } from '../src/eas/schema-encoder.js'
 import { EFS_SCHEMA_FIELDS } from '../src/eas/schemas.js'
-import { IndexingIncomplete } from '../src/errors.js'
+import { IndexingIncomplete, RedirectScanTruncated } from '../src/errors.js'
 import type { ReadContext } from '../src/reads/context.js'
 import {
   DEFAULT_REDIRECT_HOPS,
   MAX_REDIRECT_HOPS,
   type RedirectWalkStatus,
   canonicalizeSameAs,
+  listLensRedirects,
   resolveHopCap,
   selectLensRedirect,
   walkSupersededBy,
@@ -330,6 +331,35 @@ describe('selectLensRedirect', () => {
     // 0xe00-range revoked UIDs are LOWER than 0xf1 — but revoked never wins.
     const rec = await selectLensRedirect(ctxWith(chain), A, [ATTESTER])
     expect(rec?.redirectUID).toBe(uid(0xf1))
+  })
+
+  it('REGRESSION: a scan past MAX_REDIRECT_SCAN fails CLOSED (throws) — never a silent fall-through to a lower-priority attester', async () => {
+    const ALICE = addr(0xa11ce)
+    const BOB = addr(0xb0b)
+    // Alice spams/rotates 513 physical slots on A: the first 512 revoked, the
+    // live one beyond the scan bound. Treating her as redirect-free and serving
+    // Bob's record would be the revoked-spam suppression the bound guards
+    // against — selection must throw, not guess.
+    const list: Edge[] = []
+    for (let i = 0; i < 512; i++) {
+      list.push({
+        attester: ALICE,
+        redirectUID: uid(0x10000 + i),
+        target: uid(0x99),
+        kind: 0,
+        revoked: true,
+      })
+    }
+    list.push({ attester: ALICE, redirectUID: uid(0x20000), target: B, kind: 0 })
+    list.push({ attester: BOB, redirectUID: uid(0xb0), target: uid(0x98), kind: 0 })
+    const chain = makeChain({ [A]: list })
+    const err = await selectLensRedirect(ctxWith(chain), A, [ALICE, BOB]).catch((e) => e)
+    expect(err).toBeInstanceOf(RedirectScanTruncated)
+    expect((err as RedirectScanTruncated).attester).toBe(ALICE)
+    // The discovery listing fails closed the same way (canonical/history build on it).
+    await expect(listLensRedirects(ctxWith(chain), A, [ALICE, BOB])).rejects.toThrow(
+      RedirectScanTruncated,
+    )
   })
 })
 
