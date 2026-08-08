@@ -307,6 +307,32 @@ function makeReadClient(handler: (fn: string, args: readonly unknown[]) => unkno
 
 // ── tags namespace ──────────────────────────────────────────────────────────────
 
+describe('attester/signer attribution (review r3741867406)', () => {
+  const ANCHOR_UID = uid(0x800)
+  const DATA_UID = uid(0x900)
+
+  it('REFUSES a declared attester that is not the signing account', async () => {
+    // The receipt's roles (and DataRef.resolvedBy on the submitter seam) key on
+    // the attester; lenses key on it too. A mismatch would confirm a receipt
+    // attributing attestations to an address that never authored them.
+    const { ctx, calls } = makeSubmitCtx()
+    const foreign = { ...ctx, attester: addr(0xbeef) } as typeof ctx
+    const plan = buildPlacementPinPlan(SCHEMAS, ANCHOR_UID, DATA_UID)
+    const err = await submitEdgePlan(plan, foreign).catch((e) => e)
+    expect((err as { code?: string }).code).toBe('InvalidArgument')
+    expect(String((err as Error).message)).toMatch(/is not the signing account/)
+    expect(calls).toHaveLength(0) // nothing broadcast
+  })
+
+  it('ACCEPTS the matching attester (the client always passes the wallet account)', async () => {
+    const { ctx, calls } = makeSubmitCtx()
+    const plan = buildPlacementPinPlan(SCHEMAS, ANCHOR_UID, DATA_UID)
+    const receipt = await submitEdgePlan(plan, ctx)
+    expect(receipt.roles.author).toBe(ATTESTER)
+    expect(calls).toHaveLength(1)
+  })
+})
+
 describe('makeTagsNs', () => {
   const TARGET = uid(0x500)
   const DEF = uid(0x600)

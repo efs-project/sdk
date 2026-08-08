@@ -20,7 +20,12 @@ import type { Address, Hex } from 'viem'
 import { EfsError } from '../errors.js'
 import type { WriteReceipt } from '../types.js'
 import type { FileWriteGraph } from './graph.js'
-import { type LayeredWriteResult, type SubmitContext, submitLayeredTier1 } from './submit.js'
+import {
+  type LayeredWriteResult,
+  type SubmitContext,
+  assertAttesterIsSigner,
+  submitLayeredTier1,
+} from './submit.js'
 
 /** The chain/wallet context an edge/value submit needs (the file write's
  * {@link SubmitContext} plus the attester the receipt records). */
@@ -49,6 +54,9 @@ export async function submitEdgePlan(
   // The wrong-chain guard (`ctx.assertChain`) is enforced by `submitLayeredTier1` before
   // EACH layer's multiAttest — including the first — so it fails closed even if the wallet
   // switches chains between a multi-layer write's prompts. No separate preflight needed.
+  // The declared attester MUST be the signer, though (r3741867406): it is stamped
+  // into the receipt's roles and lenses key on it.
+  assertAttesterIsSigner(ctx, ctx.attester)
   const result: LayeredWriteResult = await submitLayeredTier1(plan, ctx)
   return toEdgeReceipt(result, ctx.attester)
 }
@@ -68,6 +76,7 @@ export async function submitEdgePlanWithUID(
 ): Promise<{ receipt: WriteReceipt; uid: Hex }> {
   // The wrong-chain guard is enforced per-layer inside `submitLayeredTier1` (see
   // {@link submitEdgePlan}) — no separate preflight needed.
+  assertAttesterIsSigner(ctx, ctx.attester) // see submitEdgePlan (r3741867406)
   const result: LayeredWriteResult = await submitLayeredTier1(plan, ctx)
   const uid = result.uids.get(mintedRef)
   if (uid === undefined) {

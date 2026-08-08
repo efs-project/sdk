@@ -33,7 +33,12 @@ import type { Address } from 'viem'
 import type { ContentHash } from '../content/hash.js'
 import type { DataRef, DataUID, WriteMechanism, WriteReceipt, WriteRoles } from '../types.js'
 import type { FileWriteGraph } from './graph.js'
-import { type SubmitContext, type Tier1WriteResult, submitWriteTier1 } from './submit.js'
+import {
+  type SubmitContext,
+  type Tier1WriteResult,
+  assertAttesterIsSigner,
+  submitWriteTier1,
+} from './submit.js'
 
 /**
  * The execution context a {@link Submitter} needs to deliver a plan and build the
@@ -139,6 +144,10 @@ function toReceipt(result: Tier1WriteResult, ctx: SubmitterContext): WriteReceip
 export const Tier1Submitter: Submitter = {
   mechanism: 'sequential',
   async submit(plan: FileWriteGraph, ctx: SubmitterContext): Promise<WriteReceipt> {
+    // The declared attester MUST be the signer (r3741867406): it becomes the
+    // receipt's roles AND `DataRef.resolvedBy`, so a mismatch yields refs that
+    // read under the wrong lens.
+    assertAttesterIsSigner(ctx, ctx.attester)
     // Propagates `WriteRevertedError` verbatim at the partial-write boundary —
     // Tier-1's existing return-vs-throw contract (see module doc).
     const result = await submitWriteTier1(plan, ctx)

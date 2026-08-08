@@ -418,12 +418,7 @@ async function assertHardlinkSelfAuthored(plan: FileWriteGraph, ctx: SubmitConte
       { code: 'InvalidArgument' },
     )
   }
-  const ctxAccount =
-    typeof ctx.account === 'string'
-      ? (ctx.account as Address)
-      : (ctx.account as { address?: Address } | undefined)?.address
-  const walletAccount = (ctx.walletClient as { account?: { address?: Address } }).account?.address
-  const submitter = ctxAccount ?? walletAccount
+  const submitter = submitterAddressOf(ctx)
   if (submitter === undefined) {
     throw new EfsError(
       'EFS write: a HARDLINK plan requires a resolvable signing account (ctx.account, or a wallet client with a bound account) — the self-authorship gate must verify the DATA author before placement.',
@@ -634,12 +629,7 @@ async function assertSymlinkTargetReadable(
 ): Promise<void> {
   const target = plan.symlinkTargetUID
   if (target === undefined) return
-  const ctxAccount =
-    typeof ctx.account === 'string'
-      ? (ctx.account as Address)
-      : (ctx.account as { address?: Address } | undefined)?.address
-  const walletAccount = (ctx.walletClient as { account?: { address?: Address } }).account?.address
-  const submitter = ctxAccount ?? walletAccount
+  const submitter = submitterAddressOf(ctx)
   if (submitter === undefined) {
     throw new EfsError(
       'EFS write: a SYMLINK plan requires a resolvable signing account — the readability gate must verify the author mirrors a DATA target.',
@@ -724,6 +714,38 @@ async function assertMirrorTransportsValid(
     expectedAnchorSchema,
     defs,
   )
+}
+
+/** The address that will actually SIGN this submission: `ctx.account` when set
+ * (viem accepts an address or an `Account`), else the wallet client's bound
+ * account. `undefined` when neither is resolvable (viem then requires the
+ * wallet to carry one, and the send fails on its own terms). */
+export function submitterAddressOf(ctx: SubmitContext): Address | undefined {
+  const ctxAccount =
+    typeof ctx.account === 'string'
+      ? (ctx.account as Address)
+      : (ctx.account as { address?: Address } | undefined)?.address
+  return ctxAccount ?? (ctx.walletClient as { account?: { address?: Address } }).account?.address
+}
+
+/** Reject a declared `attester` that is not the account actually signing
+ * (r3741867406). Lenses key on the attester, and it is stamped into the
+ * receipt's {@link WriteRoles} and (on the submitter seam) `DataRef.resolvedBy`
+ * — a mismatch produces a CONFIRMED receipt attributing on-chain attestations
+ * to an address that did not author them, and refs that read under the wrong
+ * lens. Rejected rather than silently corrected: a divergent attester means the
+ * caller's model of who is writing is wrong. (Role DIVERGENCE for
+ * relayer/paymaster mechanisms is expressed through `roles`, not by lying about
+ * the author — the Tier-1 author is always the signer.) */
+export function assertAttesterIsSigner(ctx: SubmitContext, attester: Address): void {
+  const signer = submitterAddressOf(ctx)
+  if (signer === undefined) return // nothing to compare against; viem enforces its own requirement
+  if (signer.toLowerCase() !== attester.toLowerCase()) {
+    throw new EfsError(
+      `EFS write: the declared attester ${attester} is not the signing account ${signer} — the receipt (and any DataRef derived from it) would attribute these attestations to an address that did not author them, and reads through that ref would use the wrong lens.`,
+      { code: 'InvalidArgument' },
+    )
+  }
 }
 
 // One PIN encoder, reused to re-encode `definition` once it's resolved. The PIN
