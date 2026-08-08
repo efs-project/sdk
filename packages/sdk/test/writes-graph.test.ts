@@ -45,6 +45,17 @@ const baseInput = {
   fileName: 'readme.md',
 } as const
 
+/** baseInput minus the byte-write metadata — HARDLINK inputs carry none (the
+ * builder now REJECTS stray metadata instead of discarding it, r3741086780). */
+const {
+  mirrors: _hlM,
+  contentHash: _hlH,
+  size: _hlS,
+  contentType: _hlT,
+  ...hardlinkBase
+} = baseInput
+void [_hlM, _hlH, _hlS, _hlT]
+
 const bytesInput = {
   ...baseInput,
   content: { kind: 'bytes' as const, bytes: new Uint8Array([1, 2, 3]) },
@@ -440,7 +451,7 @@ describe('mkdir -p — missing ancestor folders folded into the write', () => {
 
   describe('hardlink + missing parents', () => {
     const graph = buildFileWriteGraph({
-      ...baseInput,
+      ...hardlinkBase,
       path: '/photos/2026/trip.jpg',
       fileName: 'trip.jpg',
       parentAnchorUID: DEEPEST_EXISTING,
@@ -479,8 +490,20 @@ describe('mkdir -p — missing ancestor folders folded into the write', () => {
 
 describe('hardlink short-circuit', () => {
   const graph = buildFileWriteGraph({
-    ...baseInput,
+    ...hardlinkBase,
     content: { kind: 'hardlink', dataUID: EXISTING_DATA },
+  })
+
+  it('REJECTS stray retrieval metadata instead of discarding it (r3741086780)', () => {
+    // A hardlink plan cannot carry mirrors/contentHash/size: the placer must
+    // already have authored the DATA + metadata (self-dedup) — silently
+    // dropping supplied metadata produced an unreadable, unverifiable file.
+    expect(() =>
+      buildFileWriteGraph({
+        ...baseInput, // metadata still present
+        content: { kind: 'hardlink', dataUID: EXISTING_DATA },
+      } as never),
+    ).toThrowError(/HARDLINK plan carries no retrieval metadata/)
   })
 
   it('flags hardlink and collapses the content graph (no DATA/MIRROR/PROPERTY)', () => {
@@ -505,7 +528,7 @@ describe('hardlink short-circuit', () => {
   it('relink to an EXISTING path reuses the file anchor (no fresh ANCHOR; PIN at the existing one)', () => {
     const EXISTING_ANCHOR = `0x${'cc'.repeat(32)}` as Hex
     const g = buildFileWriteGraph({
-      ...baseInput,
+      ...hardlinkBase,
       content: { kind: 'hardlink', dataUID: EXISTING_DATA },
       existingFileAnchorUID: EXISTING_ANCHOR,
     })

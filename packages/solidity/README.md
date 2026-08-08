@@ -67,6 +67,9 @@ contract MyApp is EFSWriter {
     }
 
     /// Place an existing DATA at a path anchor (the hardlink / "pin" primitive).
+    /// The DATA must be YOUR OWN (authored by this contract) — placing foreign DATA
+    /// reverts `ForeignDataUID`: lens-scoped reads resolve mirrors/properties under
+    /// the placing attester, so a foreign placement would be visible but unreadable.
     function place(bytes32 anchor, bytes32 dataUID) external returns (bytes32 pinUID) {
         pinUID = _efsPlace(schemas, anchor, dataUID); // your contract is the attester
     }
@@ -80,7 +83,7 @@ For reads, use the `EFSReader` library directly (it takes the `EdgeResolver` /
 
 - **`EFSWriter`** — inheritable base (constructor `(IEAS eas)`) with EFS-level events and the
   `internal` write wrappers: `_efsWriteFile` (full file), `_efsPlaceExisting` / `_efsPlace`
-  (hardlink/move), `_efsAnchorAt` (mkdir), `_efsTag`, `_efsSetProperty`, `_efsCreateList` /
+  (hardlink/move — own DATA only, `ForeignDataUID` otherwise), `_efsAnchorAt` (mkdir), `_efsTag`, `_efsSetProperty`, `_efsCreateList` /
   `_efsAddEntry`, `_efsSetRedirect`.
 - **`EFSLib`** — the `internal` write primitives the wrappers delegate to (use directly if you
   don't want the base contract).

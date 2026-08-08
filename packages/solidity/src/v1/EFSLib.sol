@@ -478,12 +478,20 @@ library EFSLib {
     /// @param  eas     The EAS instance to attest against.
     /// @param  schemas The frozen schema UID set (only `pin` is used).
     /// @param  anchor  The path anchor UID the placement names (the PIN's `definition`).
-    /// @param  dataUID The DATA UID being placed (the PIN's `refUID` / edge target).
+    /// @param  dataUID The DATA UID being placed (the PIN's `refUID` / edge target). MUST be
+    ///                 authored by the calling contract — reverts {ForeignDataUID} otherwise
+    ///                 (same gate as {placeExisting}; see the error's natspec for why).
     /// @return pinUID  The created placement-PIN UID.
     function place(IEAS eas, SchemaUIDs memory schemas, bytes32 anchor, bytes32 dataUID)
         internal
         returns (bytes32 pinUID)
     {
+        // Same self-authorship gate as {placeExisting} (r3741086781): this is the
+        // public hardlink/move primitive, and a placement of FOREIGN-authored DATA
+        // yields a visible-but-unreadable file (lens-scoped reads resolve MIRRORs/
+        // PROPERTYs under the PLACING attester, not the DATA's author).
+        Attestation memory att = eas.getAttestation(dataUID);
+        if (att.attester != address(this)) revert ForeignDataUID(dataUID, att.attester);
         pinUID = _attestPin(eas, schemas.pin, anchor, dataUID);
     }
 

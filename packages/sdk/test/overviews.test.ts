@@ -95,8 +95,10 @@ describe('buildFileWriteGraph — Overview `system` TAG before placement (ADR-00
   it('applies the marker to HARDLINK plans too — TAG strictly before the PIN (r3741021024)', () => {
     // The hardlink early-return previously dropped `overviewSystemTagDef`
     // entirely, placing the README untagged (visible in filtered listings).
+    const { mirrors: _m, contentHash: _h, size: _s, contentType: _t, ...hardlinkBase } = baseInput
+    void [_m, _h, _s, _t]
     const { hardlink, attestations } = buildFileWriteGraph({
-      ...baseInput,
+      ...hardlinkBase,
       content: { kind: 'hardlink' as const, dataUID: uid(0xda7a) },
       overviewSystemTagDef: SYSTEM_DEF,
     })

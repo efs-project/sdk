@@ -136,6 +136,9 @@ contract EFSWritesTest is Test {
     function setUp() public {
         consumer = new WritesConsumerMock(IEAS(address(eas = new MockEAS())));
         indexer = new MockIndexer();
+        // place()'s self-authorship gate reads the DATA's attester — the shared
+        // fixture DATA is "authored by" the consumer (the inlined attester).
+        eas.seedAuthor(DATA_UID, address(consumer));
     }
 
     function _uid(uint256 i) internal pure returns (bytes32) {
@@ -351,6 +354,18 @@ contract EFSWritesTest is Test {
         emit EFSWriter.EFSFileWritten(anchor, DATA_UID, _uid(0));
         vm.prank(ALICE);
         consumer.place(schemas, anchor, DATA_UID);
+    }
+
+    /// @notice FOREIGN-authored DATA is rejected by the standalone place() too (r3741086781):
+    ///         same gate as placeExisting — a foreign placement is visible but unreadable.
+    function test_Place_RevertsOnForeignData() public {
+        bytes32 foreignData = keccak256("FOREIGN_DATA_FOR_PLACE");
+        eas.seedAuthor(foreignData, address(0xBEEF));
+        vm.prank(ALICE);
+        vm.expectRevert(
+            abi.encodeWithSelector(EFSLib.ForeignDataUID.selector, foreignData, address(0xBEEF))
+        );
+        consumer.place(schemas, keccak256("SOME_ANCHOR"), foreignData);
     }
 
     // ── setRedirect (REDIRECT edge, ADR-0050) ────────────────────────────────────────────────

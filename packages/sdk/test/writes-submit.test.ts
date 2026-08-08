@@ -63,6 +63,17 @@ const bytesInput = {
   content: { kind: 'bytes' as const, bytes: new Uint8Array([1, 2, 3]) },
 }
 
+/** baseInput minus the byte-write metadata — HARDLINK inputs carry none (the
+ * builder now REJECTS stray metadata instead of discarding it, r3741086780). */
+const {
+  mirrors: _hlM,
+  contentHash: _hlH,
+  size: _hlS,
+  contentType: _hlT,
+  ...hardlinkBase
+} = baseInput
+void [_hlM, _hlH, _hlS, _hlT]
+
 const pinEnc = new SchemaEncoder(EFS_SCHEMA_FIELDS.pin)
 
 // ── Mock chain ──────────────────────────────────────────────────────────────
@@ -402,7 +413,7 @@ describe('submitWriteTier1 — receipt UID extraction', () => {
 describe('submitWriteTier1 — hardlink plan', () => {
   it('threads the file-ANCHOR symbol and points the PIN at the pre-existing DATA', async () => {
     const plan = buildFileWriteGraph({
-      ...baseInput,
+      ...hardlinkBase,
       content: { kind: 'hardlink', dataUID: EXISTING_DATA },
     })
     expect(plan.hardlink).toBe(true)

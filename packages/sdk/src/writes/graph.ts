@@ -178,30 +178,10 @@ export interface PinDataRef {
 export type ReservedKey = 'contentType' | 'contentHash' | 'size'
 
 /** Input to {@link buildFileWriteGraph}. */
-export interface FileWriteGraphInput {
+export interface FileWriteGraphBaseInput {
   /** The full path the file is being placed at (informational; the parent anchor
    * and file name are passed resolved). */
   readonly path: string
-  /** The file content source: fresh bytes (full graph) or a hardlink to an
-   * existing on-chain DATA UID (single-PIN short-circuit). */
-  readonly content: { kind: 'bytes'; bytes: Uint8Array } | { kind: 'hardlink'; dataUID: Hex }
-  /** Retrieval mirrors to publish (one MIRROR per entry). Each carries its OWN
-   * `/transports/<scheme>` anchor UID — a mixed-scheme durability set (e.g.
-   * `ipfs://…` + `ar://…`) must NOT share one transport, or later entries are
-   * mislabeled on-chain. */
-  readonly mirrors: readonly { uri: string; transportDefinition: Hex }[]
-  /** Optional MIME content type; when present, emits the `contentType` reserved triplet. */
-  readonly contentType?: string
-  /** CANONICAL `contentHash` string (specs/10 §2.3, SDK ADR-0016): the
-   * multibase-base16 multihash form `f1220<64 lowercase hex>` (sha2-256).
-   * Emitted verbatim as the `contentHash` reserved triplet's PROPERTY `string
-   * value`. Typed as the `ContentHash` brand so a bare digest or `0x`-prefixed
-   * value can never re-enter this NON-REVOCABLE persistence path — the read
-   * path would report it `malformed-claim`, and the wrong string would pollute
-   * the permanent value-interning index (specs/10 §2.2) forever. */
-  readonly contentHash: ContentHash
-  /** File byte length, emitted as the `size` reserved triplet's PROPERTY value. */
-  readonly size: bigint
   /** The frozen schema UID set for the target deployment. */
   readonly schemas: EfsSchemaUIDs
   /**
@@ -263,6 +243,56 @@ export interface FileWriteGraphInput {
    * `setOverview` path's ONLY graph difference from `write`.
    */
   readonly overviewSystemTagDef?: Hex
+}
+
+/** A FULL write: fresh bytes plus the retrieval metadata the MIRRORs and
+ * reserved triplets persist. */
+export interface FileWriteBytesInput extends FileWriteGraphBaseInput {
+  /** The fresh file bytes (the full DATA/MIRROR/PROPERTY graph is emitted). */
+  readonly content: { kind: 'bytes'; bytes: Uint8Array }
+  /** Retrieval mirrors to publish (one MIRROR per entry). Each carries its OWN
+   * `/transports/<scheme>` anchor UID — a mixed-scheme durability set (e.g.
+   * `ipfs://…` + `ar://…`) must NOT share one transport, or later entries are
+   * mislabeled on-chain. */
+  readonly mirrors: readonly { uri: string; transportDefinition: Hex }[]
+  /** Optional MIME content type; when present, emits the `contentType` reserved triplet. */
+  readonly contentType?: string
+  /** CANONICAL `contentHash` string (specs/10 §2.3, SDK ADR-0016): the
+   * multibase-base16 multihash form `f1220<64 lowercase hex>` (sha2-256).
+   * Emitted verbatim as the `contentHash` reserved triplet's PROPERTY `string
+   * value`. Typed as the `ContentHash` brand so a bare digest or `0x`-prefixed
+   * value can never re-enter this NON-REVOCABLE persistence path — the read
+   * path would report it `malformed-claim`, and the wrong string would pollute
+   * the permanent value-interning index (specs/10 §2.2) forever. */
+  readonly contentHash: ContentHash
+  /** File byte length, emitted as the `size` reserved triplet's PROPERTY value. */
+  readonly size: bigint
+}
+
+/** A HARDLINK write: place an EXISTING, SELF-AUTHORED DATA at a path — the
+ * single-PIN dedup short-circuit. It carries NO retrieval metadata BY DESIGN
+ * (r3741086780): lens-scoped reads resolve MIRRORs/PROPERTYs per placement
+ * attester, and the reserved key-ANCHORs are canonical, attester-INDEPENDENT,
+ * PERMANENT slots — for any DATA already written with metadata they exist, so
+ * a pure builder re-emitting the triplets would REVERT the whole layer
+ * (re-minting a permanent anchor). The contract therefore mirrors the Solidity
+ * SDK's `ForeignDataUID` gate: the placer must ALREADY have authored the DATA
+ * and its metadata (the self-dedup case — that metadata then resolves under
+ * the placer's lens automatically). To place FOREIGN content readably,
+ * re-publish the bytes as your own write, or place first and attest your own
+ * metadata via `efs.mirrors.add` / `efs.props.set` (which RESOLVE the existing
+ * canonical key-anchors instead of re-minting them). */
+export interface FileWriteHardlinkInput extends FileWriteGraphBaseInput {
+  /** The pre-existing, SELF-authored DATA UID to place. */
+  readonly content: { kind: 'hardlink'; dataUID: Hex }
+}
+
+export type FileWriteGraphInput = FileWriteBytesInput | FileWriteHardlinkInput
+
+/** Nested-discriminant narrowing helper (TS does not narrow the parent union
+ * from `input.content.kind` alone). */
+function isHardlinkInput(i: FileWriteGraphInput): i is FileWriteHardlinkInput {
+  return i.content.kind === 'hardlink'
 }
 
 /** The ordered write plan returned by {@link buildFileWriteGraph}. */
@@ -376,7 +406,23 @@ export function buildFileWriteGraph(input: FileWriteGraphInput): FileWriteGraph 
   // *content* graph (DATA/MIRROR/PROPERTY/key-anchors) collapsing away — the
   // anchor that names the new path is inherent to placing it anywhere. Any created
   // ancestor folders still precede the anchor, in their own earliest layers.
-  if (input.content.kind === 'hardlink') {
+  if (isHardlinkInput(input)) {
+    // JS callers are not bound by the input union — REJECT stray metadata
+    // loudly instead of discarding it (r3741086780): silently dropping
+    // mirrors/contentHash would yield a placement advertising none of what the
+    // caller believed they published (an unreadable, unverifiable file).
+    const stray = input as unknown as Partial<FileWriteBytesInput>
+    if (
+      (stray.mirrors !== undefined && stray.mirrors.length > 0) ||
+      stray.contentHash !== undefined ||
+      stray.size !== undefined ||
+      stray.contentType !== undefined
+    ) {
+      throw new EfsError(
+        'EFS write plan: a HARDLINK plan carries no retrieval metadata — the placer must already have authored the DATA and its mirrors/properties (the self-dedup contract; reserved key-anchors are permanent canonical slots a pure builder cannot safely re-mint). To place foreign content readably, re-publish the bytes as your own write, or place first and attest metadata via efs.mirrors.add / efs.props.set.',
+        { code: 'InvalidArgument' },
+      )
+    }
     // Honor `existingFileAnchorUID` here too (relink/overwrite at an existing path): a
     // file-anchor slot is permanent, so re-minting it reverts. When set, skip the
     // file-ANCHOR mint and place the PIN at the concrete existing anchor (the
@@ -760,7 +806,7 @@ function buildVisibilityTags(input: FileWriteGraphInput, layer: number): Planned
  * ADR-0016); `size` is rendered as a decimal string for the PROPERTY value.
  */
 function reservedEntries(
-  input: FileWriteGraphInput,
+  input: FileWriteBytesInput,
 ): readonly { key: ReservedKey; value: string }[] {
   const out: { key: ReservedKey; value: string }[] = []
   if (input.contentType !== undefined) {
