@@ -5,6 +5,7 @@
  */
 
 import type { Abi, Address, Hex, PublicClient } from 'viem'
+import { keccak256 } from 'viem'
 import { DeploymentNotFound, EfsError, SchemaMismatchError } from '../errors.js'
 import { aliasResolverAbi, indexerAbi, listEntryResolverAbi, listResolverAbi } from './abi/index.js'
 
@@ -34,6 +35,54 @@ export type EfsContracts = {
   listReader: Address
   aliasResolver: Address
   systemAccount: Address
+}
+
+/**
+ * The PERMANENT contract keys: Safe-keyed CREATE3 proxies whose addresses hash
+ * into the frozen schema UIDs (identical on any chain the same Safe deploys
+ * from, CHAINS.md §core) + the two external EAS singletons. These never move —
+ * moving one orphans every attestation under its schemas.
+ */
+export const CORE_CONTRACT_KEYS = [
+  'eas',
+  'schemaRegistry',
+  'indexer',
+  'edgeResolver',
+  'mirrorResolver',
+  'listResolver',
+  'listEntryResolver',
+  'aliasResolver',
+  'systemAccount',
+] as const satisfies readonly (keyof EfsContracts)[]
+
+/**
+ * The REPLACEABLE view keys: stateless, ownerless, in NO schema UID
+ * (CHAINS.md §read views) — redeployable at any time, at which point off-chain
+ * consumers (this registry) update. Because OLD view revisions keep their
+ * bytecode, a code-exists check can silently pin a pre-hardening revision; the
+ * per-deployment {@link EfsViewRevision} codehashes are the honest gate.
+ */
+export const VIEW_CONTRACT_KEYS = [
+  'router',
+  'fileView',
+  'listReader',
+] as const satisfies readonly (keyof EfsContracts)[]
+
+/**
+ * The recorded VIEW revision for a deployment: which redeploy of the stateless
+ * views this registry pins, plus the runtime codehashes read back from the live
+ * chain at record time (a READBACK, not compiler output — contracts#44's "a
+ * recorded readback supports every live claim"). `verifyDeployment` checks the
+ * recorded codehashes so a stale-but-still-has-bytecode view address fails
+ * loudly instead of silently serving a pre-hardening revision.
+ */
+export type EfsViewRevision = {
+  /** Human-readable revision id (e.g. `sepolia-views-2026-06-23`). */
+  revision: string
+  /** The block(s) the revision deployed at (informational). */
+  deployedAtBlock?: number
+  /** keccak256 of each view's RUNTIME bytecode, from a live readback. */
+  codehash?: Partial<Record<(typeof VIEW_CONTRACT_KEYS)[number], Hex>>
 }
 
 /** The frozen EFS schema-UID set — the canonical 9 (Sepolia freeze, contracts
@@ -74,15 +123,22 @@ export type EfsDeployment = {
   schemas: EfsSchemaUIDs
   /** Per-scheme `/transports/<scheme>` anchor UIDs (ADR-0011); optional/additive. */
   transports?: EfsTransports
+  /** The pinned view-revision record ({@link EfsViewRevision}); optional — an
+   * override without it skips the codehash gate (back-compat). */
+  views?: EfsViewRevision
 }
 
 export type DeploymentsMap = Record<number, EfsDeployment>
 
 /**
  * Sepolia (chainId 11155111) — frozen 2026-06-19 (9 schemas registered + scaffolding
- * sealed). Addresses + UIDs are the canonical record from the contracts repo
- * `docs/CHAINS.md`. Safe-keyed CREATE3 proxies (the read views EFSFileView/EFSRouter/
- * ListReader are stateless + redeployable — if they move, override at the client).
+ * sealed). Record precedence (ADR-0018, extending ADR-0012): the contracts repo's
+ * hardhat deployment artifacts (`packages/hardhat/deployments/sepolia/*.json`) +
+ * `docs/CHAINS.md` (which agree), NEVER `deployedContracts.ts` (the stale record
+ * behind the June-23 view drift, contracts#43). Core contracts are Safe-keyed
+ * CREATE3 proxies (permanent); the views carry the 2026-06-23 hardened revision
+ * (ADR-0057/0058/0059) with readback codehashes so `verifyDeployment` catches a
+ * stale view address that still has (old) bytecode.
  *
  * `transports` is intentionally absent: the per-scheme `/transports/<scheme>` anchor
  * UIDs are runtime EAS UIDs (not derivable offline) and `docs/CHAINS.md` lists only the
@@ -96,15 +152,30 @@ export const SEPOLIA: EfsDeployment = {
     eas: '0xC2679fBD37d54388Ce493F1DB75320D236e1815e',
     schemaRegistry: '0x0a7E2Ff54e76B8E6659aedc9103FB21c038050D0',
     indexer: '0xc4DeaBB482C2FA74690629eEa662efb166BD658a',
-    router: '0x4EF216e1096237dA8A962157Ed13ea1B3FcC5E17',
-    fileView: '0x141D9FdbadCd9f6e6928A4842FF00094502CC146',
+    router: '0x44D5F6803127B442218e9aA0481A9931444dc82c',
+    fileView: '0x76B10909Ff10b53c54387C66B083b1613E2276d3',
     edgeResolver: '0xD6643DB36B20895E3E46aD08cdD4ED4BC1dBB7F1',
     mirrorResolver: '0xd4991Ced6D460A3794E9120dC6C19975092982b9',
     listResolver: '0x678883253e0edA926aC48F23655967e78E7d464C',
     listEntryResolver: '0x7a14832E355d5937019C3D0b72bd11F2dbD5e513',
-    listReader: '0x689AA70BF6a8b22BE4E959dcf33A40ea03F85Bd5',
+    listReader: '0xCc182611B572b5C162a3D96674E821C61ac658FC',
     aliasResolver: '0xB07225842d6513239a3519ae052B5bc7EBf18996',
     systemAccount: '0x63DEA7336C4217B7c5433eE3CB21Bb6a6813588d',
+  },
+  views: {
+    revision: 'sepolia-views-2026-06-23',
+    deployedAtBlock: 11121023,
+    // Runtime codehashes from a live Sepolia readback (independently re-derived
+    // 2026-08-07: keccak256(eth_getCode)). NOTE the honest detection boundary:
+    // the OLD FileView/ListReader deploys are byte-identical to these (same
+    // runtime code incl. immutables — behaviorally equivalent, undetectable =
+    // harmless); only the ROUTER actually changed (ADR-0058 hardening), so the
+    // router hash is what catches the June-23 drift this record exists for.
+    codehash: {
+      router: '0xecbc691d0f06885340ed0ad91ab0e4975e3ca7a964037d37d33cf93aca91d1b0',
+      fileView: '0x2260995dec16c58b094b77701337fd7b1a48ec5cce3f7a49714cb17778460b7e',
+      listReader: '0xce17a97e5a2ffd6e36c3edb1f61c79af032125a7b207521d4696ad6fc27d7f1b',
+    },
   },
   schemas: {
     anchor: '0xf818abd74da70345c8acd7087e6ce69fd48eaf4e79c1931e5c6b08fb148c921a',
@@ -120,36 +191,44 @@ export const SEPOLIA: EfsDeployment = {
 }
 
 /**
- * The shared community **devnet** (chainId 26001993) — the frictionless place for devs to
- * try EFS without burdening Sepolia or running a local node. It is a **Sepolia fork** on a
- * VPS (contracts ADR-0062), so its contract addresses AND the 9 schema UIDs are
- * BYTE-IDENTICAL to Sepolia — CREATE/CREATE2/CreateX and EAS schema UIDs are chain-id-
- * independent, so only the network identity differs. (Earlier forks reused `31337`; the
- * devnet now has its own id so a wallet can tell it apart from a contributor's local node.)
- *
- * Because the addresses/UIDs are the same frozen Sepolia record, this is as stable as
- * Sepolia — devnet *state* (faucet balances, attestations) is ephemeral/drainable, but the
- * deployment itself is not. A dev just points their viem `publicClient`/`walletClient` at
- * the devnet RPC and the SDK resolves this by chainId — no `deployments` override needed.
+ * The community devnet (chainId 26001993, contracts ADR-0062) is deliberately
+ * NOT in the built-in registry (ADR-0018). The "devnet mirrors Sepolia
+ * addresses/UIDs" design is currently FALSE on the live devnet: a 2026-08-07
+ * probe found NO code at any Sepolia CREATE3 core address, fork-local (31337-
+ * block) resolver proxies instead, and a DIFFERENT `ANCHOR_SCHEMA_UID` — and
+ * the drift is structural, not a stale reset: the hardhat fork pin
+ * (`FORK_BLOCK=10_691_000`) predates the Sepolia freeze/view blocks (~11.12M),
+ * so fork-derived chains cannot inherit the Sepolia record. A built-in entry
+ * that cannot serve one successful call is worse than a clear error; pass a
+ * correct devnet record via the `deployments` override, and this entry returns
+ * when either the devnet is re-provisioned to genuinely mirror Sepolia or
+ * contracts#43 ships an independently-generated devnet profile.
  */
-export const DEVNET: EfsDeployment = { ...SEPOLIA, chainId: 26001993 }
+export const DEVNET_CHAIN_ID = 26001993
 
 /**
- * Built-in registry. Seeded from the contracts repo `docs/CHAINS.md` as EFS freezes on
- * a chain (addresses from the CREATE3 deploy, UIDs from the registered schemas — ADR-0005).
- * Carries Sepolia + the community devnet (a Sepolia fork; see {@link DEVNET}). For a local
- * fork (chainId 31337) or any custom chain, pass `deployments` in the client config.
+ * Built-in registry. Seeded from the contracts repo record (hardhat artifacts +
+ * `docs/CHAINS.md`) as EFS freezes on a chain (ADR-0005/ADR-0018). Sepolia only
+ * today — for the community devnet (see {@link DEVNET_CHAIN_ID}), a local fork
+ * (chainId 31337), or any custom chain, pass `deployments` in the client config.
  */
 export const deployments: DeploymentsMap = {
   [SEPOLIA.chainId]: SEPOLIA,
-  [DEVNET.chainId]: DEVNET,
 }
 
 /** Resolve the deployment for a chain, preferring a caller override. */
 export function resolveDeployment(chainId: number, override?: DeploymentsMap): EfsDeployment {
   const map = override ?? deployments
   const found = map[chainId]
-  if (!found) throw new DeploymentNotFound(chainId)
+  if (!found) {
+    if (chainId === DEVNET_CHAIN_ID && override === undefined) {
+      throw new DeploymentNotFound(
+        chainId,
+        'The community devnet currently runs fork-local addresses/UIDs that do NOT mirror the built-in Sepolia record (see ADR-0018) — pass its actual deployment via the `deployments` override.',
+      )
+    }
+    throw new DeploymentNotFound(chainId)
+  }
   return found
 }
 
@@ -325,16 +404,54 @@ export async function assertSchemaIntegrity(
 }
 
 /**
+ * View-revision codehash gate (ADR-0018). For each view key with a recorded
+ * readback codehash ({@link EfsViewRevision.codehash}), keccak256 of the LIVE
+ * runtime bytecode must match — this is what catches a stale-but-still-
+ * has-bytecode view address (the June-23 router drift class, contracts#43),
+ * which neither the code-exists check nor the schema-UID gate can see (views
+ * are in no schema UID by design — no on-chain getter vouches for them).
+ *
+ * Honest limits: it CANNOT distinguish byte-identical redeploys (behaviorally
+ * equivalent — harmless), CANNOT know a newer canonical revision exists
+ * upstream (that is the drift-CI script's job, `scripts/check-deployment-drift.mjs`),
+ * trusts the RPC for `eth_getCode`, and deliberately does NOT pin implementation
+ * hashes behind the upgradeable CORE proxies (legitimate pre-burn Safe upgrades
+ * would false-positive; revisit at burn). Skipped entirely when no codehashes
+ * are recorded (override back-compat — zero extra reads).
+ */
+export async function assertViewRevision(
+  publicClient: PublicClient,
+  deployment: EfsDeployment,
+): Promise<void> {
+  const pins = deployment.views?.codehash
+  if (pins === undefined) return
+  for (const key of VIEW_CONTRACT_KEYS) {
+    const expected = pins[key]
+    if (expected === undefined) continue
+    const addr = deployment.contracts[key]
+    const code = await publicClient.getCode({ address: addr })
+    const got = keccak256((code ?? '0x') as Hex)
+    if (got.toLowerCase() !== expected.toLowerCase()) {
+      throw new EfsError(
+        `EFS view-revision check failed on chainId ${deployment.chainId}: '${key}' at ${addr} has runtime codehash ${got}, but the registry pins ${expected} (revision '${deployment.views?.revision}'). The address likely points at a stale/foreign view revision — update the registry (or your \`deployments\` override) to the current canonical record.`,
+      )
+    }
+  }
+}
+
+/**
  * Full deployment trust gate: bytecode presence ({@link
  * assertDeploymentIntegrity}) **then** schema-UID authenticity ({@link
- * assertSchemaIntegrity}). Bytecode runs first so a missing/typo'd address
- * surfaces as the clearer `EfsError` before any schema read is attempted.
+ * assertSchemaIntegrity}) **then** the view-revision codehash gate ({@link
+ * assertViewRevision}). Bytecode runs first so a missing/typo'd address
+ * surfaces as the clearer `EfsError` before any schema read is attempted; the
+ * view gate runs last so the clearer diffs win.
  *
  * Opt-in by design (ADR-0005): the client does NOT run this on every construct —
  * that would add an RPC round-trip to a path that may never touch a custom
  * deployment. It's exposed as `efs.raw.verifyDeployment()` for a caller to run
  * once after wiring a `deployments` override (recommended), and is cheap enough
- * to run eagerly in that case (nine `eth_call`s, batched).
+ * to run eagerly in that case (nine `eth_call`s + three `getCode`s, batched).
  */
 export async function verifyDeployment(
   publicClient: PublicClient,
@@ -342,4 +459,5 @@ export async function verifyDeployment(
 ): Promise<void> {
   await assertDeploymentIntegrity(publicClient, deployment)
   await assertSchemaIntegrity(publicClient, deployment)
+  await assertViewRevision(publicClient, deployment)
 }

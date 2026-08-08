@@ -175,9 +175,9 @@ export class SchemaMismatchError extends EfsError {
 /** No EFS deployment is known for the connected chain (and none was supplied). */
 export class DeploymentNotFound extends EfsError {
   override name = 'DeploymentNotFound'
-  constructor(chainId: number) {
+  constructor(chainId: number, hint?: string) {
     super(
-      `No EFS deployment registered for chainId ${chainId}. Pass \`deployments\` to point at a custom/local deployment.`,
+      `No EFS deployment registered for chainId ${chainId}. Pass \`deployments\` to point at a custom/local deployment.${hint !== undefined ? ` ${hint}` : ''}`,
       { code: 'DeploymentNotFound' },
     )
   }

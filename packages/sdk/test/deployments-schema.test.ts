@@ -17,7 +17,9 @@
  */
 
 import type { Address, Hex, PublicClient } from 'viem'
+import { keccak256 } from 'viem'
 import { describe, expect, it } from 'vitest'
+import { CORE_CONTRACT_KEYS, VIEW_CONTRACT_KEYS } from '../src/chain/deployments.js'
 import {
   type EfsContracts,
   type EfsDeployment,
@@ -173,14 +175,63 @@ describe('verifyDeployment', () => {
   })
 })
 
+describe('assertViewRevision (view-codehash gate, ADR-0018)', () => {
+  // keccak256('0x60006000') — what the stub's bytecode hashes to.
+  const STUB_CODEHASH = keccak256('0x60006000')
+
+  const pinned: EfsDeployment = {
+    ...deployment,
+    views: { revision: 'test-rev-1', codehash: { router: STUB_CODEHASH } },
+  }
+
+  it('passes when the live runtime codehash matches the pinned readback', async () => {
+    const { client } = makeClient(ONCHAIN_TRUTH)
+    await expect(verifyDeployment(client, pinned)).resolves.toBeUndefined()
+  })
+
+  it('fails with a precise diff when the view address serves DIFFERENT bytecode (the June-23 router-drift class)', async () => {
+    const stale: EfsDeployment = {
+      ...deployment,
+      views: { revision: 'test-rev-1', codehash: { router: uid(0xbad) } },
+    }
+    const { client } = makeClient(ONCHAIN_TRUTH)
+    const err = (await verifyDeployment(client, stale).catch((e) => e)) as Error
+    expect(err).toBeInstanceOf(EfsError)
+    expect(err.message).toMatch(/view-revision check failed/)
+    expect(err.message).toMatch(/router/)
+    expect(err.message).toMatch(/test-rev-1/)
+  })
+
+  it('is skipped entirely when no codehashes are recorded (override back-compat, zero extra reads)', async () => {
+    const calls: string[] = []
+    const { client } = makeClient(ONCHAIN_TRUTH)
+    const inner = client.getCode?.bind(client)
+    ;(client as { getCode: (a: { address: Address }) => Promise<string> }).getCode = async (a) => {
+      calls.push(a.address.toLowerCase())
+      return inner ? ((await inner(a)) as string) : '0x60006000'
+    }
+    await verifyDeployment(client, deployment) // no `views` on the base fixture
+    // Only the presence gate's 12 getCode calls — none from the view gate.
+    expect(calls).toHaveLength(Object.keys(contracts).length)
+  })
+})
+
 describe('built-in registry — Sepolia (11155111)', () => {
   it('resolveDeployment(11155111) returns the seeded Sepolia deployment (no override)', () => {
     const dep = resolveDeployment(11_155_111)
     expect(dep.chainId).toBe(11_155_111)
-    // Canonical addresses from contracts docs/CHAINS.md (frozen 2026-06-19).
+    // Canonical addresses: record precedence is hardhat artifacts + CHAINS.md
+    // (ADR-0018) — the drift CI (scripts/check-deployment-drift.mjs) holds this.
     expect(dep.contracts.indexer).toBe('0xc4DeaBB482C2FA74690629eEa662efb166BD658a')
     expect(dep.contracts.eas).toBe('0xC2679fBD37d54388Ce493F1DB75320D236e1815e')
     expect(dep.contracts.aliasResolver).toBe('0xB07225842d6513239a3519ae052B5bc7EBf18996')
+    // The 2026-06-23 HARDENED view trio (the P2 fix — the prior trio still has
+    // bytecode, which is exactly why the codehash pins below exist).
+    expect(dep.contracts.router).toBe('0x44D5F6803127B442218e9aA0481A9931444dc82c')
+    expect(dep.contracts.fileView).toBe('0x76B10909Ff10b53c54387C66B083b1613E2276d3')
+    expect(dep.contracts.listReader).toBe('0xCc182611B572b5C162a3D96674E821C61ac658FC')
+    expect(dep.views?.revision).toBe('sepolia-views-2026-06-23')
+    expect(dep.views?.codehash?.router).toMatch(/^0x[0-9a-f]{64}$/)
     // All nine frozen schema UIDs present + 32-byte.
     const schemas = dep.schemas
     expect(schemas.data).toBe('0xa3400cecc384d66d84f502fd91e56dc0321edccde9ef8e49d303ba63cc841b3c')
@@ -192,18 +243,37 @@ describe('built-in registry — Sepolia (11155111)', () => {
     }
     expect(Object.keys(schemas)).toHaveLength(9)
   })
+
+  it('core/view key split covers exactly the contract set, disjointly', () => {
+    const all = [...CORE_CONTRACT_KEYS, ...VIEW_CONTRACT_KEYS].sort()
+    expect(all).toEqual(Object.keys(contracts).sort())
+    expect(new Set(all).size).toBe(all.length)
+  })
+
+  it('makes NO WHITEOUT claim: no whiteout contract key, no whiteout schema UID (contracts#44 — availability is never inferred from an ABI existing)', () => {
+    // Tripwire, not a gate: whoever adds WHITEOUT must read ADR-0018's feature-
+    // gating rule (manifest feature-status per chain, optional keys, typed
+    // unavailable error) — not just delete this test.
+    expect([...CORE_CONTRACT_KEYS, ...VIEW_CONTRACT_KEYS]).not.toContain('whiteout')
+    expect(Object.keys(resolveDeployment(11_155_111).schemas)).not.toContain('whiteout')
+  })
 })
 
 describe('built-in registry — community devnet (26001993)', () => {
-  it('resolveDeployment(26001993) returns the devnet (a Sepolia fork — same addresses + UIDs)', () => {
-    const devnet = resolveDeployment(26_001_993)
-    const sepolia = resolveDeployment(11_155_111)
-    expect(devnet.chainId).toBe(26_001_993)
-    // The devnet is a Sepolia fork (contracts ADR-0062): CREATE/CREATE2 + EAS schema UIDs
-    // are chain-id-independent, so every contract address and schema UID is identical to
-    // Sepolia — only the network identity differs. A dev points their client at the devnet
-    // RPC and the SDK resolves this by chainId, no override.
-    expect(devnet.contracts).toEqual(sepolia.contracts)
-    expect(devnet.schemas).toEqual(sepolia.schemas)
+  it('resolveDeployment(26001993) throws DeploymentNotFound naming the override escape hatch (ADR-0018)', () => {
+    // The live devnet runs fork-local addresses + different schema UIDs (probed
+    // 2026-08-07) — the old `{...SEPOLIA, chainId}` entry could not serve one
+    // successful call, so the registry refuses instead of silently mis-resolving.
+    const err = (() => {
+      try {
+        resolveDeployment(26_001_993)
+        return undefined
+      } catch (e) {
+        return e as Error
+      }
+    })()
+    expect(err).toBeInstanceOf(EfsError)
+    expect(err?.message).toMatch(/deployments/)
+    expect(err?.message).toMatch(/devnet/)
   })
 })

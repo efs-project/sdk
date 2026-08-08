@@ -1289,12 +1289,17 @@ export {
   resolveDeployment,
   assertDeploymentIntegrity,
   assertSchemaIntegrity,
+  assertViewRevision,
   verifyDeployment,
+  CORE_CONTRACT_KEYS,
+  VIEW_CONTRACT_KEYS,
+  DEVNET_CHAIN_ID,
   type DeploymentsMap,
   type EfsDeployment,
   type EfsContracts,
   type EfsSchemaUIDs,
   type EfsTransports,
+  type EfsViewRevision,
 } from './chain/deployments.js'
 export * from './errors.js'
 export type {

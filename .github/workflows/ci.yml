@@ -48,6 +48,13 @@ jobs:
       # findings are follow-ups, not a merge gate, while the API surface settles.
       - run: pnpm --filter @efs/sdk knip || true
       - run: pnpm lint
+      # Deployment-record drift gate (ADR-0018, interim until contracts#43 ships
+      # a generated manifest): the built-in Sepolia registry must match the
+      # contracts repo's hardhat artifacts + docs/CHAINS.md at main — and those
+      # two must agree with EACH OTHER (a conflict fails distinctly). Network-
+      # hard-fail on purpose: a silently-skipped drift gate is how the June-23
+      # view drift shipped.
+      - run: node scripts/check-deployment-drift.mjs
 
   solidity:
     name: Solidity (build, test, fmt)
