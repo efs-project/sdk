@@ -607,7 +607,11 @@ describe('list attester re-selection after a raced revoke (review r3741157007)',
   /** A hand-rolled client: attester A reports one entry on its FIRST `length`
    * read (the selection probe) and zero afterwards (a revoke landed between the
    * probe and the verb's follow-up read); B holds one entry throughout. */
-  function racedClient(opts?: { bCountOf?: bigint }): ReadContext['publicClient'] {
+  function racedClient(opts?: {
+    bCountOf?: bigint
+    /** Keep A alive (length stays 1) — the honest-end-of-pagination case. */
+    aStable?: boolean
+  }): ReadContext['publicClient'] {
     let aLengthReads = 0
     return {
       async readContract(args: { functionName: string; args?: readonly unknown[] }) {
@@ -627,6 +631,7 @@ describe('list attester re-selection after a raced revoke (review r3741157007)',
             const who = (a[1] as string).toLowerCase()
             if (who === A.toLowerCase()) {
               aLengthReads += 1
+              if (opts?.aStable) return 1n
               return aLengthReads === 1 ? 1n : 0n
             }
             return who === B.toLowerCase() ? 1n : 0n
@@ -638,10 +643,12 @@ describe('list attester re-selection after a raced revoke (review r3741157007)',
           }
           case 'entries': {
             const who = (a[1] as string).toLowerCase()
+            const start = a[2] as bigint
             if (who === B.toLowerCase()) {
-              return [{ entryUID: uid(0xe1), identityKey: uid(0x777) }]
+              // B serves its single entry from offset 0 only.
+              return start === 0n ? [{ entryUID: uid(0xe1), identityKey: uid(0x777) }] : []
             }
-            return [] // A's entries are gone
+            return [] // A's entries are gone (or, aStable: past its single entry)
           }
           default:
             throw new Error(`unexpected ${args.functionName}`)
@@ -665,6 +672,31 @@ describe('list attester re-selection after a raced revoke (review r3741157007)',
     // first-attester-wins forbids any further fall-through.
     const ctx2 = ctxOf(racedClient({ bCountOf: 0n }))
     expect(await listHas(ctx2, LIST_UID, uid(0x888), { lens: lens([A, B]) })).toBe(false)
+  })
+
+  it('a RESUMED page re-selects when the leader evaporated — never a false end (r3741418197)', async () => {
+    // The caller resumes with a persisted cursor; A's remaining entries were
+    // revoked in between. An empty resumed page must disambiguate via a live
+    // length read and fall through to B (restarting at 0 — the old cursor
+    // indexed the evaporated listing), not report a false end.
+    const ctx = ctxOf(racedClient())
+    const page = await listEntries((() => ctx) as never, LIST_UID, {
+      lens: lens([A, B]),
+      cursor: '5',
+    }).byPage()
+    expect(page.items).toHaveLength(1)
+    expect(page.items[0]?.attester).toBe(B)
+  })
+
+  it('a RESUMED empty page from a STANDING leader stays the honest end', async () => {
+    // A still has entries (the cursor just ran past them) — no fall-through to
+    // B; the listing honestly ends.
+    const ctx = ctxOf(racedClient({ aStable: true }))
+    const page = await listEntries((() => ctx) as never, LIST_UID, {
+      lens: lens([A, B]),
+      cursor: '5',
+    }).byPage()
+    expect(page.items).toHaveLength(0)
   })
 
   it('entries falls through on an empty first page (never a false empty listing)', async () => {

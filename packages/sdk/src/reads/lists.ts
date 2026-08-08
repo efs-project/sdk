@@ -241,6 +241,24 @@ function parseCursor(cursor: string | undefined): bigint {
   }
 }
 
+/** Disambiguate an EMPTY page: `true` iff the attester's listing is genuinely
+ * non-empty right now (the empty page is the normal end of pagination), `false`
+ * iff the attester EVAPORATED (a revoke landed after the selection probe) and
+ * the walk should advance to the next ranked candidate (r3741418197). */
+async function attesterStillHasEntries(
+  ctx: ReadContext,
+  listUID: Hex,
+  attester: Address,
+): Promise<boolean> {
+  const n = await read<bigint>(ctx.publicClient, {
+    address: ctx.deployment.contracts.listReader,
+    abi: listReaderAbi,
+    functionName: 'length',
+    args: [listUID, attester],
+  })
+  return n > 0n
+}
+
 /**
  * `efs.lists.get(listUID, opts?)` — the LIST config + identity. Reads `getMode`
  * (schema-checked) and returns a {@link ListConfig}; absence is `exists:false`
@@ -429,7 +447,7 @@ export function listEntries(
     // No per-page cursor ⇒ fall back to the constructor-level `opts.cursor` (a caller
     // who persisted a `Page.cursor` and resumed via `entries(uid, { cursor })` must start
     // there, not restart at offset 0 and duplicate entries).
-    const start = parseCursor(pageOpts?.cursor ?? opts?.cursor)
+    let start = parseCursor(pageOpts?.cursor ?? opts?.cursor)
     const pageSize = pageOpts?.limit ?? defaultLimit
     let page = await readEntriesPage(
       ctx,
@@ -439,12 +457,22 @@ export function listEntries(
       start,
       pageSize,
     )
-    // An EMPTY page at offset 0 means the selected candidate evaporated between
-    // the selection probe and this read (a revoke landed) — advance to the next
-    // ranked candidate (r3741157007) rather than reporting a false empty list.
-    // An empty page at a NONZERO offset is the normal end of pagination.
-    while (page.length === 0 && start === 0n && sel.i + 1 < candidates.length) {
+    // An EMPTY page means either the normal end of pagination or an EVAPORATED
+    // candidate (a revoke landed after the selection probe). At offset 0 it is
+    // always the latter (probe-selected candidates had entries); at a RESUMED
+    // offset, disambiguate via a live length read (r3741418197) — a standing
+    // leader's empty page is the honest end, an evaporated one falls through to
+    // the next ranked candidate, RESTARTING at 0 (the old cursor indexed the
+    // evaporated attester's listing and is void for the new one).
+    while (page.length === 0 && sel.i + 1 < candidates.length) {
+      if (
+        start > 0n &&
+        (await attesterStillHasEntries(ctx, listUID, candidates[sel.i] as Address))
+      ) {
+        break // honest end of the standing leader's listing
+      }
       sel.i += 1
+      start = 0n
       page = await readEntriesPage(
         ctx,
         listUID,
@@ -487,7 +515,7 @@ export function listEntries(
     const { ctx, candidates, sel, kind } = await prime()
     // The first page (cursor undefined) honors the constructor-level `opts.cursor`;
     // subsequent pages thread their own advanced cursor.
-    const start = parseCursor(cursor ?? opts?.cursor)
+    let start = parseCursor(cursor ?? opts?.cursor)
     let page = await readEntriesPage(
       ctx,
       listUID,
@@ -496,9 +524,17 @@ export function listEntries(
       start,
       defaultLimit,
     )
-    // Same evaporated-leader fall-through as byPage (r3741157007).
-    while (page.length === 0 && start === 0n && sel.i + 1 < candidates.length) {
+    // Same evaporated-leader fall-through as byPage, incl. the resumed-offset
+    // disambiguation (r3741157007 / r3741418197).
+    while (page.length === 0 && sel.i + 1 < candidates.length) {
+      if (
+        start > 0n &&
+        (await attesterStillHasEntries(ctx, listUID, candidates[sel.i] as Address))
+      ) {
+        break
+      }
       sel.i += 1
+      start = 0n
       page = await readEntriesPage(
         ctx,
         listUID,
