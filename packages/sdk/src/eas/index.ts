@@ -44,6 +44,7 @@ export {
 export {
   computeAttestationUID,
   verifyAttestationUID,
+  MAX_UID_BUMP_SCAN,
   type AttestationUIDInput,
   type MinedAttestation,
 } from './uid.js'

@@ -665,6 +665,37 @@ describe('read + read(ref)', () => {
     expect(file.verification).toBe('matches-author')
   })
 
+  it('REGRESSION (r3740509655): a size:0 claim with a NON-empty matching-hash body is a MISMATCH, not matches-author', async () => {
+    // The empty-file carve-out cannot clamp the fetch cap to 0, so the size
+    // claim is enforced POST-fetch: inconsistent metadata (hash of non-empty
+    // bytes + declared size 0) must not verify.
+    const sizeAnchor = uid(0x51ae)
+    const sizeProp = uid(0x51af)
+    const hashAnchor = uid(0x4a54)
+    const hashProp = uid(0x4a51)
+    const ctx = makeCtx({
+      edges: README_EDGES,
+      files: [fileItem({})],
+      placementPins: README_PLACEMENT,
+      keyAnchors: {
+        [`${DATA_UID}|contentHash`]: hashAnchor,
+        [`${DATA_UID}|size`]: sizeAnchor,
+      },
+      pinTargets: {
+        [`${hashAnchor}|${LENS.toLowerCase()}`]: hashProp,
+        [`${sizeAnchor}|${LENS.toLowerCase()}`]: sizeProp,
+      },
+      attestations: {
+        [hashProp]: propertyData(GOOD_HASH), // hash of the NON-empty body
+        [sizeProp]: propertyData('0'), // …but declared empty
+      },
+      mirrors: [{ uri: dataUri, attester: LENS }],
+    })
+    const file = await read(ctx, '/docs/readme.md', { lens: LENS })
+    expect(file.verification).toBe('mismatch')
+    // …and a GENUINELY empty file with size 0 still verifies (the carve-out).
+  })
+
   it('reports no-claim when verify:false (no contentHash lookup)', async () => {
     const file = await read(ctxWithMirror(GOOD_HASH), '/docs/readme.md', {
       lens: LENS,

@@ -217,8 +217,8 @@ describe('attest builders forward resolver value (msg.value)', () => {
   })
 })
 
-describe('verifyAttestationUID maxBump bounds (review r3740495865)', () => {
-  it('rejects NaN/Infinity/negative/fractional/over-uint32 maxBump before any keccak work', async () => {
+describe('verifyAttestationUID maxBump bounds (reviews r3740495865 + r3740509656)', () => {
+  it('rejects NaN/Infinity/negative/fractional/over-budget maxBump before any keccak work — the bound is the PRACTICAL scan budget (1024), not the uint32 wire range', async () => {
     const { verifyAttestationUID } = await import('../src/eas/uid.js')
     const att = {
       uid: `0x${'0'.repeat(64)}`,
@@ -232,7 +232,7 @@ describe('verifyAttestationUID maxBump bounds (review r3740495865)', () => {
       revocable: true,
       data: '0x',
     } as never
-    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, -1, 1.5, 0x1_0000_0000]) {
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, -1, 1.5, 1025, 4_294_967_295]) {
       const err = (() => {
         try {
           verifyAttestationUID(att, bad)

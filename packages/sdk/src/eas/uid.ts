@@ -84,6 +84,13 @@ export function computeAttestationUID(input: AttestationUIDInput): Hex {
   )
 }
 
+/** The practical ceiling on {@link verifyAttestationUID}'s synchronous bump
+ * scan. The wire format allows a uint32 bump, but a bump above N requires one
+ * tx to have minted >N attestations with IDENTICAL fields — real batches sit
+ * far below this, and 1024 keccaks stay sub-millisecond while the wire maximum
+ * (4.3 billion) would freeze the event loop. */
+export const MAX_UID_BUMP_SCAN = 1024
+
 /** A mined `Attestation` shaped like the `getAttestation` return (Common.sol:26-37). */
 export interface MinedAttestation {
   uid: Hex
@@ -106,13 +113,15 @@ export interface MinedAttestation {
  * Returns `true` iff some `bump` in `[0, maxBump]` reproduces `attestation.uid`.
  */
 export function verifyAttestationUID(attestation: MinedAttestation, maxBump = 0): boolean {
-  // This loop is SYNCHRONOUS keccak work: `Infinity` (or a huge finite value)
-  // would block the event loop for billions of hashes before the uint32 bump
-  // encoder ever objected, and `NaN` skips even bump 0 (a false negative).
-  // The bump is a uint32 on the wire — bound the scan to that range.
-  if (!Number.isInteger(maxBump) || maxBump < 0 || maxBump > 0xffffffff) {
+  // This loop is SYNCHRONOUS keccak work, so the accepted bound is a PRACTICAL
+  // scan budget, not the uint32 wire range — a non-matching UID at the wire
+  // maximum would mean 4.3 BILLION hashes freezing the event loop. A bump only
+  // exceeds N when one tx minted >N attestations with IDENTICAL fields; real
+  // batches sit far below {@link MAX_UID_BUMP_SCAN} (a sub-millisecond scan).
+  // `NaN`/fractional/negative would instead skip even bump 0 (a false negative).
+  if (!Number.isInteger(maxBump) || maxBump < 0 || maxBump > MAX_UID_BUMP_SCAN) {
     throw new EfsError(
-      `verifyAttestationUID: \`maxBump\` is ${String(maxBump)} — pass an integer in [0, 4294967295] (the uint32 bump range). The default 0 covers the common one-attestation-per-tx case.`,
+      `verifyAttestationUID: \`maxBump\` is ${String(maxBump)} — pass an integer in [0, ${MAX_UID_BUMP_SCAN}] (the practical scan budget; the default 0 covers the common one-attestation-per-tx case). A real bump exceeds N only when one tx minted >N attestations with identical fields.`,
       { code: 'InvalidArgument' },
     )
   }

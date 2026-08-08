@@ -1296,6 +1296,7 @@ export {
   buildMultiAttest,
   computeAttestationUID,
   verifyAttestationUID,
+  MAX_UID_BUMP_SCAN,
   parseSchema,
   parseSchemaParameters,
   easAbi,

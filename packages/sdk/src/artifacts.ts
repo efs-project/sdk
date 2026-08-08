@@ -172,6 +172,19 @@ export function parseDataRef(json: string): DataRef & { ext?: Record<string, unk
   ) {
     throw new MalformedArtifact('DataRef payload missing uid/chainId/resolvedBy/profile')
   }
+  // SHAPE-validate the ID fields before branding — a corrupted/foreign blob
+  // with `uid: "x"` or a fractional chainId must die HERE as MalformedArtifact
+  // (the promised boundary), not later as a misleading chain/ABI error deep in
+  // a read path that trusted the brand.
+  if (!/^0x[0-9a-fA-F]{64}$/.test(d.uid)) {
+    throw new MalformedArtifact(`DataRef uid is not a bytes32 hex string (${d.uid})`)
+  }
+  if (!/^0x[0-9a-fA-F]{40}$/.test(d.resolvedBy)) {
+    throw new MalformedArtifact(`DataRef resolvedBy is not an address (${d.resolvedBy})`)
+  }
+  if (!Number.isSafeInteger(d.chainId) || d.chainId <= 0) {
+    throw new MalformedArtifact(`DataRef chainId is not a positive integer (${String(d.chainId)})`)
+  }
   return {
     // Spread FIRST; every load-bearing field (including the brand) is set
     // AFTER it so a crafted payload key can never clobber one.
@@ -204,6 +217,14 @@ export function parseWriteReceipt(json: string): WriteReceipt & { ext?: Record<s
   if (!Array.isArray(d.steps) || typeof d.signatureCount !== 'number' || d.profile !== 'efs/v1') {
     throw new MalformedArtifact('WriteReceipt payload missing steps/signatureCount/profile')
   }
+  // Same strictness as parseDataRef (this is the RESUME/recovery artifact —
+  // a corrupt landed-UID map must fail the boundary, not a later replay):
+  // `typeof === 'number'` admits NaN/fractions; step uids must be bytes32.
+  if (!Number.isSafeInteger(d.signatureCount) || d.signatureCount < 0) {
+    throw new MalformedArtifact(
+      `WriteReceipt signatureCount is not a non-negative integer (${String(d.signatureCount)})`,
+    )
+  }
   for (const step of d.steps as unknown[]) {
     if (
       typeof step !== 'object' ||
@@ -212,6 +233,12 @@ export function parseWriteReceipt(json: string): WriteReceipt & { ext?: Record<s
       typeof (step as { done?: unknown }).done !== 'boolean'
     ) {
       throw new MalformedArtifact('WriteReceipt step missing id/done')
+    }
+    const uid = (step as { uid?: unknown }).uid
+    if (uid !== undefined && (typeof uid !== 'string' || !/^0x[0-9a-fA-F]{64}$/.test(uid))) {
+      throw new MalformedArtifact(
+        `WriteReceipt step uid is not a bytes32 hex string (${String(uid)})`,
+      )
     }
   }
   return {

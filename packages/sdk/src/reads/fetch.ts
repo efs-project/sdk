@@ -210,8 +210,19 @@ export async function fetchRef(
   }
   try {
     const result = await fetchVerified(mirrors, claimedHash, engineOpts)
+    // Enforce the declared-size claim on the FETCHED bytes. For a positive
+    // declared size the clamped cap already rejects over-size mid-fetch, but a
+    // `size: 0` claim cannot clamp (the engine rejects a non-positive cap — the
+    // empty-file carve-out above), so a non-empty body whose contentHash happens
+    // to match the attester's (inconsistent) metadata would otherwise sail
+    // through as `matches-author`. The documented rule is that bytes exceeding
+    // the declared size are a MISMATCH — apply it uniformly post-fetch.
+    const verification =
+      declaredSize !== undefined && BigInt(result.bytes.byteLength) > declaredSize
+        ? ('mismatch' as const)
+        : result.verification
     // Use the ATTESTED contentType (or omit) — never the untrusted transport header.
-    return makeEfsFile(result.bytes, result.verification, attestedContentType, resolvedBy)
+    return makeEfsFile(result.bytes, verification, attestedContentType, resolvedBy)
   } catch (err) {
     throw classifyError(err)
   }

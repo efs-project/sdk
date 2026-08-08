@@ -151,3 +151,61 @@ describe('adversarial-review regressions', () => {
     expect(out.__brand).toBe('DataRef')
   })
 })
+
+describe('strict ID validation at the parse boundary (review r3740509657)', () => {
+  it('parseDataRef rejects malformed uid/address/chainId as MalformedArtifact', async () => {
+    const { parseDataRef, serializeDataRef, MalformedArtifact } = await import(
+      '../src/artifacts.js'
+    )
+    const good = {
+      __brand: 'DataRef',
+      profile: 'efs/v1',
+      uid: `0x${'11'.repeat(32)}`,
+      chainId: 1,
+      resolvedBy: `0x${'22'.repeat(20)}`,
+    } as never
+    const json = serializeDataRef(good)
+    const cases: [string, string][] = [
+      [`"uid":"0x${'11'.repeat(32)}"`, '"uid":"x"'],
+      [`"resolvedBy":"0x${'22'.repeat(20)}"`, '"resolvedBy":"0xnotanaddress"'],
+      ['"chainId":1', '"chainId":1.5'],
+      ['"chainId":1', '"chainId":-5'],
+    ]
+    for (const [from, to] of cases) {
+      const tampered = json.replace(from, to)
+      expect(tampered, to).not.toBe(json)
+      const err = await Promise.resolve()
+        .then(() => parseDataRef(tampered))
+        .then(() => undefined)
+        .catch((e) => e)
+      expect(err, to).toBeInstanceOf(MalformedArtifact)
+    }
+    expect(parseDataRef(json).uid).toBe(good.uid) // the untampered ref still parses
+  })
+
+  it('parseWriteReceipt rejects NaN signatureCount and non-bytes32 step uids', async () => {
+    const { parseWriteReceipt, serializeWriteReceipt, MalformedArtifact } = await import(
+      '../src/artifacts.js'
+    )
+    const receipt = {
+      profile: 'efs/v1',
+      steps: [{ id: 'DATA', uid: `0x${'33'.repeat(32)}`, done: true }],
+      signatureCount: 1,
+      mechanism: 'direct',
+    } as never
+    const json = serializeWriteReceipt(receipt)
+    for (const [from, to] of [
+      ['"signatureCount":1', '"signatureCount":null'],
+      ['"signatureCount":1', '"signatureCount":1.5'],
+      [`"uid":"0x${'33'.repeat(32)}"`, '"uid":"0xdead"'],
+    ] as [string, string][]) {
+      const tampered = json.replace(from, to)
+      expect(tampered, to).not.toBe(json)
+      const err = await Promise.resolve()
+        .then(() => parseWriteReceipt(tampered))
+        .then(() => undefined)
+        .catch((e) => e)
+      expect(err, to).toBeInstanceOf(MalformedArtifact)
+    }
+  })
+})
