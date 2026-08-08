@@ -623,6 +623,24 @@ describe('writeFileTier1 — on-chain storage overrides + caps', () => {
   })
 })
 
+describe('storage state on attestation failures (review r3740563977)', () => {
+  it('a first-EAS-layer failure after the deploys carries the COMPLETED storage on the error', async () => {
+    const { ctx, deploys } = makeCtx()
+    // Both storage deploys succeed; the FIRST multiAttest (EAS layer) is rejected.
+    const origWrite = ctx.walletClient.writeContract?.bind(ctx.walletClient)
+    ;(ctx.walletClient as { writeContract: unknown }).writeContract = async () => {
+      throw Object.assign(new Error('User rejected the request.'), { code: 4001 })
+    }
+    void origWrite
+    const err = await writeFileTier1('/docs/readme.md', CONTENT, ctx).catch((e) => e)
+    expect(deploys).toHaveLength(2) // chunk + manager LANDED (irreversible)
+    const w = err as { storage?: { web3Uri?: string; txHashes?: readonly unknown[] } }
+    expect(w.storage).toBeDefined()
+    expect(w.storage?.web3Uri).toMatch(/^web3:\/\/0x/)
+    expect(w.storage?.txHashes).toHaveLength(2)
+  })
+})
+
 describe('writeFileTier1 — createParents (mkdir -p)', () => {
   const anchorEntries = async (sent: SentLayer[]) => {
     const { SchemaEncoder } = await import('../src/eas/schema-encoder.js')

@@ -1,0 +1,5 @@
+---
+"@efs/sdk": patch
+---
+
+Three review fixes completing the partial-state doctrine: attestation-phase failures on the default on-chain write now carry the COMPLETED storage — `WriteNotSentError`/`WriteRevertedError` gain an optional `storage` field (`web3Uri`/`chunkManager`/`chunkAddress`/`txHashes`, new `CompletedOnchainStorage` type) attached by the orchestrator once the deploys landed, so a rejected first EAS prompt or failed layer no longer invites a duplicate-storage retry (recovery passes `storage.web3Uri` as an explicit mirror); a mined layer whose EAS `Attested` logs can't be extracted (incomplete RPC logs, event drift) surfaces as `WriteRevertedError` with `mined: true` + the txHash + a do-not-resend cause instead of a bare throw that read as "unsent"; and `parseWriteReceipt` validates the known OPTIONAL typed fields when present (`data` via the shared DataRef shape rule, canonical `contentHash`, `status`/`gasless`/`reason` types) while still preserving genuinely unknown extension keys.

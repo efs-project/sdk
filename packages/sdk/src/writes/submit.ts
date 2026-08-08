@@ -84,6 +84,7 @@ import {
   ZERO_UID,
   isSymbolicRef,
 } from './graph.js'
+import type { CompletedOnchainStorage } from './onchain.js'
 
 /** A resolved `ref → mined UID` table, accumulated layer by layer. */
 export type RefMap = ReadonlyMap<string, Hex>
@@ -207,6 +208,11 @@ export interface Tier1WriteResult {
  * is no `txHash`, nothing landed in this layer, and a retry is safe.
  */
 export class WriteRevertedError extends EfsError {
+  /** The COMPLETED (irreversible) on-chain storage the write performed before
+   * its EAS layers, when the auto-store path ran — attached by the fs.write
+   * orchestrator so recovery reuses it (`storage.web3Uri` as an explicit
+   * mirror) instead of paying for duplicate deploys. */
+  storage?: CompletedOnchainStorage
   override name = 'WriteRevertedError'
   /** The DAG layer whose `multiAttest` was sent but did not land cleanly. */
   readonly layer: number
@@ -262,6 +268,8 @@ export class WriteRevertedError extends EfsError {
  * {@link WriteRevertedError} (which carries an in-flight `txHash`).
  */
 export class WriteNotSentError extends EfsError {
+  /** See {@link WriteRevertedError.storage} — same attachment, same recovery. */
+  storage?: CompletedOnchainStorage
   override name = 'WriteNotSentError'
   /** The DAG layer whose `multiAttest` was never sent. */
   readonly layer: number
@@ -596,7 +604,29 @@ export async function submitLayeredTier1(
 
     // EAS emits one Attested per attestation, in submission order — zip against
     // the captured flat ref order.
-    const uids = extractMintedUIDs(receipt, ctx.easAddress, flatRefs.length)
+    let uids: readonly Hex[]
+    try {
+      uids = extractMintedUIDs(receipt, ctx.easAddress, flatRefs.length)
+    } catch (cause) {
+      // The layer MINED (status success) — only the Attested-log extraction
+      // failed (an RPC returning incomplete logs, or event drift). Throwing a
+      // bare error here would read as "unsent" and invite a resend that
+      // DUPLICATES the landed attestations. Surface the mined-with-unknown-UIDs
+      // state structurally: txHash + mined:true + the prior landed map, with
+      // the extraction failure as cause — recovery re-reads the tx's logs
+      // instead of replaying the layer.
+      throw new WriteRevertedError(
+        layer,
+        flatRefs,
+        new Map(resolved),
+        txHash,
+        true,
+        new EfsError(
+          `multiAttest tx ${txHash} MINED successfully, but its Attested logs could not be extracted — this layer's attestations EXIST on-chain with unknown UIDs. Do NOT resend the layer (that would duplicate it); recover the UIDs from the transaction's receipt logs.`,
+          { code: 'PartialBatchFailure', cause },
+        ),
+      )
+    }
     const minted: { ref: string; uid: Hex }[] = flatRefs.map((ref, i) => {
       // `extractMintedUIDs` asserts `uids.length === flatRefs.length`, so the
       // index is always in range — the `?? ZERO_UID` only satisfies the

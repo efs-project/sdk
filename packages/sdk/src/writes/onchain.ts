@@ -344,6 +344,17 @@ async function requireContractAddress(
   return addr
 }
 
+/** The COMPLETED on-chain storage a write performed before its EAS layers —
+ * both deploys landed and are irreversible. Attached to attestation-phase
+ * partial-write errors so a retry can REUSE this storage (pass its `web3Uri`
+ * as an explicit mirror) instead of paying for duplicate deploys. */
+export type CompletedOnchainStorage = {
+  readonly web3Uri: string
+  readonly chunkManager: Address
+  readonly chunkAddress: Address
+  readonly txHashes: readonly Hex[]
+}
+
 /** The SSTORE2 chunk LANDED (irreversibly, receipt confirmed) but the write
  * stopped before the manager tx was broadcast — an abort, a chain drift, or a
  * wallet rejection on the second leg. Carries the landed chunk state so the

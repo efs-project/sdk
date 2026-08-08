@@ -40,6 +40,7 @@ import type { AccountProfile, WriteOptions, WriteReceipt } from '../types.js'
 import { validateMirrorUri } from './edge.js'
 import { buildFileWriteGraph } from './graph.js'
 import {
+  type CompletedOnchainStorage,
   DEFAULT_ONCHAIN_AUTO_LIMIT,
   type OnchainPublicClient,
   type OnchainWalletClient,
@@ -47,7 +48,13 @@ import {
   storeOnchain,
 } from './onchain.js'
 import { selectSingle } from './select.js'
-import type { LayerResult, SubmitPublicClient, SubmitWalletClient } from './submit.js'
+import {
+  type LayerResult,
+  type SubmitPublicClient,
+  type SubmitWalletClient,
+  WriteNotSentError,
+  WriteRevertedError,
+} from './submit.js'
 import type { SubmitterContext } from './submitter.js'
 
 /** Extract the URI scheme (`ipfs` from `ipfs://Qm…`, `web3` from `web3://0x…`). */
@@ -139,6 +146,9 @@ export async function resolveMirrors(
    * The orchestrator folds this into the receipt's `signatureCount` so the wallet-
    * confirmation count is honest on the default `fs.write(path, bytes)` path. */
   storageTxCount: number
+  /** The COMPLETED (irreversible) on-chain storage, when the auto-store path ran —
+   * threaded onto attestation-phase partial errors so a retry reuses it. */
+  storage?: CompletedOnchainStorage
 }> {
   const { deployment } = ctx
 
@@ -211,7 +221,7 @@ export async function resolveMirrors(
     opts,
     ctx.publicClient,
   )
-  const { web3Uri, txHashes } = await storeOnchain(bytes, {
+  const { web3Uri, chunkManager, chunkAddress, txHashes } = await storeOnchain(bytes, {
     walletClient: ctx.walletClient,
     publicClient: ctx.publicClient,
     ...(ctx.account !== undefined ? { account: ctx.account } : {}),
@@ -227,8 +237,13 @@ export async function resolveMirrors(
     ...(ctx.assertChain !== undefined ? { assertChain: ctx.assertChain } : {}),
   })
   // The on-chain store sent `txHashes.length` wallet txs (chunk + manager) before any
-  // EAS layer — fold them into the receipt's signatureCount via the orchestrator.
-  return { mirrors: [{ uri: web3Uri, transportDefinition }], storageTxCount: txHashes.length }
+  // EAS layer — fold them into the receipt's signatureCount via the orchestrator, and
+  // carry the completed (irreversible) storage so attestation-phase failures preserve it.
+  return {
+    mirrors: [{ uri: web3Uri, transportDefinition }],
+    storageTxCount: txHashes.length,
+    storage: { web3Uri, chunkManager, chunkAddress, txHashes },
+  }
 }
 
 /** The viem clients + deployment context the file-write orchestrator needs. */
@@ -418,7 +433,7 @@ export async function writeFileTier1(
   // on-chain (SSTORE2) and yields a web3:// mirror — the zero-infra default, and the
   // FIRST irreversible step. Abort-check immediately before it.
   opts?.signal?.throwIfAborted()
-  const { mirrors, storageTxCount } = await resolveMirrors(content, ctx, opts)
+  const { mirrors, storageTxCount, storage } = await resolveMirrors(content, ctx, opts)
 
   // 4. Build the pure write plan (the 9-schema, layered attestation DAG).
   const plan = buildFileWriteGraph({
@@ -504,7 +519,22 @@ export async function writeFileTier1(
         }
       : {}),
   }
-  return submitter.submit(plan, submitterCtx)
+  // Every attestation-phase partial error must carry the COMPLETED storage:
+  // once the chunk+manager landed they are irreversible and paid for, and a
+  // blind fs.write retry (rejected first EAS prompt, chain drift, layer
+  // failure) would deploy duplicates. With `storage` attached, recovery passes
+  // `storage.web3Uri` as an explicit mirror and pays zero storage gas.
+  try {
+    return await submitter.submit(plan, submitterCtx)
+  } catch (err) {
+    if (
+      storage !== undefined &&
+      (err instanceof WriteNotSentError || err instanceof WriteRevertedError)
+    ) {
+      err.storage = storage
+    }
+    throw err
+  }
 }
 
 /** The address of a viem account-or-address (the attester the receipt records). */

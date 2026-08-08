@@ -18,6 +18,7 @@
  * The envelope: `{ efs: { artifact, profile, v }, data, ext? }`.
  */
 
+import { asContentHash } from './content/hash.js'
 import { EfsError } from './errors.js'
 import type { DataRef, WriteReceipt } from './types.js'
 
@@ -163,6 +164,23 @@ export function serializeDataRef(ref: DataRef, ext?: Record<string, unknown>): s
   return serialize('DataRef', data, ext)
 }
 
+/** The DataRef ID-field shape rule, shared by `parseDataRef` and the receipt's
+ * optional `data` field: bytes32 `uid`, address `resolvedBy`, positive safe-int
+ * `chainId`, v1 profile. Returns the failure detail, or `undefined` when valid. */
+function dataRefShapeError(d: Record<string, unknown>): string | undefined {
+  if (typeof d.uid !== 'string' || !/^0x[0-9a-fA-F]{64}$/.test(d.uid)) {
+    return `DataRef uid is not a bytes32 hex string (${String(d.uid)})`
+  }
+  if (typeof d.resolvedBy !== 'string' || !/^0x[0-9a-fA-F]{40}$/.test(d.resolvedBy)) {
+    return `DataRef resolvedBy is not an address (${String(d.resolvedBy)})`
+  }
+  if (typeof d.chainId !== 'number' || !Number.isSafeInteger(d.chainId) || d.chainId <= 0) {
+    return `DataRef chainId is not a positive integer (${String(d.chainId)})`
+  }
+  if (d.profile !== 'efs/v1') return `DataRef profile is not efs/v1 (${String(d.profile)})`
+  return undefined
+}
+
 /** Parse a persisted {@link DataRef}. Unknown payload keys are PRESERVED on the
  * returned object (opaque-extension rule).
  * @throws {UnsupportedArtifact} foreign profile / newer version.
@@ -182,15 +200,8 @@ export function parseDataRef(json: string): DataRef & { ext?: Record<string, unk
   // with `uid: "x"` or a fractional chainId must die HERE as MalformedArtifact
   // (the promised boundary), not later as a misleading chain/ABI error deep in
   // a read path that trusted the brand.
-  if (!/^0x[0-9a-fA-F]{64}$/.test(d.uid)) {
-    throw new MalformedArtifact(`DataRef uid is not a bytes32 hex string (${d.uid})`)
-  }
-  if (!/^0x[0-9a-fA-F]{40}$/.test(d.resolvedBy)) {
-    throw new MalformedArtifact(`DataRef resolvedBy is not an address (${d.resolvedBy})`)
-  }
-  if (!Number.isSafeInteger(d.chainId) || d.chainId <= 0) {
-    throw new MalformedArtifact(`DataRef chainId is not a positive integer (${String(d.chainId)})`)
-  }
+  const shapeErr = dataRefShapeError(d)
+  if (shapeErr !== undefined) throw new MalformedArtifact(shapeErr)
   return {
     // Spread FIRST; every load-bearing field (including the brand) is set
     // AFTER it so a crafted payload key can never clobber one.
@@ -266,6 +277,42 @@ export function parseWriteReceipt(json: string): WriteReceipt & { ext?: Record<s
       throw new MalformedArtifact(
         `WriteReceipt step uid is not a bytes32 hex string (${String(uid)})`,
       )
+    }
+  }
+  // Known OPTIONAL typed fields validate when PRESENT — a malformed `data`
+  // (fake DataRef), non-canonical `contentHash`, or mistyped `status`/`gasless`/
+  // `reason` must not brand through and fail later where code trusts the types.
+  // Genuinely UNKNOWN keys still pass verbatim (the opaque-extension rule).
+  if (d.data !== undefined) {
+    if (typeof d.data !== 'object' || d.data === null) {
+      throw new MalformedArtifact('WriteReceipt data is not an object')
+    }
+    const refErr = dataRefShapeError(d.data as Record<string, unknown>)
+    if (refErr !== undefined) throw new MalformedArtifact(`WriteReceipt data: ${refErr}`)
+  }
+  if (
+    d.contentHash !== undefined &&
+    (typeof d.contentHash !== 'string' || asContentHash(d.contentHash) === undefined)
+  ) {
+    throw new MalformedArtifact(
+      `WriteReceipt contentHash is not a canonical multihash string (${String(d.contentHash)})`,
+    )
+  }
+  if (d.status !== undefined && typeof d.status !== 'string') {
+    throw new MalformedArtifact(`WriteReceipt status is not a string (${String(d.status)})`)
+  }
+  if (d.gasless !== undefined && typeof d.gasless !== 'boolean') {
+    throw new MalformedArtifact(`WriteReceipt gasless is not a boolean (${String(d.gasless)})`)
+  }
+  if (d.reason !== undefined) {
+    const r = d.reason as { selected?: unknown; why?: unknown } | null
+    if (
+      typeof r !== 'object' ||
+      r === null ||
+      typeof r.selected !== 'string' ||
+      typeof r.why !== 'string'
+    ) {
+      throw new MalformedArtifact('WriteReceipt reason is not { selected, why } strings')
     }
   }
   return {

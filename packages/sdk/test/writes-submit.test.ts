@@ -364,10 +364,20 @@ describe('submitWriteTier1 — receipt UID extraction', () => {
     expect(result.uids.size).toBe(13)
   })
 
-  it('throws when the receipt Attested count does not match the layer size', async () => {
+  it('a receipt whose Attested logs cannot be extracted surfaces MINED-with-unknown-UIDs, never "unsent" (r3740563979)', async () => {
+    // The layer MINED (receipt status success) — only log extraction failed
+    // (incomplete RPC logs / drift). A bare throw read as "unsent" and invited
+    // a resend DUPLICATING the landed attestations. The structured shape keeps
+    // the txHash + mined:true + the prior landed map; the extraction failure
+    // (count mismatch here) rides as the cause chain.
     const plan = buildFileWriteGraph(bytesInput)
     const { ctx } = makeMockChain({ dropLastLog: true })
-    await expect(submitWriteTier1(plan, ctx)).rejects.toThrow(
+    const err = await submitWriteTier1(plan, ctx).catch((e) => e)
+    expect(err).toBeInstanceOf(WriteRevertedError)
+    const w = err as WriteRevertedError
+    expect(w.txHash).toMatch(/^0x/)
+    expect(w.mined).toBe(true)
+    expect(String((w.cause as { cause?: unknown })?.cause ?? w.cause)).toMatch(
       /does not match the submitted multiAttest/,
     )
   })

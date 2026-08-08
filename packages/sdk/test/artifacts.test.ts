@@ -245,3 +245,48 @@ describe('envelope version discipline (review r3740549059)', () => {
     )
   })
 })
+
+describe('optional typed receipt fields validate when present (review r3740563983)', () => {
+  it('malformed data/contentHash/reason are MalformedArtifact; unknown keys still pass', async () => {
+    const { parseWriteReceipt, serializeWriteReceipt, MalformedArtifact } = await import(
+      '../src/artifacts.js'
+    )
+    const C = `0x${'05'.repeat(20)}`
+    const receipt = {
+      profile: 'efs/v1',
+      roles: { author: C, signer: C, payer: C },
+      steps: [],
+      signatureCount: 1,
+      mechanism: 'direct',
+      contentHash: `f1220${'ab'.repeat(32)}`,
+      data: {
+        __brand: 'DataRef',
+        profile: 'efs/v1',
+        uid: `0x${'55'.repeat(32)}`,
+        chainId: 1,
+        resolvedBy: C,
+      },
+      reason: { selected: 'direct', why: 'only-option' },
+      someUnknownExtension: { anything: true }, // must survive untouched
+    } as never
+    const json = serializeWriteReceipt(receipt)
+    expect(
+      (parseWriteReceipt(json) as { someUnknownExtension?: unknown }).someUnknownExtension,
+    ).toEqual({ anything: true })
+    for (const [from, to] of [
+      [`"uid":"0x${'55'.repeat(32)}"`, '"uid":"x"'], // fake DataRef
+      [`"contentHash":"f1220${'ab'.repeat(32)}"`, '"contentHash":"deadbeef"'], // non-canonical
+      ['"reason":{"selected":"direct","why":"only-option"}', '"reason":{"selected":7}'],
+      ['"gasless":', '"gasless":'], // no-op guard: skip if absent
+    ] as [string, string][]) {
+      if (!json.includes(from)) continue
+      const tampered = json.replace(from, to)
+      if (tampered === json) continue
+      const err = await Promise.resolve()
+        .then(() => parseWriteReceipt(tampered))
+        .then(() => undefined)
+        .catch((e) => e)
+      expect(err, to).toBeInstanceOf(MalformedArtifact)
+    }
+  })
+})
