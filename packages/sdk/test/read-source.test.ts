@@ -35,12 +35,13 @@ describe('viemReadSource (live adapter)', () => {
     expect(src.chainId).toBe(11_155_111)
     expect(src.capabilities).toMatchObject({
       kind: 'live',
-      authoritative: true,
+      state: 'head', // follows its backend's head — the endpoint is the residual trust
       supportsGetCode: true,
       supportsEns: true,
       readContract: 'arbitrary',
       supportsRangeQueries: true,
     })
+    expect('authoritative' in src.capabilities).toBe(false) // the subjective boolean is GONE
     expect(await src.readContract({ address: ADDR, abi: [], functionName: 'x' })).toBe('0xresult')
   })
 
@@ -55,12 +56,34 @@ describe('viemReadSource (live adapter)', () => {
 })
 
 describe('snapshotReadSource (offline stub)', () => {
-  it('is non-authoritative and carries the snapshot block/asOf', () => {
+  it('is pinned and carries the capture basis (block/asOf)', () => {
     const src = snapshotReadSource({ chainId: 1, block: 100n, asOf: 1_700_000_000, records: {} })
     expect(src.chainId).toBe(1)
     expect(src.capabilities.kind).toBe('snapshot')
-    expect(src.capabilities.authoritative).toBe(false) // cannot confirm existence/revocation offline
-    expect(src.capabilities.snapshotBlock).toBe(100n)
+    expect(src.capabilities.state).toBe('pinned') // cannot confirm existence/revocation offline
+    expect(src.capabilities.pinnedBasis).toEqual({
+      chainId: 1,
+      blockNumber: 100n,
+      asOf: 1_700_000_000,
+    })
+  })
+
+  it('capability metadata is CALLABLE behavior, not stored contents: getCode/ENS stay off until the lookup slice lands', () => {
+    // Even a snapshot that CAPTURED code + ENS advertises neither — a present
+    // getCode answering `undefined` would assert "no bytecode here", a WRONG
+    // answer the web3:// reader would trust. Absent method = honest signal.
+    const src = snapshotReadSource({
+      chainId: 1,
+      block: 1n,
+      asOf: 1,
+      records: {},
+      code: { [ADDR]: '0x6000' },
+      ens: { 'a.eth': ADDR },
+    })
+    expect(src.capabilities.supportsGetCode).toBe(false)
+    expect(src.capabilities.supportsEns).toBe(false)
+    expect('getCode' in src).toBe(false)
+    expect('getEnsAddress' in src).toBe(false)
   })
 
   it('throws NotImplemented on read (the lookup is a later slice)', async () => {
@@ -73,11 +96,11 @@ describe('snapshotReadSource (offline stub)', () => {
 })
 
 describe('indexerReadSource (stub)', () => {
-  it('is non-authoritative, range-capable, and has no EVM (getCode)', async () => {
+  it('is lagging, range-capable, and has no EVM (getCode)', async () => {
     const src = indexerReadSource({ chainId: 1, url: 'https://idx.example' })
     expect(src.capabilities).toMatchObject({
       kind: 'indexer',
-      authoritative: false,
+      state: 'lagging', // tails a trailing head — freshness is as-of, never current
       supportsGetCode: false,
       supportsRangeQueries: true,
     })

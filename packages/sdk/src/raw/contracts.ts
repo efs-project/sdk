@@ -78,10 +78,13 @@ function clientArg(clients: RawClients): RawClient {
 
 /**
  * Build the `efs.raw.*` contract instances for a deployment. `getDeployment` is the
- * client's lazy resolver (so an override/chain change is reflected and a missing
- * deployment throws `DeploymentNotFound` at access time, consistent with the rest
- * of the SDK). Each instance is bound to its authoritative address from
- * {@link EfsDeployment.contracts}; properties are lazy getters that re-resolve.
+ * client's lazy resolver (a missing deployment throws `DeploymentNotFound` at
+ * access time, not at construct). Each instance is bound to its authoritative
+ * address from the CONSTRUCTION-chain deployment: a provider that later drifts
+ * to another chain fails closed with `WrongChain` on use (the chain-guarded
+ * clients in index.ts) — drift is NOT re-resolved into another chain's
+ * deployment. A caller-supplied `deployments` OVERRIDE is reflected (the lazy
+ * getters re-read the resolver), which is a different thing from chain drift.
  */
 export function buildRawContracts(
   getDeployment: () => EfsDeployment,
@@ -98,8 +101,10 @@ export function buildRawContracts(
       client,
     }) as unknown as GetContractReturnType<TAbi, RawClient>
 
-  // Lazy getters: each access re-resolves the deployment (override/chain change is
-  // reflected; a missing deployment throws DeploymentNotFound here, not at construct).
+  // Lazy getters: each access re-resolves the deployment RECORD (an override is
+  // reflected; a missing deployment throws DeploymentNotFound here, not at
+  // construct). Chain DRIFT is NOT reflected — the guarded clients fail closed
+  // with WrongChain rather than re-pointing at the drifted chain's contracts.
   return {
     get indexer() {
       return at((d) => d.contracts.indexer, indexerAbi)

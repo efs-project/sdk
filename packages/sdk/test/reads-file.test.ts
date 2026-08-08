@@ -37,11 +37,12 @@ import {
   LensRequired,
   MalformedClaim,
   MissingContentHash,
+  StaleTrust,
 } from '../src/errors.js'
 import { attestationsFor } from '../src/reads/attestations.js'
 import type { ReadContext } from '../src/reads/context.js'
 import { InvalidDirectoryQuery } from '../src/reads/directory.js'
-import { read, readBytes, readJson, readText } from '../src/reads/fetch.js'
+import { assertTrust, read, readBytes, readJson, readText } from '../src/reads/fetch.js'
 import { exists, info, locate } from '../src/reads/file.js'
 import { list } from '../src/reads/list.js'
 import type { DataRef, DataUID } from '../src/types.js'
@@ -995,6 +996,69 @@ describe('attestationsFor', () => {
     expect((err as { code?: string }).code).toBe('WrongChain')
   })
 
+  it('escapes a WrongChain thrown during SCHEMA hydration (the depth-2 leg — expand:["attestations.schema"])', async () => {
+    // getAttestation SUCCEEDS but getSchema fails WrongChain: the attestation
+    // would otherwise FULFILL with a silently-missing schemaRecord, so the
+    // rejection scan never sees the systemic drift. schemaRecordFor must
+    // re-throw WrongChain (only per-schema degradation stays undefined).
+    const att = uid(0x7001)
+    const ctx = {
+      publicClient: {
+        readContract: async (args: { functionName: string }) => {
+          if (args.functionName === 'getSchema') {
+            throw new EfsError('provider drifted', { code: 'WrongChain' })
+          }
+          return {
+            uid: att,
+            schema: uid(0x55), // non-zero → triggers the withSchema getSchema read
+            time: 0n,
+            expirationTime: 0n,
+            revocationTime: 0n,
+            refUID: uid(0),
+            recipient: addr(0),
+            attester: LENS,
+            revocable: true,
+            data: '0x',
+          }
+        },
+      },
+      deployment: deployment(),
+    } as unknown as ReadContext
+    const err = await attestationsFor(ctx, [{ sourceUIDs: { contentType: att } }], {
+      withSchema: true,
+    }).catch((e) => e)
+    expect((err as { code?: string }).code).toBe('WrongChain')
+  })
+
+  it('a TRANSIENT getSchema failure degrades to a missing schemaRecord (per-schema, not systemic)', async () => {
+    const att = uid(0x7001)
+    const ctx = {
+      publicClient: {
+        readContract: async (args: { functionName: string }) => {
+          if (args.functionName === 'getSchema') throw new Error('rpc hiccup')
+          return {
+            uid: att,
+            schema: uid(0x55),
+            time: 0n,
+            expirationTime: 0n,
+            revocationTime: 0n,
+            refUID: uid(0),
+            recipient: addr(0),
+            attester: LENS,
+            revocable: true,
+            data: '0x',
+          }
+        },
+      },
+      deployment: deployment(),
+    } as unknown as ReadContext
+    const out = await attestationsFor(ctx, [{ sourceUIDs: { contentType: att } }], {
+      withSchema: true,
+    })
+    expect(out[0]?.attestations.contentType?.uid).toBe(att)
+    expect(out[0]?.attestations.contentType?.schemaRecord).toBeUndefined()
+  })
+
   it('hydrates items carrying only TOP-LEVEL UIDs (DirEntry dataUID/anchorUID, DataRef ref.uid)', async () => {
     // HasSourceUIDs accepts ref.uid / dataUID / anchorUID; a DirEntry from fs.list() or a
     // DataRef carries those and NO sourceUIDs bag. They must still hydrate (not return {}).
@@ -1305,5 +1369,75 @@ describe('list({ excludes }) — on-chain tag-exclusion filter (ADR-0011)', () =
     // It fails before ever issuing a directory read (filtered OR unfiltered) — no leak.
     expect(calls.some((c) => c.fn === 'getDirectoryPageFiltered')).toBe(false)
     expect(calls.some((c) => c.fn === 'getDirectoryPageByAddressList')).toBe(false)
+  })
+})
+
+// ── Trust provenance (ADR-0015 — the required `trust` stamp + requireTrust gate) ──
+
+describe('trust provenance (ADR-0015)', () => {
+  const mirrorUri = `data:text/markdown;base64,${Buffer.from('# Hello EFS\n').toString('base64')}`
+  const ctxLive = () =>
+    makeCtx({
+      edges: README_EDGES,
+      files: [fileItem({})],
+      mirrors: [{ uri: mirrorUri, attester: LENS }],
+    })
+
+  it('read()/locate()/info() all stamp the live descriptor (every source is live today)', async () => {
+    const file = await read(ctxLive(), '/docs/readme.md', { lens: LENS, verify: false })
+    expect(file.trust).toEqual({ freshness: 'current', source: 'live' })
+    const res = await locate(ctxLive(), '/docs/readme.md', { lens: LENS })
+    expect(res?.trust).toEqual({ freshness: 'current', source: 'live' })
+    const meta = await info(ctxLive(), '/docs/readme.md', { lens: LENS })
+    expect(meta.trust).toEqual({ freshness: 'current', source: 'live' })
+    // Absence is ALSO a live answer (determined against the chain head).
+    const absent = await info(ctxLive(), '/docs/missing.md', { lens: LENS })
+    expect(absent.exists).toBe(false)
+    expect(absent.trust).toEqual({ freshness: 'current', source: 'live' })
+  })
+
+  it('the requireTrust floors all pass on a live read (the gate cannot fire today)', async () => {
+    for (const requireTrust of ['current', 'as-of', 'any'] as const) {
+      const text = await readText(ctxLive(), '/docs/readme.md', {
+        lens: LENS,
+        verify: false,
+        requireTrust,
+      })
+      expect(text).toBe('# Hello EFS\n')
+    }
+  })
+
+  it('assertTrust enforces the lattice on hand-built descriptors (the future-source contract)', () => {
+    const fileWith = (trust: EfsFileTrust): Parameters<typeof assertTrust>[0] =>
+      ({ trust }) as Parameters<typeof assertTrust>[0]
+    type EfsFileTrust =
+      | { freshness: 'current'; source: string }
+      | { freshness: 'as-of'; source: string; asOf: number }
+      | { freshness: 'stale'; source: string }
+
+    const stale = fileWith({ freshness: 'stale', source: 'snapshot' })
+    const asOf = fileWith({ freshness: 'as-of', source: 'indexer', asOf: 1 })
+    const current = fileWith({ freshness: 'current', source: 'live' })
+
+    // default ('as-of'): stale throws, as-of/current pass.
+    expect(() => assertTrust(stale, '/x', undefined)).toThrow(StaleTrust)
+    expect(() => assertTrust(asOf, '/x', undefined)).not.toThrow()
+    expect(() => assertTrust(current, '/x', undefined)).not.toThrow()
+    // 'current': as-of throws too.
+    expect(() => assertTrust(asOf, '/x', 'current')).toThrow(StaleTrust)
+    expect(() => assertTrust(current, '/x', 'current')).not.toThrow()
+    // 'any': everything passes, including stale (the opt-out).
+    expect(() => assertTrust(stale, '/x', 'any')).not.toThrow()
+    // The thrown error carries the offending descriptor.
+    const err = (() => {
+      try {
+        assertTrust(stale, '/x', 'current')
+        return undefined
+      } catch (e) {
+        return e as StaleTrust
+      }
+    })()
+    expect(err?.code).toBe('StaleTrust')
+    expect(err?.trust.freshness).toBe('stale')
   })
 })

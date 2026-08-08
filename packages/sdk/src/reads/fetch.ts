@@ -33,6 +33,7 @@ import {
   FileNotFoundError,
   MalformedClaim,
   MissingContentHash,
+  StaleTrust,
 } from '../errors.js'
 import {
   DEFAULT_MAX_BYTES,
@@ -50,7 +51,7 @@ import type {
   ReadOpts,
 } from '../types.js'
 import { attestationFor } from './attestations.js'
-import { type ReadContext, read as readContract } from './context.js'
+import { LIVE_TRUST, type ReadContext, read as readContract } from './context.js'
 import { readReservedProperty, resolvePlacement } from './file.js'
 
 /** A row returned by `getDataMirrors` (lens-scoped). */
@@ -228,6 +229,11 @@ function makeEfsFile(
   return {
     bytes,
     verification,
+    // ADR-0015: every read today is a LIVE chain-head read, so the stamp is the
+    // constant safe state. The offline/indexer sources populate the other
+    // variants when their read paths land — the REQUIRED field is what stops
+    // them from masquerading as live.
+    trust: LIVE_TRUST,
     ...(contentType !== undefined ? { contentType } : {}),
     ...(hashAuthor !== undefined ? { hashAuthor } : {}),
     text() {
@@ -320,6 +326,27 @@ async function hydrateByteAttestations(
 
 // ── Value sugar (fail-closed) ────────────────────────────────────────────────────
 
+/**
+ * Trust-freshness gate for the fail-closed sugar (ADR-0015): the answer's
+ * `trust.freshness` must satisfy the caller's `requireTrust` floor (default
+ * `'as-of'` — accepts `current`/`as-of`, rejects content-only `stale`;
+ * `'current'` rejects `as-of` too; `'any'` disables). Today every stamp is
+ * `current`, so the gate cannot fire — it exists so a future offline/indexer
+ * source cannot silently weaken readText/readBytes/readJson.
+ * @throws {StaleTrust}
+ */
+export function assertTrust(
+  file: EfsFile,
+  path: string,
+  require: 'current' | 'as-of' | 'any' | undefined,
+): void {
+  const floor = require ?? 'as-of'
+  if (floor === 'any') return
+  const { freshness } = file.trust
+  const ok = floor === 'current' ? freshness === 'current' : freshness !== 'stale'
+  if (!ok) throw new StaleTrust(file.trust, floor, path)
+}
+
 /** Map a verification status to the throw the fail-closed sugar owes (sdk-read-surface
  * §error matrix). `matches-author` passes; `mismatch`/`malformed-claim` always throw.
  * `no-claim` is the subtle one: it means NOTHING was verified — legitimate when the
@@ -354,6 +381,7 @@ export async function readBytes(
 ): Promise<Uint8Array> {
   const file = await read(ctx, path, opts)
   assertVerified(file, path, opts?.verify !== false)
+  assertTrust(file, path, opts?.requireTrust)
   return file.bytes
 }
 
@@ -366,6 +394,7 @@ export async function readText(
 ): Promise<string> {
   const file = await read(ctx, path, opts)
   assertVerified(file, path, opts?.verify !== false)
+  assertTrust(file, path, opts?.requireTrust)
   return file.text()
 }
 
@@ -383,6 +412,7 @@ export async function readJson<T = unknown>(
 ): Promise<T> {
   const file = await read(ctx, path, opts)
   assertVerified(file, path, opts?.verify !== false)
+  assertTrust(file, path, opts?.requireTrust)
   const value = file.json<unknown>()
   return opts?.schema ? opts.schema.parse(value) : (value as T)
 }

@@ -1391,6 +1391,7 @@ export {
   readBytes,
   readJson,
   fetchRef,
+  assertTrust,
   type ParseSchema,
 } from './reads/fetch.js'
 export {
@@ -1465,10 +1466,12 @@ export type { RedirectKind, RedirectRecord } from './types.js'
 // ── Pluggable read source (ADR-0014) + read-trust provenance (ADR-0015) ────────
 // The `ReadSource` seam decouples reads from a live chain-bound viem client; `ViemReadSource`
 // is the only live impl today, the snapshot/indexer sources are reserved stubs. `TrustDescriptor`
-// is the reserved provenance shape (becomes a required field on the rich read results in the
-// behavioral slice). These are the seams future runtimes (offline, indexer, Ring-3) plug into.
-export type { ReadSource, ReadSourceCapabilities } from './reads/source.js'
+// is LIVE: a required `trust` field on the rich read results (EfsFile/FileInfo/ReadResult),
+// stamped `{ freshness: 'current', source: 'live' }` today, gated by `requireTrust` on the
+// fail-closed sugar. These are the seams future runtimes (offline, indexer, Ring-3) plug into.
+export type { ReadSource, ReadSourceCapabilities, ReadBasis } from './reads/source.js'
 export { viemReadSource } from './reads/sources/viem.js'
 export { snapshotReadSource, type ReadSnapshot } from './reads/sources/snapshot.js'
 export { indexerReadSource, type IndexerConfig } from './reads/sources/indexer.js'
+export { LIVE_TRUST } from './reads/context.js'
 export type { TrustDescriptor } from './types.js'

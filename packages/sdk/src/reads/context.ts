@@ -41,7 +41,12 @@ import type { EfsDeployment } from '../chain/deployments.js'
 import { classifyError } from '../errors.js'
 import { LensRequired } from '../errors.js'
 import { type Lens, resolveLens } from '../lenses/resolve.js'
-import type { ReadOptions } from '../types.js'
+import type { ReadOptions, TrustDescriptor } from '../types.js'
+
+/** The constant trust descriptor every read stamps today — ALL sources are
+ * live chain-head reads (ADR-0015). The offline/indexer sources replace this
+ * with their derived `as-of`/`stale` variants when their read paths land. */
+export const LIVE_TRUST: TrustDescriptor = { freshness: 'current', source: 'live' }
 
 /** `bytes32(0)` — the kernel's "empty slot" sentinel (mirrors `reads/resolve.ts`). */
 export const ZERO_UID = '0x0000000000000000000000000000000000000000000000000000000000000000' as Hex

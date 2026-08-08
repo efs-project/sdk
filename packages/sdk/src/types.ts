@@ -7,6 +7,7 @@ import type { Address, Hex } from 'viem'
 import type { ContentHash, VerificationStatus } from './content/hash.js'
 import type { EfsError } from './errors.js'
 import type { Lens } from './lenses/resolve.js'
+import type { ReadBasis } from './reads/source.js'
 
 // ── Branded references ─────────────────────────────────────────────────────────
 
@@ -78,6 +79,19 @@ export type ReadOpts<E extends readonly ExpandToken[] = readonly ExpandToken[]> 
   fields?: string[]
   /** Depth — opt into nested raw records. Narrows the return type. */
   expand?: E
+  /**
+   * Trust-freshness floor for the FAIL-CLOSED value sugar (`readText`/
+   * `readBytes`/`readJson`) — the trust twin of `verify` (ADR-0015). The result
+   * `trust.freshness` must be at or above the floor, else {@link
+   * import('./errors.js').StaleTrust} is thrown:
+   *   - `'as-of'` (DEFAULT) — accept `current` and bounded-stale `as-of`;
+   *     reject content-only `stale`.
+   *   - `'current'` — accept only a chain-head answer.
+   *   - `'any'` — accept everything, including `stale` (opt-out).
+   * Today every read is live (`current`), so the gate cannot fire — it exists
+   * so offline/indexer sources CANNOT weaken the sugar's contract later.
+   */
+  requireTrust?: 'current' | 'as-of' | 'any'
   /** Verify fetched bytes against the attester's `contentHash` (default true).
    * On the value-sugar path a mismatch throws (fail-closed) unless this is false. */
   verify?: boolean
@@ -547,6 +561,8 @@ export type WriteEstimate = {
 export type ReadResult = {
   data: DataRef
   resolvedBy: Address
+  /** Provenance + freshness of the ANSWER (ADR-0015). Always present. */
+  trust: TrustDescriptor
   /**
    * The SYMLINK hops followed during path resolution (specs/09 §2 — symlink is
    * the only followed kind, ANCHOR-sourced), when `{ followRedirects }` was set
@@ -718,30 +734,40 @@ export type SourceUIDs = {
  * structurally present only on the `'as-of'` variant. `source` reuses the
  * {@link ReadSourceCapabilities} `kind` vocabulary verbatim (one term per backend, SDK-wide).
  *
- * RESERVED (ADR-0015): exported now so the surface is stable; becomes a required field on the
- * rich read results (`EfsFile`/`FileInfo`/`ReadResult`) in the behavioral slice, where today
- * every source is live and verbs stamp `{ freshness:'current', source:'live' }`. Adding it
- * later would be a breaking change, so the shape lands ahead of the offline/indexer sources.
+ * LIVE (ADR-0015, Accepted): a REQUIRED field on the rich read results
+ * (`EfsFile`/`FileInfo`/`ReadResult`). Today every source is live, so verbs stamp the
+ * constant `{ freshness:'current', source:'live' }`; the offline/indexer sources populate
+ * the other variants when their read paths land. The three layers of the provenance story:
+ * source CAPABILITY (static — `ReadSourceCapabilities.state`) → observed BASIS (per-answer
+ * evidence — `ReadBasis`) → this VERDICT (the derived, agent-legible freshness):
+ * `state:'head'` → `'current'`; `'lagging'`/`'pinned'`+usable basis → `'as-of'`;
+ * `'pinned'` without one → `'stale'`.
  */
 export type TrustDescriptor =
   | {
-      /** Chain-head read: existence + revocation are current NOW. The safe state. */
+      /** Chain-head read: existence + revocation are current NOW (as the session's
+       * backend sees them — the endpoint is the stated residual trust). The safe state. */
       freshness: 'current'
       source: 'live' | (string & Record<never, never>)
+      /** The observed basis (block/finality), when the source carries one. */
+      basis?: ReadBasis
     }
   | {
       /** Bounded-stale: existence + revocation checked against a head at {@link asOf}. */
       freshness: 'as-of'
       source: 'snapshot' | 'indexer' | (string & Record<never, never>)
-      /** Wall-clock head time (epoch seconds) the answer is current as of. Matches
-       * {@link ReadSourceCapabilities.snapshotAsOf}'s width. */
+      /** Wall-clock head time (epoch seconds) the answer is current as of. */
       asOf: number
+      /** The observed capture/indexed-head basis the answer derives from. */
+      basis: ReadBasis
     }
   | {
       /** Content-only cache: bytes are authentic, but on-chain existence AND revocation are
        * UNKNOWN — the dangerous state, and the literal says so. */
       freshness: 'stale'
       source: 'snapshot' | (string & Record<never, never>)
+      /** Whatever partial basis survives (no usable block/asOf — that is what makes it stale). */
+      basis?: ReadBasis
     }
 
 /**
@@ -756,6 +782,10 @@ export type EfsFile = {
   contentType?: string
   /** Trust-relative verification status against the lens attester's claim. */
   verification: VerificationStatus
+  /** Provenance + freshness of the ANSWER (ADR-0015) — orthogonal to
+   * `verification` (bytes authenticity). Always present: a cached read can be
+   * `matches-author` yet revoked, and this is where that shows. */
+  trust: TrustDescriptor
   /** Whose contentHash claim was checked against (the winning lens attester). */
   hashAuthor?: Address
   /** Pure UTF-8 decode of `bytes` (no I/O). */
@@ -788,6 +818,8 @@ export type FileInfo = {
   resolvedBy: Address
   /** Trust status of the winning placement/claim. */
   verified: VerificationStatus | 'revoked' | 'unchecked'
+  /** Provenance + freshness of the ANSWER (ADR-0015). Always present. */
+  trust: TrustDescriptor
   /** Per-field source UIDs (placement PIN + reserved-key PROPERTYs). */
   sourceUIDs: SourceUIDs
   /** Raw per-field attestations — present only with `expand:['attestations']`. */

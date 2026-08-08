@@ -18,8 +18,12 @@ bound to a chain at construction**. Two foundational uses break against that ass
   (`createPublicClient({ transport })`) answers `getChainId()` but exposes no synchronous
   `chain.id`. The write/raw/eas paths resolve the deployment synchronously from
   `publicClient.chain.id`, so a chainless client throws on first use even on a supported
-  chain. (PR #1 currently rejects chainless clients at construction as a stopgap — this
-  ADR supersedes that.)
+  chain. (PR #1 rejects chainless clients at construction as a stopgap — this ADR
+  supersedes that, but the supersession LANDS WITH THE BEHAVIORAL SLICE (the
+  `ReadContext.publicClient → source` wiring), not PR #1: implementing chainless
+  construction before the wiring would re-open a milder form of the confusing
+  first-use failure on `efs.raw`/`efs.eas` for chainless read-only clients — the
+  very failure the stopgap exists to prevent.)
 
 The same seam also serves indexer-backed reads at scale, test fixtures, and Ring-3
 sandboxed apps (which broker reads through a host proxy, never a direct node). Three
@@ -43,13 +47,29 @@ answer rather than discovering gaps via thrown errors.
 ```ts
 interface ReadSourceCapabilities {
   kind: 'live' | 'snapshot' | 'indexer' | 'fixture' | (string & Record<never, never>)
-  authoritative: boolean      // read CURRENT chain state this session? (existence/revocation observable)
-  supportsGetCode: boolean    // web3:// SSTORE2 + bytecode integrity + account detection
-  supportsEns: boolean        // ENS-lens resolution
+  // OBJECTIVE head-relationship (amended 2026-08-07, replacing the subjective
+  // `authoritative: boolean` — a live hosted RPC is not itself proof of current/
+  // complete/authoritative state; the endpoint is the STATED residual trust,
+  // never laundered through a boolean):
+  //   'head'    — follows its backend's chain head this session (RPC node)
+  //   'lagging' — follows a head that trails the chain (an indexer)
+  //   'pinned'  — a fixed capture (snapshot/fixture)
+  state: 'head' | 'lagging' | 'pinned' | (string & Record<never, never>)
+  pinnedBasis?: ReadBasis     // a pinned capture's OBSERVED basis (block/hash/asOf)
+  supportsGetCode: boolean    // CALLABLE behavior only — never stored-data presence
+  supportsEns: boolean        // ENS-lens resolution (callable behavior only)
   readContract: 'arbitrary' | 'known-subset'
   supportsRangeQueries: boolean  // directory/list/range reads (an indexer is richer here than a node)
-  snapshotBlock?: bigint
-  snapshotAsOf?: number
+}
+
+// Result-carried evidence (what was actually observed), distinct from both the
+// static capability above and the derived trust verdict (ADR-0015):
+type ReadBasis = {
+  chainId: number
+  blockNumber?: bigint
+  blockHash?: Hex
+  finality?: 'latest' | 'safe' | 'finalized' | (string & {})
+  asOf?: number
 }
 
 interface ReadSource {
@@ -109,10 +129,13 @@ future agents see the seam instead of hardcoding around it. Passing either today
 - **Retires the drift class.** Once reads depend on a source that owns its chain identity,
   "the provider drifted between read A and read B" stops being expressible — the
   per-call-site `assertChain` apparatus collapses into the source boundary over time.
-- **Phasing.** Foundational interfaces + adapters + chainless construction land in PR #1;
-  the snapshot serializer/recorder and the real indexer translation are additive later
-  with no breaking change. Pre-1.0, so the internal `ReadContext.publicClient → source`
-  rename is free; the published-surface commitment (the trust descriptor) is ADR-0015.
+- **Phasing** (amended 2026-08-07 to match the shipped changeset): foundational
+  interfaces + adapters land in PR #1; **chainless (`SourceConfig`) construction lands
+  with the ReadSource wiring in the behavioral slice** (the `ReadContext.publicClient →
+  source` rename), so the chainless-rejection stopgap stays in force until then — its
+  error message and rationale remain accurate. The snapshot serializer/recorder and the
+  real indexer translation are additive later with no breaking change. The
+  published-surface commitment (the trust descriptor) is ADR-0015 — now LANDED.
 - **Open follow-ups:** point-vs-list source routing (a composable `routingReadSource`,
   deferred), `verifyDeployment` over a non-authoritative source (throws `ReadUnsupported`),
   and ENS-lens over an offline source (requires an ENS-capable source or a pre-resolved

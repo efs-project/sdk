@@ -10,10 +10,11 @@
  * indexer's query language, synthesising the ABI-shaped return so the existing verbs decode
  * it unchanged. Today `readContract` throws `NotImplemented`.
  *
- * `authoritative: false` — an indexer LAGS chain head, so revocation freshness is `as-of` its
- * head, never `live` (ADR-0015). `supportsGetCode: false` — it has no EVM, so web3:// byte
- * reads need a live source; point reads route to a node, list/range reads to the indexer (a
- * composable router is a later slice).
+ * `state: 'lagging'` — an indexer tails a head that trails the chain, so revocation
+ * freshness is `as-of` its indexed head, never `current` (ADR-0015; a real impl carries the
+ * indexed head on each answer's `ReadBasis`). `supportsGetCode: false` — it has no EVM, so
+ * web3:// byte reads need a live source; point reads route to a node, list/range reads to
+ * the indexer (a composable router is a later slice).
  */
 
 import { NotImplemented } from '../../errors.js'
@@ -43,7 +44,7 @@ export function indexerReadSource(cfg: IndexerConfig): ReadSource {
     },
     capabilities: {
       kind: 'indexer',
-      authoritative: false, // an indexer lags head — revocation freshness is `as-of`, not `live`
+      state: 'lagging', // tails a trailing head — freshness is `as-of`, never `current`
       supportsGetCode: false, // no EVM — web3:// byte reads need a live source
       supportsEns: false,
       readContract: 'known-subset',

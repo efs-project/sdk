@@ -54,6 +54,7 @@ import type {
 import { attestationFor, attestationsForUIDs } from './attestations.js'
 import {
   type FileSystemItem,
+  LIVE_TRUST,
   type ReadContext,
   ZERO_UID,
   decodePropertyValue,
@@ -305,6 +306,7 @@ export async function locate(
   return {
     data,
     resolvedBy: placement.resolvedBy,
+    trust: LIVE_TRUST, // ADR-0015: every read today is a live chain-head read
     ...(placement.via !== undefined ? { via: placement.via } : {}),
   }
 }
@@ -377,6 +379,7 @@ export async function info(ctx: ReadContext, path: string, opts?: ReadOpts): Pro
       exists: false,
       resolvedBy: '0x0000000000000000000000000000000000000000' as Address,
       verified: 'unchecked',
+      trust: LIVE_TRUST, // the ABSENCE was determined against the live chain head too
       sourceUIDs: {},
     }
     // `expand:['attestations']` narrows `.attestations` to a NON-optional field at the
@@ -441,6 +444,7 @@ export async function info(ctx: ReadContext, path: string, opts?: ReadOpts): Pro
     ref,
     resolvedBy,
     verified: 'unchecked',
+    trust: LIVE_TRUST, // ADR-0015
     sourceUIDs,
     ...(contentType !== undefined ? { contentType } : {}),
     ...(size !== undefined ? { size } : {}),

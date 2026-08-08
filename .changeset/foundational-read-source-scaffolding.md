@@ -11,12 +11,16 @@ support lands additively rather than as a breaking retrofit:
   the live adapter (chain carried as DATA); `SnapshotReadSource` (offline) and
   `IndexerReadSource` are documented stubs with honest capabilities that throw `NotImplemented`
   on read.
-- **`TrustDescriptor`** — the reserved read-provenance shape (`source`/`existence`/`revocation`)
-  that becomes a required field on the rich read results in the behavioral slice.
+- **`TrustDescriptor`** — the read-provenance shape: a discriminated union on `freshness`
+  (`'current'` = chain-head; `'as-of'` = bounded-stale, carrying an `asOf` timestamp + the
+  observed `ReadBasis`; `'stale'` = content-only cache where on-chain existence/revocation
+  are UNKNOWN), each variant carrying a `source` drawn from the `ReadSourceCapabilities.kind`
+  vocabulary. Now a REQUIRED `trust` field on the rich read results (`EfsFile`/`FileInfo`/
+  `ReadResult`) — see the trust-provenance changeset.
 - **Reserved client-config slots** `fetch` and `verifier` (a `SignatureVerifier` seam for
   non-ECDSA / Ring-3 brokered crypto). Not yet honored — passing either throws `NotImplemented`
   (an explicit reserved signal, never a silent no-op).
 
-The `ReadContext` rename, wiring `ViemReadSource` into the read path, stamping `trust` on the
-result types, and chainless (`SourceConfig`) construction are the behavioral phases, gated on
-the ADR review.
+The `ReadContext` rename, wiring `ViemReadSource` into the read path, and chainless
+(`SourceConfig`) construction are the remaining behavioral phases (ADR-0014's amended
+phasing); the `trust` stamping has landed (ADR-0015 Accepted).

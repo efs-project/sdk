@@ -103,7 +103,15 @@ async function schemaRecordFor(
       args: [schemaUID],
     })
     return { uid: raw.uid, resolver: raw.resolver, revocable: raw.revocable, schema: raw.schema }
-  } catch {
+  } catch (err) {
+    // A `WrongChain` here is SYSTEMIC (the chain-guarded client failing closed
+    // on post-`readContext()` provider drift) — swallowing it would fulfill the
+    // attestation WITH a silently-missing `schemaRecord`, so the rejection scan
+    // in `attestationsForUIDs` never sees it (the depth-2 leg of the same hole
+    // 95c8c95 closed for `getAttestation`). Re-throw it; only genuine per-schema
+    // degradation (absent schema, decode failure, transient RPC error) stays
+    // `undefined`. Matching on `.code` mirrors the scan at :128-131.
+    if ((err as { code?: string } | undefined)?.code === 'WrongChain') throw err
     return undefined
   }
 }

@@ -4,10 +4,11 @@
  * the construction path's existing `publicClient as ReadContext['publicClient']` cast becomes
  * a typed constructor.
  *
- * `authoritative: true` — a live node reads current chain state, so existence and revocation
- * are observable (the trust descriptor stamps `live` from this). `chainId` is supplied
- * explicitly (chain-as-data) when the client is chainless; otherwise it falls back to the
- * bound `client.chain.id`.
+ * `state: 'head'` — a live node follows its backend's chain head, so existence and
+ * revocation answers are current as the endpoint sees them (the trust descriptor derives
+ * `freshness: 'current'`; the RPC endpoint is the stated residual trust — never a claim of
+ * canonical-chain authority). `chainId` is supplied explicitly (chain-as-data) when the
+ * client is chainless; otherwise it falls back to the bound `client.chain.id`.
  */
 
 import type { Address, Hex, PublicClient } from 'viem'
@@ -36,7 +37,7 @@ export function viemReadSource(client: PublicClient, opts?: { chainId?: number }
     getChainId: () => client.getChainId(),
     capabilities: {
       kind: 'live',
-      authoritative: true,
+      state: 'head',
       supportsGetCode: true,
       supportsEns: true,
       readContract: 'arbitrary',

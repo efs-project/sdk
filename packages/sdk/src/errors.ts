@@ -53,6 +53,10 @@ export type EfsErrorCode =
   /** The attester's `contentHash` claim is not a well-formed hash (an authoring bug,
    * not tampering). Thrown by the value sugar; `EfsFile` surfaces `'malformed-claim'`. */
   | 'MalformedClaim'
+  /** The read's trust freshness is below the caller's `requireTrust` floor
+   * (ADR-0015) — e.g. a content-only cached answer on the fail-closed sugar.
+   * The rich results surface the same state on `.trust` without throwing. */
+  | 'StaleTrust'
   /** A write is missing a required input the deployment/opts should supply
    * (e.g. a transport-definition anchor UID for a mirror scheme). */
   | 'MissingTransport'
@@ -396,6 +400,24 @@ export class MissingContentHash extends EfsError {
         : 'EFS read: no contentHash claim under this lens, so the bytes cannot be verified. Pass { verify: false } to read them unverified, or use read() to inspect the verification status.',
       { code: 'MissingContentHash' },
     )
+    if (path !== undefined) this.path = path
+  }
+}
+
+/** The read's trust freshness is below the caller's `requireTrust` floor
+ * (ADR-0015) — thrown by the fail-closed value sugar. Carries the descriptor so
+ * the caller sees exactly what the answer's provenance was. */
+export class StaleTrust extends EfsError {
+  override name = 'StaleTrust'
+  readonly path?: string
+  /** The offending descriptor (what the answer's provenance actually was). */
+  readonly trust: { freshness: string; source: string }
+  constructor(trust: { freshness: string; source: string }, require: string, path?: string) {
+    super(
+      `EFS read: the answer's trust freshness is '${trust.freshness}' (source '${trust.source}')${path !== undefined ? ` for '${path}'` : ''}, below the required '${require}' floor. Pass { requireTrust: 'any' } to accept it, or use read()/info() to inspect .trust without throwing.`,
+      { code: 'StaleTrust' },
+    )
+    this.trust = trust
     if (path !== undefined) this.path = path
   }
 }

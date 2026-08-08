@@ -1,6 +1,6 @@
 # ADR-0015: Read-trust provenance on read results
 
-**Status:** Proposed
+**Status:** Accepted (implemented 2026-08-07 — `trust` is a required field on `EfsFile`/`FileInfo`/`ReadResult`, `requireTrust`/`StaleTrust`/`assertTrust` live; amended before acceptance with the `basis` evidence layer, see the 2026-08-07 note)
 **Date:** 2026-06-23
 **Related:** PR #1, ADR-0006 (contentHash bare SHA-256), ADR-0008 (public API & semver), ADR-0014 (pluggable read source), planning/Designs/sdk-read-surface.md
 
@@ -51,13 +51,25 @@ Adopt the **hybrid** — extend the pattern the SDK already uses for content `ve
 
    ```ts
    type TrustDescriptor =
-     | { freshness: 'current'; source: 'live' | (string & Record<never, never>) }
-     | { freshness: 'as-of'; source: 'snapshot' | 'indexer' | (string & Record<never, never>); asOf: number }
-     | { freshness: 'stale'; source: 'snapshot' | (string & Record<never, never>) }
+     | { freshness: 'current'; source: 'live' | (string & Record<never, never>); basis?: ReadBasis }
+     | { freshness: 'as-of'; source: 'snapshot' | 'indexer' | (string & Record<never, never>); asOf: number; basis: ReadBasis }
+     | { freshness: 'stale'; source: 'snapshot' | (string & Record<never, never>); basis?: ReadBasis }
    //  current = chain-head (existence + revocation current now)   — safe
    //  as-of   = checked against a snapshot/indexer head at `asOf`  — bounded-stale
    //  stale   = content-only cache: existence + revocation UNKNOWN — the footgun, named
    ```
+
+   **Amendment (2026-08-07, pre-acceptance — the `basis` evidence layer.)** The
+   provenance story is THREE layers, one coherent chain: source **capability**
+   (static — `ReadSourceCapabilities.state: 'head' | 'lagging' | 'pinned'`,
+   replacing the subjective `authoritative: boolean`) → observed **basis**
+   (per-answer evidence — `ReadBasis`: chainId, block number/hash, finality,
+   asOf) → this derived **verdict** (`freshness`). Derivation: `'head'` →
+   `current`; `'lagging'`/`'pinned'` with a usable basis → `as-of` (the `asOf`
+   copied from it); `'pinned'` without one → `stale`. The honesty rule: a
+   `'head'` source claims only that it follows ITS BACKEND's head — the RPC
+   endpoint is the stated residual trust, and no boolean ever asserts
+   canonical-chain authority the SDK cannot prove.
 
    Content authenticity stays **verify-or-throw** at the boundary (unchanged); `trust` only
    reports the genuinely-uncertain part (freshness of existence + revocation).
