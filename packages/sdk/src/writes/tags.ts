@@ -152,8 +152,15 @@ export function makeTagsNs(deps: TagsNsDeps): TagsNs {
       // plan with a UID absent on the deployment chain. Same guard the submit runs per layer.
       await ctx.assertChain?.()
       const dep = deps.getDeployment()
+      // The multi-RPC /tags/<name> walk goes through the drift-GUARDED client
+      // (same as every other planner): `assertChain` above samples ONCE, so a
+      // mutable provider could switch chains mid-walk and resolve a chain-B
+      // definition UID that poisons the chain-A plan (revert, or on a UID
+      // collision, tagging the wrong definition). The guard re-asserts the
+      // live chain around each read.
+      const pc = deps.guardReadClient?.(dep.chainId) ?? deps.publicClient
       const definitionUID = await resolveTagDefinition(
-        deps.publicClient as unknown as ResolvePublicClient,
+        pc as unknown as ResolvePublicClient,
         dep.contracts.indexer,
         definition,
       )

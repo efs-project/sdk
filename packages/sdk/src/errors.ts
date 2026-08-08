@@ -275,6 +275,31 @@ export class RevokeUnconfirmed extends EfsError {
   }
 }
 
+/** An EFSIndexer `index`/`indexRevocation` tx BROADCAST but its receipt could
+ * not be confirmed (RPC loss, provider drift during the wait) — the tx may
+ * STILL MINE. Thrown by the indexer leg (`efs.index(uid)` and the redirect
+ * verbs' follow-up legs); the redirect verbs wrap it into
+ * {@link IndexingIncomplete} with the hash preserved on `indexTx`. A CONFIRMED
+ * on-chain revert is NOT this error — that propagates as `ContractReverted`. */
+export class IndexUnconfirmed extends EfsError {
+  override name = 'IndexUnconfirmed'
+  /** Which indexer leg broadcast. */
+  readonly op: 'index' | 'indexRevocation'
+  /** The UID the leg was indexing. */
+  readonly uid: Hex
+  /** The broadcast indexer transaction whose receipt is unconfirmed. */
+  readonly txHash: Hex
+  constructor(args: { op: 'index' | 'indexRevocation'; uid: Hex; txHash: Hex; cause: unknown }) {
+    super(
+      `EFS indexer: the ${args.op}('${args.uid}') tx ${args.txHash} was broadcast but its receipt could not be confirmed — it may STILL MINE. Reconcile before resending: check the tx's fate, or re-run efs.index('${args.uid}') once the RPC recovers (it re-reads on-chain state and only sends what is still missing).`,
+      { code: 'PartialBatchFailure', cause: args.cause },
+    )
+    this.op = args.op
+    this.uid = args.uid
+    this.txHash = args.txHash
+  }
+}
+
 export class IndexingIncomplete extends EfsError {
   override name = 'IndexingIncomplete'
   /** Which indexing leg failed. */
@@ -285,21 +310,28 @@ export class IndexingIncomplete extends EfsError {
   readonly txHash?: Hex
   /** The partial write receipt (the `index` op — carries the landed steps). */
   readonly receipt?: WriteReceiptLike
+  /** The IN-FLIGHT indexer tx: present when the index/indexRevocation tx
+   * BROADCAST but its receipt could not be confirmed — it may still mine, so
+   * reconcile its fate (or re-run `efs.index(uid)`, which re-reads state)
+   * before resending. Absent when the leg never broadcast. */
+  readonly indexTx?: Hex
   constructor(args: {
     op: 'index' | 'indexRevocation'
     uid: Hex
     txHash?: Hex
     receipt?: WriteReceiptLike
+    indexTx?: Hex
     cause?: unknown
   }) {
     super(
-      `EFS redirects: the ${args.op === 'index' ? 'REDIRECT landed but its EFSIndexer.index(uid)' : 'revoke landed but its EFSIndexer.indexRevocation(uid)'} follow-up did not — the write is valid but not yet ${args.op === 'index' ? 'discoverable' : 'filtered from'} lens-scoped reads. Recovery is safe and permissionless: call efs.index('${args.uid}') from any funded account (idempotent).`,
+      `EFS redirects: the ${args.op === 'index' ? 'REDIRECT landed but its EFSIndexer.index(uid)' : 'revoke landed but its EFSIndexer.indexRevocation(uid)'} follow-up did not — the write is valid but not yet ${args.op === 'index' ? 'discoverable' : 'filtered from'} lens-scoped reads. Recovery is safe and permissionless: call efs.index('${args.uid}') from any funded account (idempotent).${args.indexTx !== undefined ? ` The ${args.op} tx ${args.indexTx} WAS broadcast and may still mine — check its fate first (a landed tx makes the repair report 'already-indexed').` : ''}`,
       { code: 'PartialBatchFailure', cause: args.cause },
     )
     this.op = args.op
     this.uid = args.uid
     if (args.txHash !== undefined) this.txHash = args.txHash
     if (args.receipt !== undefined) this.receipt = args.receipt
+    if (args.indexTx !== undefined) this.indexTx = args.indexTx
   }
 }
 

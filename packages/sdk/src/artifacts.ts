@@ -153,6 +153,17 @@ function parseEnvelope(json: string, artifact: ArtifactHeader['artifact']): Enve
   if (typeof env.data !== 'object' || env.data === null) {
     throw new MalformedArtifact('missing the data payload')
   }
+  // `ext` is RESERVED at the payload top level: the ENVELOPE owns the extension
+  // bag (the serializers hoist a parsed `.ext` back to the envelope, and the
+  // parsers attach `env.ext` onto the returned object) — a payload-level `ext`
+  // would be indistinguishable from the caller's envelope bag on the parsed
+  // object. Our serializers never write one; a blob carrying it is corrupt or
+  // crafted, and must die at the boundary rather than masquerade.
+  if ('ext' in env.data) {
+    throw new MalformedArtifact(
+      "payload uses the reserved top-level key 'ext' (the envelope owns the extension bag)",
+    )
+  }
   // `ext`, when present, must be a plain record — the signature promises
   // `Record<string, unknown>`, and returning `null`/an array through the spread
   // would fail consumers past the documented MalformedArtifact boundary.
@@ -166,11 +177,21 @@ function parseEnvelope(json: string, artifact: ArtifactHeader['artifact']): Enve
 }
 
 /** Serialize a {@link DataRef} for DURABLE storage (localStorage, a DB, a URL
- * payload). `ext` carries opaque caller extensions, preserved verbatim. */
-export function serializeDataRef(ref: DataRef, ext?: Record<string, unknown>): string {
-  // The brand is type-level; strip nothing — unknown future fields ride along.
-  const { __brand, ...data } = ref
-  return serialize('DataRef', data, ext)
+ * payload). `ext` carries opaque caller extensions, preserved verbatim — and
+ * when omitted, an `.ext` bag already on the ref (one returned by
+ * {@link parseDataRef}) is re-emitted at the ENVELOPE, so the natural
+ * read-modify-write round-trip `serializeDataRef(parseDataRef(json))` keeps
+ * the bag where it was. `ext` is reserved to the envelope: it is never
+ * written into the payload (and {@link parseDataRef} rejects payloads that
+ * carry it). */
+export function serializeDataRef(
+  ref: DataRef & { ext?: Record<string, unknown> },
+  ext?: Record<string, unknown>,
+): string {
+  // The brand is type-level and `ext` is ENVELOPE metadata — strip both from
+  // the payload; unknown future fields still ride along verbatim.
+  const { __brand, ext: parsedExt, ...data } = ref
+  return serialize('DataRef', data, ext ?? parsedExt)
 }
 
 /** The DataRef ID-field shape rule, shared by `parseDataRef` and the receipt's
@@ -225,12 +246,16 @@ export function parseDataRef(json: string): DataRef & { ext?: Record<string, unk
 }
 
 /** Serialize a {@link WriteReceipt} for DURABLE storage — the resume/recovery
- * artifact (`steps` carries the landed UID map). */
+ * artifact (`steps` carries the landed UID map). Same `ext` rule as
+ * {@link serializeDataRef}: an omitted `ext` falls back to the receipt's own
+ * `.ext` bag (a parsed receipt), re-emitted at the ENVELOPE — never into the
+ * payload. */
 export function serializeWriteReceipt(
-  receipt: WriteReceipt,
+  receipt: WriteReceipt & { ext?: Record<string, unknown> },
   ext?: Record<string, unknown>,
 ): string {
-  return serialize('WriteReceipt', receipt, ext)
+  const { ext: parsedExt, ...data } = receipt
+  return serialize('WriteReceipt', data, ext ?? parsedExt)
 }
 
 /** Parse a persisted {@link WriteReceipt}. Bigint fields (none today; future

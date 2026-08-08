@@ -43,7 +43,7 @@ import {
   verifyAttestationUID,
 } from './eas/index.js'
 import { type EasVerbs, type RevocationRequest, makeEasVerbs } from './eas/verbs.js'
-import { EfsError, NotImplemented, WalletRequired } from './errors.js'
+import { EfsError, IndexUnconfirmed, NotImplemented, WalletRequired } from './errors.js'
 import { toJSON } from './json.js'
 import { type Lens, identity, lens, resolveLens } from './lenses/resolve.js'
 import {
@@ -914,7 +914,17 @@ export function createEfsV1Client(config: EfsClientConfig): EfsClient {
       ...(wallet.account !== undefined ? { account: wallet.account } : {}),
       ...(wallet.chain !== undefined ? { chain: wallet.chain } : {}),
     })) as Hex
-    await waitForReceipt(hash)
+    try {
+      await waitForReceipt(hash)
+    } catch (err) {
+      // A CONFIRMED on-chain revert is a definite outcome — propagate raw
+      // (ContractReverted names the tx). Anything else (RPC loss, drift during
+      // the wait) is UNKNOWN: the tx may still mine, and discarding `hash`
+      // would leave callers unable to reconcile its fate/cost before the
+      // idempotent repair — preserve it on IndexUnconfirmed.
+      if ((err as { code?: string } | undefined)?.code === 'ContractReverted') throw err
+      throw new IndexUnconfirmed({ op: fn, uid: uidArg, txHash: hash, cause: err })
+    }
     return hash
   }
   const waitForReceipt = async (txHash: Hex): Promise<void> => {

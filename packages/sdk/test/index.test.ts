@@ -10,6 +10,7 @@ import {
 } from 'viem'
 import { sepolia } from 'viem/chains'
 import { describe, expect, it } from 'vitest'
+import { IndexUnconfirmed } from '../src/errors.js'
 import {
   DeploymentNotFound,
   MaxLensesExceeded,
@@ -426,7 +427,11 @@ describe('efs.index (repair verb) — honesty regressions', () => {
 
   /** Build a provider whose eth_call dispatches on (to, selector) and whose
    * tx/receipt methods drive the write leg. */
-  function harness(opts: { attSchema: `0x${string}`; receiptStatus: '0x0' | '0x1' }) {
+  function harness(opts: {
+    attSchema: `0x${string}`
+    receiptStatus: '0x0' | '0x1'
+    receiptError?: boolean
+  }) {
     const selGetAttestation = toFunctionSelector('getAttestation(bytes32)')
     const selIsIndexed = toFunctionSelector('isIndexed(bytes32)')
     const selIsRevoked = toFunctionSelector('isRevoked(bytes32)')
@@ -485,22 +490,25 @@ describe('efs.index (repair verb) — honesty regressions', () => {
           throw new Error(`unhandled eth_call selector ${sel}`)
         },
         eth_sendTransaction: () => U(0x77),
-        eth_getTransactionReceipt: () => ({
-          transactionHash: U(0x77),
-          transactionIndex: '0x0',
-          blockHash: U(0xb10c),
-          blockNumber: '0x1',
-          from: A(0xbee),
-          to: DEP.contracts.indexer,
-          cumulativeGasUsed: '0x5208',
-          gasUsed: '0x5208',
-          contractAddress: null,
-          logs: [],
-          logsBloom: `0x${'0'.repeat(512)}`,
-          status: opts.receiptStatus,
-          effectiveGasPrice: '0x1',
-          type: '0x2',
-        }),
+        eth_getTransactionReceipt: () => {
+          if (opts.receiptError) throw new Error('rpc lost mid-wait')
+          return {
+            transactionHash: U(0x77),
+            transactionIndex: '0x0',
+            blockHash: U(0xb10c),
+            blockNumber: '0x1',
+            from: A(0xbee),
+            to: DEP.contracts.indexer,
+            cumulativeGasUsed: '0x5208',
+            gasUsed: '0x5208',
+            contractAddress: null,
+            logs: [],
+            logsBloom: `0x${'0'.repeat(512)}`,
+            status: opts.receiptStatus,
+            effectiveGasPrice: '0x1',
+            type: '0x2',
+          }
+        },
         eth_estimateGas: () => '0x5208',
         eth_getBlockByNumber: () => ({
           number: '0x1',
@@ -535,6 +543,21 @@ describe('efs.index (repair verb) — honesty regressions', () => {
     const out = await efs.index(U(0xabc))
     expect(out).toEqual({ status: 'already-indexed' })
     expect(provider.callCount('eth_sendTransaction')).toBe(0)
+  })
+
+  it('a lost receipt AFTER broadcast throws IndexUnconfirmed carrying the in-flight tx hash', async () => {
+    // r3740769007: the tx broadcast (eth_sendTransaction succeeded) but the
+    // receipt wait fails — outcome UNKNOWN, the tx may still mine. The hash
+    // must survive so the caller can reconcile before resending.
+    const { efs } = harness({
+      attSchema: DEP.schemas.redirect,
+      receiptStatus: '0x1',
+      receiptError: true,
+    })
+    const err = await efs.index(U(0xabc)).catch((e) => e)
+    expect(err).toBeInstanceOf(IndexUnconfirmed)
+    expect((err as IndexUnconfirmed).op).toBe('index')
+    expect((err as IndexUnconfirmed).txHash).toBe(U(0x77))
   })
 
   it('a mined-but-REVERTED indexer tx throws (ContractReverted), never a success verdict', async () => {

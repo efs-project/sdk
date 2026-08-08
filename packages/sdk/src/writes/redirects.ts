@@ -32,7 +32,7 @@
 
 import type { Hex } from 'viem'
 import type { EfsDeployment } from '../chain/deployments.js'
-import { EfsError, IndexingIncomplete, RevokeUnconfirmed } from '../errors.js'
+import { EfsError, IndexUnconfirmed, IndexingIncomplete, RevokeUnconfirmed } from '../errors.js'
 import { type ReadContext, resolveAttesters } from '../reads/context.js'
 import {
   canonicalizeSameAs,
@@ -216,6 +216,9 @@ export function makeRedirectsNs(deps: RedirectsNsDeps): RedirectsNs {
         throw new IndexingIncomplete({
           op: 'index',
           uid: redirectUID,
+          // The index tx may have BROADCAST before the confirmation failed —
+          // keep its hash so callers can reconcile before the repair.
+          ...(err instanceof IndexUnconfirmed ? { indexTx: err.txHash } : {}),
           receipt: {
             ...receipt,
             status: 'partial',
@@ -266,6 +269,9 @@ export function makeRedirectsNs(deps: RedirectsNsDeps): RedirectsNs {
           op: 'indexRevocation',
           uid: redirectUID,
           txHash: revokeTx,
+          // Same hash preservation as set(): a broadcast-but-unconfirmed
+          // indexRevocation tx may still mine — never discard it.
+          ...(err instanceof IndexUnconfirmed ? { indexTx: err.txHash } : {}),
           cause: err,
         })
       }

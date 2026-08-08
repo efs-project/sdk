@@ -26,7 +26,12 @@ import type { EfsDeployment, EfsSchemaUIDs } from '../src/chain/deployments.js'
 import { attestedEventAbi } from '../src/eas/abi.js'
 import { SchemaEncoder } from '../src/eas/schema-encoder.js'
 import { EFS_SCHEMA_FIELDS } from '../src/eas/schemas.js'
-import { IndexingIncomplete, RedirectScanTruncated, RevokeUnconfirmed } from '../src/errors.js'
+import {
+  IndexUnconfirmed,
+  IndexingIncomplete,
+  RedirectScanTruncated,
+  RevokeUnconfirmed,
+} from '../src/errors.js'
 import type { ReadContext } from '../src/reads/context.js'
 import {
   DEFAULT_REDIRECT_HOPS,
@@ -765,7 +770,7 @@ describe('makeRedirectsNs', () => {
   function harness(
     chain: ReadContext['publicClient'],
     ctx = makeSubmitCtx().ctx,
-    opts?: { failIndexerCall?: boolean; failWaitForReceipt?: Error },
+    opts?: { failIndexerCall?: boolean; failIndexerCallWith?: Error; failWaitForReceipt?: Error },
   ) {
     const indexerCalls: { fn: string; uid: Hex }[] = []
     const waited: Hex[] = []
@@ -775,6 +780,7 @@ describe('makeRedirectsNs', () => {
       submitContext: () => ctx,
       revoke: async () => uid(0xfee),
       indexerCall: async (fn, u) => {
+        if (opts?.failIndexerCallWith) throw opts.failIndexerCallWith
         if (opts?.failIndexerCall) throw new Error('rpc down')
         indexerCalls.push({ fn, uid: u })
         return uid(0x1dc)
@@ -832,6 +838,42 @@ describe('makeRedirectsNs', () => {
     expect(ii.receipt?.status).toBe('partial')
     expect(ii.receipt?.steps.at(-1)).toEqual({ id: 'index', uid: uid(0xd000), done: false })
     expect(ii.code).toBe('PartialBatchFailure')
+  })
+
+  it('set preserves the in-flight index tx hash (IndexUnconfirmed → IndexingIncomplete.indexTx)', async () => {
+    // r3740769007: when the index tx BROADCAST but its receipt wait failed, the
+    // hash must ride the partial-state error — callers reconcile its fate/cost
+    // before the idempotent repair. The leg throws IndexUnconfirmed; set()
+    // wraps it with the hash preserved.
+    const { ctx } = makeSubmitCtx()
+    const inflight = new IndexUnconfirmed({
+      op: 'index',
+      uid: uid(0xd000),
+      txHash: uid(0x77),
+      cause: new Error('rpc lost mid-wait'),
+    })
+    const { ns } = harness(makeChain({}), ctx, { failIndexerCallWith: inflight })
+    const err = await ns.set(FROM, TO).catch((e) => e)
+    expect(err).toBeInstanceOf(IndexingIncomplete)
+    const ii = err as IndexingIncomplete
+    expect(ii.uid).toBe(uid(0xd000))
+    expect(ii.indexTx).toBe(uid(0x77)) // the in-flight indexer tx, never discarded
+    expect(ii.receipt?.status).toBe('partial')
+  })
+
+  it('remove preserves the in-flight indexRevocation tx hash alongside the revoke tx', async () => {
+    const inflight = new IndexUnconfirmed({
+      op: 'indexRevocation',
+      uid: uid(0xabc),
+      txHash: uid(0x78),
+      cause: new Error('rpc lost mid-wait'),
+    })
+    const { ns } = harness(makeChain({}), makeSubmitCtx().ctx, { failIndexerCallWith: inflight })
+    const err = await ns.remove(uid(0xabc)).catch((e) => e)
+    expect(err).toBeInstanceOf(IndexingIncomplete)
+    const ii = err as IndexingIncomplete
+    expect(ii.txHash).toBe(uid(0xfee)) // the landed revoke leg
+    expect(ii.indexTx).toBe(uid(0x78)) // the in-flight indexer leg
   })
 
   it('set defaults kind to sameAs', async () => {

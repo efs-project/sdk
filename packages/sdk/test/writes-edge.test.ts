@@ -350,6 +350,34 @@ describe('makeTagsNs', () => {
     expect(calls).toHaveLength(0) // nothing submitted
   })
 
+  it('add routes the definition-resolution walk through the chain-pinned client', async () => {
+    // r3740769002: the /tags/<name> walk FEEDS the plan, so it must go through
+    // `guardReadClient(dep.chainId)` like the mirror/property planners —
+    // `assertChain` samples once, and a provider drifting mid-walk could
+    // resolve a chain-B definition UID into the chain-A plan. Prove the raw
+    // fallback is untouched when the guard is supplied.
+    const { ctx, calls } = makeSubmitCtx()
+    const DEF_ANCHOR = uid(0x6aa)
+    const guarded = makeReadClient((fn) => {
+      if (fn === 'rootAnchorUID') return uid(0x1)
+      if (fn === 'resolvePath') return DEF_ANCHOR
+      return uid(0)
+    })
+    const tags = makeTagsNs({
+      getDeployment: () => deployment,
+      guardReadClient: () => guarded as never,
+      publicClient: makeReadClient(() => {
+        throw new Error('unguarded publicClient used by add definition walk')
+      }) as never,
+      submitContext: () => ctx,
+      attester: () => ATTESTER,
+      revoke: async () => uid(0xfee),
+    })
+    await tags.add(TARGET, 'nsfw')
+    const entry = calls[0]?.[0]?.data[0]
+    expect(entry?.data).toBe(tagEnc.encodeData([DEF_ANCHOR, DEFAULT_TAG_WEIGHT]))
+  })
+
   it('remove revokes the right UID under the TAG schema', async () => {
     let revokeCall: { schema: Hex; uid: Hex } | undefined
     const tags = makeTagsNs({

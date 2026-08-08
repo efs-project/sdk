@@ -291,6 +291,45 @@ describe('optional typed receipt fields validate when present (review r374056398
   })
 })
 
+describe('envelope ext round-trip (review r3740769006)', () => {
+  it('serializeDataRef(parseDataRef(json)) keeps the bag at the ENVELOPE, never in the payload', () => {
+    const first = serializeDataRef(REF, { relayHint: 'https://r.example' })
+    const back = parseDataRef(first)
+    const second = serializeDataRef(back) // no explicit ext — the parsed bag rides
+    const raw = JSON.parse(second) as { data: Record<string, unknown>; ext?: unknown }
+    expect(raw.ext).toEqual({ relayHint: 'https://r.example' })
+    expect('ext' in raw.data).toBe(false) // never demoted into the payload
+    expect(parseDataRef(second).ext).toEqual({ relayHint: 'https://r.example' })
+  })
+
+  it('an explicit ext argument overrides the parsed bag', () => {
+    const back = parseDataRef(serializeDataRef(REF, { a: 1 }))
+    const out = parseDataRef(serializeDataRef(back, { b: 2 }))
+    expect(out.ext).toEqual({ b: 2 })
+  })
+
+  it('serializeWriteReceipt(parseWriteReceipt(json)) keeps the bag too', () => {
+    const back = parseWriteReceipt(serializeWriteReceipt(RECEIPT, { resume: true }))
+    const second = serializeWriteReceipt(back)
+    const raw = JSON.parse(second) as { data: Record<string, unknown>; ext?: unknown }
+    expect(raw.ext).toEqual({ resume: true })
+    expect('ext' in raw.data).toBe(false)
+    expect(parseWriteReceipt(second).ext).toEqual({ resume: true })
+  })
+
+  it("a payload-level 'ext' key is rejected (reserved to the envelope)", () => {
+    // A crafted payload `ext` would surface on the parsed object exactly like
+    // the caller's own envelope bag — MalformedArtifact at the boundary.
+    const crafted = serializeDataRef(REF).replace('"data":{', '"data":{"ext":{"evil":1},')
+    expect(() => parseDataRef(crafted)).toThrowError(/reserved top-level key 'ext'/)
+    const craftedReceipt = serializeWriteReceipt(RECEIPT).replace(
+      '"data":{',
+      '"data":{"ext":{"evil":1},',
+    )
+    expect(() => parseWriteReceipt(craftedReceipt)).toThrowError(/reserved top-level key 'ext'/)
+  })
+})
+
 describe('reason discriminant + ext shape (reviews r3740620191 / r3740620193)', () => {
   it('rejects an unknown reason.why literal and a selected↔mechanism mismatch', async () => {
     const { parseWriteReceipt, serializeWriteReceipt, MalformedArtifact } = await import(
