@@ -352,4 +352,53 @@ describe.skipIf(!liveEnabled)('fork write→read round-trip (live deploy)', () =
     const readBack = await efs.fs.readBytes(onchainPath)
     expect(new Uint8Array(readBack)).toEqual(onchainBytes)
   }, 300_000)
+
+  // ── REDIRECT indexing lifecycle against the REAL EFSIndexer ─────────────────
+  //
+  // The canonical regression for review r3739110406: AliasResolver does NOT
+  // populate the referencing index, so without the SDK's follow-up index(uid)
+  // a set() redirect is INVISIBLE to get(), and without indexRevocation(uid) a
+  // remove()d redirect keeps being SERVED. Pre-populated unit mocks cannot see
+  // this — only the real indexer can.
+  it('redirects: set → get → remove → get(undefined) with the real indexer', async () => {
+    const account = privateKeyToAccount(ACCOUNT_0_PK)
+    const transport = http(NODE_URL, { timeout: 90_000 })
+    const publicClient = createPublicClient({ chain: localChain, transport })
+    const walletClient = createWalletClient({ account, chain: localChain, transport })
+    const efs = createEfsClient({ publicClient, walletClient, deployments })
+
+    // Two DATA identities (sameAs requires DATA→DATA endpoints, AliasResolver).
+    const rid = `${runId}-rd`
+    const w1 = await efs.fs.write(`/redirect-a-${rid}.txt`, new TextEncoder().encode('a'), {
+      mirrors: [mirrorUrl],
+    })
+    const w2 = await efs.fs.write(`/redirect-b-${rid}.txt`, new TextEncoder().encode('b'), {
+      mirrors: [mirrorUrl],
+    })
+    const d1 = w1.data?.uid as `0x${string}`
+    const d2 = w2.data?.uid as `0x${string}`
+
+    // set() lands the REDIRECT and its index(uid) follow-up (2 txs).
+    const setReceipt = await efs.redirects.set(d1, d2) // sameAs
+    const redirectUID = setReceipt.steps.find((s) => s.id === 'redirect')?.uid as `0x${string}`
+    expect(redirectUID).toMatch(/^0x[0-9a-f]{64}$/)
+    expect(setReceipt.steps.at(-1)).toMatchObject({ id: 'index', done: true })
+
+    // Discoverable through the lens-scoped referencing read — fails without the
+    // index leg (the resolver never populates the index).
+    const got = await efs.redirects.get(d1)
+    expect(got?.to).toBe(d2)
+    expect(got?.kind).toBe('sameAs')
+    expect(got?.redirectUID).toBe(redirectUID)
+
+    // Repair verb is idempotent: already indexed ⇒ no-op.
+    const repair = await efs.index(redirectUID)
+    expect(repair.status).toBe('already-indexed')
+
+    // remove() revokes AND syncs the indexer's revocation mirror — without
+    // indexRevocation the filtered read would keep serving the redirect.
+    const removeReceipt = await efs.redirects.remove(redirectUID)
+    expect(removeReceipt.indexRevocationTx).toMatch(/^0x[0-9a-f]{64}$/)
+    expect(await efs.redirects.get(d1)).toBeUndefined()
+  }, 300_000)
 })

@@ -62,3 +62,4 @@ Compact, scannable — one screen per ADR. Copy `_template.md`. The next number 
 - [ADR-0014 — Pluggable read source; the chain bound as data](./0014-pluggable-read-source-and-chain-as-data.md)
 - [ADR-0015 — Read-trust provenance on read results](./0015-read-trust-provenance.md)
 - [ADR-0016 — `contentHash` is a multibase-multihash string (specs/10 conformance)](./0016-content-hash-multibase-multihash.md)
+- [ADR-0017 — REDIRECT writes complete the EFSIndexer indexing lifecycle](./0017-redirect-indexing-lifecycle.md)

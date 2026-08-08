@@ -201,6 +201,51 @@ export class PartialBatchFailure extends EfsError {
   }
 }
 
+/**
+ * The attestation LANDED but its follow-up indexing tx did not — the write is
+ * fully valid in EAS, only DISCOVERY is pending (lens-scoped reads route through
+ * `EFSIndexer`'s referencing index, which REDIRECT's resolver does not populate).
+ * Distinct from {@link WriteRevertedError}: nothing is half-WRITTEN, and the
+ * retry is always safe — `EFSIndexer.index/indexRevocation` are permissionless +
+ * idempotent, so `efs.index(uid)` (from ANY funded account) completes it.
+ * Carries the landed handle so nothing is lost.
+ */
+export class IndexingIncomplete extends EfsError {
+  override name = 'IndexingIncomplete'
+  /** Which indexing leg failed. */
+  readonly op: 'index' | 'indexRevocation'
+  /** The landed attestation's UID (the `efs.index(uid)` repair handle). */
+  readonly uid: Hex
+  /** The landed leg's tx hash (the revoke tx, for the `indexRevocation` op). */
+  readonly txHash?: Hex
+  /** The partial write receipt (the `index` op — carries the landed steps). */
+  readonly receipt?: WriteReceiptLike
+  constructor(args: {
+    op: 'index' | 'indexRevocation'
+    uid: Hex
+    txHash?: Hex
+    receipt?: WriteReceiptLike
+    cause?: unknown
+  }) {
+    super(
+      `EFS redirects: the ${args.op === 'index' ? 'REDIRECT landed but its EFSIndexer.index(uid)' : 'revoke landed but its EFSIndexer.indexRevocation(uid)'} follow-up did not — the write is valid but not yet ${args.op === 'index' ? 'discoverable' : 'filtered from'} lens-scoped reads. Recovery is safe and permissionless: call efs.index('${args.uid}') from any funded account (idempotent).`,
+      { code: 'PartialBatchFailure', cause: args.cause },
+    )
+    this.op = args.op
+    this.uid = args.uid
+    if (args.txHash !== undefined) this.txHash = args.txHash
+    if (args.receipt !== undefined) this.receipt = args.receipt
+  }
+}
+
+/** Structural stand-in for {@link import('./types.js').WriteReceipt} — typed
+ * loosely here to avoid an errors→types import cycle. */
+type WriteReceiptLike = {
+  steps: Array<{ id: string; uid?: Hex; done: boolean }>
+  signatureCount: number
+  status?: string
+}
+
 /** No file is placed at a path under the read's lens. A byte read (`fs.cat`)
  * needs an active placement; resolve/stat instead model absence as `null` /
  * `{exists:false}`. Carries the path so a caller can surface a precise message. */

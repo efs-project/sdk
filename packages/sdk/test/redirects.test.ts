@@ -26,6 +26,7 @@ import type { EfsDeployment, EfsSchemaUIDs } from '../src/chain/deployments.js'
 import { attestedEventAbi } from '../src/eas/abi.js'
 import { SchemaEncoder } from '../src/eas/schema-encoder.js'
 import { EFS_SCHEMA_FIELDS } from '../src/eas/schemas.js'
+import { IndexingIncomplete } from '../src/errors.js'
 import type { ReadContext } from '../src/reads/context.js'
 import {
   DEFAULT_REDIRECT_HOPS,
@@ -705,19 +706,39 @@ describe('makeRedirectsNs', () => {
   const FROM = uid(0x100)
   const TO = uid(0x200)
 
-  const nsWith = (chain: ReadContext['publicClient'], ctx = makeSubmitCtx().ctx) =>
-    makeRedirectsNs({
+  /** Namespace under test with a recording indexer-lifecycle harness. */
+  function harness(
+    chain: ReadContext['publicClient'],
+    ctx = makeSubmitCtx().ctx,
+    opts?: { failIndexerCall?: boolean },
+  ) {
+    const indexerCalls: { fn: string; uid: Hex }[] = []
+    const waited: Hex[] = []
+    const ns = makeRedirectsNs({
       getDeployment: () => deployment,
       readContext: () => ctxWith(chain),
       submitContext: () => ctx,
       revoke: async () => uid(0xfee),
+      indexerCall: async (fn, u) => {
+        if (opts?.failIndexerCall) throw new Error('rpc down')
+        indexerCalls.push({ fn, uid: u })
+        return uid(0x1dc)
+      },
+      waitForReceipt: async (tx) => {
+        waited.push(tx)
+      },
     })
+    return { ns, indexerCalls, waited }
+  }
+  const nsWith = (chain: ReadContext['publicClient'], ctx = makeSubmitCtx().ctx) =>
+    harness(chain, ctx).ns
 
-  it('set authors a REDIRECT (refUID = from, data = (to, kind)) — one signature', async () => {
+  it('set authors a REDIRECT then sends index(uid) — two prompts, index step on the receipt', async () => {
     const { ctx, calls } = makeSubmitCtx()
-    const ns = nsWith(makeChain({}), ctx)
+    const { ns, indexerCalls } = harness(makeChain({}), ctx)
     const receipt = await ns.set(FROM, TO, { kind: 'supersededBy' })
-    expect(receipt.signatureCount).toBe(1)
+    // 1 multiAttest layer + 1 index tx = 2 signatures, honestly counted.
+    expect(receipt.signatureCount).toBe(2)
     const request = calls[0]?.[0]
     expect(request?.schema).toBe(SCHEMAS.redirect)
     const entry = request?.data[0]
@@ -729,6 +750,32 @@ describe('makeRedirectsNs', () => {
     ) as [Hex, number]
     expect(target).toBe(TO)
     expect(Number(k)).toBe(REDIRECT_KIND.supersededBy)
+    // The follow-up discovery leg targeted the minted REDIRECT UID.
+    const mintedUID = uid(0xd000) // first Attested log in the mock
+    expect(indexerCalls).toEqual([{ fn: 'index', uid: mintedUID }])
+    expect(receipt.steps.at(-1)).toEqual({ id: 'index', uid: mintedUID, done: true })
+  })
+
+  it('set { index: false } opts out: one prompt, no index leg — caller owns eventual indexing', async () => {
+    const { ctx } = makeSubmitCtx()
+    const { ns, indexerCalls } = harness(makeChain({}), ctx)
+    const receipt = await ns.set(FROM, TO, { index: false })
+    expect(receipt.signatureCount).toBe(1)
+    expect(indexerCalls).toEqual([])
+    expect(receipt.steps.find((s) => s.id === 'index')).toBeUndefined()
+  })
+
+  it('set throws IndexingIncomplete when the attest landed but the index tx failed — carries the UID + partial receipt', async () => {
+    const { ctx } = makeSubmitCtx()
+    const { ns } = harness(makeChain({}), ctx, { failIndexerCall: true })
+    const err = await ns.set(FROM, TO).catch((e) => e)
+    expect(err).toBeInstanceOf(IndexingIncomplete)
+    const ii = err as IndexingIncomplete
+    expect(ii.op).toBe('index')
+    expect(ii.uid).toBe(uid(0xd000)) // the LANDED redirect UID is never lost
+    expect(ii.receipt?.status).toBe('partial')
+    expect(ii.receipt?.steps.at(-1)).toEqual({ id: 'index', uid: uid(0xd000), done: false })
+    expect(ii.code).toBe('PartialBatchFailure')
   })
 
   it('set defaults kind to sameAs', async () => {
@@ -747,20 +794,54 @@ describe('makeRedirectsNs', () => {
     ).rejects.toMatchObject({ code: 'InvalidArgument' })
   })
 
-  it('remove revokes the right UID under the REDIRECT schema', async () => {
+  it('remove revokes, WAITS for the revoke to mine, then sends indexRevocation', async () => {
     let revokeCall: { schema: Hex; uid: Hex } | undefined
+    const indexerCalls: { fn: string; uid: Hex }[] = []
+    const waited: Hex[] = []
+    const order: string[] = []
     const ns = makeRedirectsNs({
       getDeployment: () => deployment,
       readContext: () => ctxWith(makeChain({})),
       submitContext: () => makeSubmitCtx().ctx,
       revoke: async (schema, u) => {
+        order.push('revoke')
         revokeCall = { schema, uid: u }
         return uid(0xfee)
       },
+      indexerCall: async (fn, u) => {
+        order.push(fn)
+        indexerCalls.push({ fn, uid: u })
+        return uid(0x1dc)
+      },
+      waitForReceipt: async (tx) => {
+        order.push('wait')
+        waited.push(tx)
+      },
     })
-    const tx = await ns.remove(uid(0xabc))
-    expect(tx).toBe(uid(0xfee))
+    const receipt = await ns.remove(uid(0xabc))
     expect(revokeCall).toEqual({ schema: SCHEMAS.redirect, uid: uid(0xabc) })
+    expect(receipt).toEqual({ revokeTx: uid(0xfee), indexRevocationTx: uid(0x1dc) })
+    // The contract requires the revoke to be MINED before indexRevocation.
+    expect(order).toEqual(['revoke', 'wait', 'indexRevocation'])
+    expect(waited).toEqual([uid(0xfee)])
+    expect(indexerCalls).toEqual([{ fn: 'indexRevocation', uid: uid(0xabc) }])
+  })
+
+  it('remove { index: false } returns only the revoke tx', async () => {
+    const { ns, indexerCalls } = harness(makeChain({}))
+    const receipt = await ns.remove(uid(0xabc), { index: false })
+    expect(receipt).toEqual({ revokeTx: uid(0xfee) })
+    expect(indexerCalls).toEqual([])
+  })
+
+  it('remove throws IndexingIncomplete when the revoke landed but the mirror tx failed', async () => {
+    const { ns } = harness(makeChain({}), makeSubmitCtx().ctx, { failIndexerCall: true })
+    const err = await ns.remove(uid(0xabc)).catch((e) => e)
+    expect(err).toBeInstanceOf(IndexingIncomplete)
+    const ii = err as IndexingIncomplete
+    expect(ii.op).toBe('indexRevocation')
+    expect(ii.uid).toBe(uid(0xabc))
+    expect(ii.txHash).toBe(uid(0xfee)) // the landed revoke leg
   })
 
   it('get returns the SELECTED record (any kind, ratified selection) under the default lens', async () => {

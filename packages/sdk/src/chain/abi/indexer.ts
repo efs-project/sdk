@@ -271,6 +271,70 @@ export const getReferencingBySchemaAndAttesterCountAbi = [
   },
 ] as const
 
+// ── Permissionless indexing lifecycle (schemas whose resolvers do NOT auto-index) ──
+
+/**
+ * `EFSIndexer.index(bytes32 uid) -> bool wasIndexed` (EFSIndexer.sol:1264-1296).
+ * Permissionless + idempotent: makes an attestation of a NON-auto-indexed schema
+ * (REDIRECT is the only one the SDK writes) discoverable via the referencing
+ * reads. Reverts `InvalidAttestation` if the UID does not exist in EAS (so it
+ * must run AFTER the attest tx mines); silently skips EFS-native schemas
+ * (ANCHOR/DATA/PROPERTY — indexed atomically in onAttest); self-mirrors an
+ * already-revoked attestation's revocation at index time (:1283-1287). Returns
+ * `false` when already indexed. Lens-neutral: it never changes the attester, so
+ * ANY account (a relayer/sponsor included) can safely send it.
+ */
+export const indexAbi = [
+  {
+    type: 'function',
+    name: 'index',
+    stateMutability: 'nonpayable',
+    inputs: [{ name: 'uid', type: 'bytes32' }],
+    outputs: [{ name: 'wasIndexed', type: 'bool' }],
+  },
+] as const
+
+/** `EFSIndexer.indexBatch(bytes32[] uids) -> uint256 count` (EFSIndexer.sol:1307-1333).
+ * The multi-UID form of {@link indexAbi} (same permissionless/idempotent rules). */
+export const indexBatchAbi = [
+  {
+    type: 'function',
+    name: 'indexBatch',
+    stateMutability: 'nonpayable',
+    inputs: [{ name: 'uids', type: 'bytes32[]' }],
+    outputs: [{ name: 'count', type: 'uint256' }],
+  },
+] as const
+
+/**
+ * `EFSIndexer.indexRevocation(bytes32 uid)` (EFSIndexer.sol:1350-1359).
+ * Permissionless + idempotent revocation mirror for externally-indexed
+ * attestations: filtered reads (`showRevoked=false`) key on the INDEXER's
+ * `_isRevoked` flag, not EAS state, so a revoked-but-indexed REDIRECT keeps
+ * being served until this runs. Reverts if the attestation is NOT actually
+ * revoked in EAS — it must run AFTER the revoke tx mines.
+ */
+export const indexRevocationAbi = [
+  {
+    type: 'function',
+    name: 'indexRevocation',
+    stateMutability: 'nonpayable',
+    inputs: [{ name: 'uid', type: 'bytes32' }],
+    outputs: [],
+  },
+] as const
+
+/** `EFSIndexer.isIndexed(bytes32 uid) -> bool` (EFSIndexer.sol:1368-1370). */
+export const isIndexedAbi = [
+  {
+    type: 'function',
+    name: 'isIndexed',
+    stateMutability: 'view',
+    inputs: [{ name: 'uid', type: 'bytes32' }],
+    outputs: [{ name: '', type: 'bool' }],
+  },
+] as const
+
 // ── Children / sibling reads (back EFSFileView's directory views) ─────────────
 
 /**
@@ -410,4 +474,8 @@ export const indexerAbi = [
   ...getChildrenByAddressListAbi,
   ...getAnchorsBySchemaAbi,
   ...getAnchorsBySchemaAndAddressListAbi,
+  ...indexAbi,
+  ...indexBatchAbi,
+  ...indexRevocationAbi,
+  ...isIndexedAbi,
 ] as const

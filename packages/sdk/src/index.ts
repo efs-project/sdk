@@ -25,6 +25,7 @@ import {
   createWalletClient,
   custom,
 } from 'viem'
+import { indexAbi, indexRevocationAbi, isIndexedAbi, isRevokedAbi } from './chain/abi/indexer.js'
 import {
   type DeploymentsMap,
   type EfsDeployment,
@@ -474,17 +475,34 @@ export type EfsClient = EfsReadClient & {
    * retrieval URI to an existing DATA (file-write publishes mirrors inline; this is the
    * after-the-fact verb). */
   mirrors: MirrorsNs
-  /** REDIRECT (alias) primitive (ADR-0050): `redirects.{set,remove,get}` — the
-   * trust-scoped "this points at that" edge (canonical/dedup, version supersession,
-   * symlinks). Read-time *following* of an alias chain is on `efs.fs.locate`/`read`
-   * via `{ followRedirects }`; this namespace is the write verbs + the literal
-   * active-record read. */
+  /** REDIRECT (alias) primitive (ADR-0050 + the ratified specs/09 read
+   * semantics): `redirects.{set,remove,get,list,canonical,history}`. Path-level
+   * SYMLINK following is on `efs.fs.locate`/`read` via `{ followRedirects }`;
+   * `canonical`/`history` are the sameAs/supersededBy layers (never followed). */
   redirects: RedirectsNs
   /** Curated-collection reads + writes (`efs.lists.*`): the read verbs plus
    * `create`/`add`/`remove` (LIST / LIST_ENTRY). */
   lists: EfsListsWriteNs
+  /**
+   * Permissionless indexing REPAIR (`EFSIndexer.index`/`indexRevocation`, both
+   * idempotent): completes a `redirects.set`/`remove` whose follow-up indexing
+   * tx failed ({@link import('./errors.js').IndexingIncomplete} carries the
+   * UID), and makes any third-party/foreign attestation of a non-auto-indexed
+   * schema discoverable. Safe from ANY funded account — indexing never changes
+   * the attester (lens-neutral), so a relayer/sponsor may run it. Reads the
+   * EAS + indexer state and sends whichever leg is missing (or no-ops). */
+  index(uid: Hex): Promise<IndexRepairResult>
   /** Compose a multi-operation write delivered with one signature where possible. */
   batch(): { execute(): Promise<BatchReceipt> }
+}
+
+/** The outcome of an `efs.index(uid)` repair. */
+export type IndexRepairResult = {
+  /** `indexed` — the discovery index() leg was sent; `revocation-indexed` — the
+   * revocation-mirror leg was sent; `already-indexed` — nothing to do. */
+  status: 'indexed' | 'revocation-indexed' | 'already-indexed'
+  /** The repair tx hash (absent on `already-indexed`). */
+  txHash?: Hex
 }
 
 function chainIdOf(publicClient: PublicClient): number {
@@ -838,14 +856,48 @@ export function createEfsClient(config: EfsClientConfig): EfsClient {
     attester: () => account,
     revoke: (schema, uid) => easVerbs.revoke({ schema, uid }),
   })
-  // The `efs.redirects.*` write verbs (set/remove) + the literal active-record read
-  // (get). Like graph/props, merged unconditionally and gated at the type level; a
+  // EFSIndexer index/indexRevocation txs — the discovery lifecycle REDIRECT needs
+  // (AliasResolver is write-guards-only and does NOT populate the referencing
+  // index the reads use). Chain-guarded like every standalone write; waits for
+  // the receipt (the callers sequence on minedness). Permissionless + lens-
+  // neutral: it never changes the attester, so any account may send it.
+  const indexerCall = async (fn: 'index' | 'indexRevocation', uidArg: Hex): Promise<Hex> => {
+    requireWallet()
+    const wallet = walletClient as WalletClient
+    const dep = getDeployment()
+    await assertWriteChain(wallet, publicClient, dep.chainId)
+    const hash = (await (
+      wallet as unknown as { writeContract: (args: object) => Promise<Hex> }
+    ).writeContract({
+      address: dep.contracts.indexer,
+      abi: fn === 'index' ? indexAbi : indexRevocationAbi,
+      functionName: fn,
+      args: [uidArg],
+      ...(wallet.account !== undefined ? { account: wallet.account } : {}),
+      ...(wallet.chain !== undefined ? { chain: wallet.chain } : {}),
+    })) as Hex
+    await waitForReceipt(hash)
+    return hash
+  }
+  const waitForReceipt = async (txHash: Hex): Promise<void> => {
+    await (
+      publicClient as unknown as {
+        waitForTransactionReceipt: (args: { hash: Hex }) => Promise<unknown>
+      }
+    ).waitForTransactionReceipt({ hash: txHash })
+  }
+
+  // The `efs.redirects.*` write verbs (set/remove, each with its follow-up
+  // indexing leg) + the lens-scoped reads (get/list/canonical/history). Like
+  // graph/props, merged unconditionally and gated at the type level; a
   // no-wallet runtime call to set/remove throws via the wallet-bound submit/revoke.
   const redirectsNs = makeRedirectsNs({
     getDeployment,
     readContext,
     submitContext: edgeSubmitContext,
     revoke: (schema, uid) => easVerbs.revoke({ schema, uid }),
+    indexerCall,
+    waitForReceipt,
   })
   // The `efs.lists.*` write verbs (create/add/remove). Merged onto the read verbs
   // below; the type-level write gate hides them on a read-only client, and each
@@ -1109,6 +1161,44 @@ export function createEfsClient(config: EfsClientConfig): EfsClient {
     props: propsNs,
     mirrors: mirrorsNs,
     redirects: redirectsNs,
+    index: async (uidArg: Hex): Promise<IndexRepairResult> => {
+      requireWallet()
+      const dep = getDeployment()
+      // Which leg is missing? Read EAS + the indexer's own state, chain-pinned.
+      const att = await easVerbs.getAttestation(uidArg)
+      if (att === undefined) {
+        throw new EfsError(
+          `efs.index: no attestation exists at ${uidArg} on this chain — index() would revert (InvalidAttestation). Check the UID/chain.`,
+          { code: 'InvalidArgument' },
+        )
+      }
+      const rc = guardReadClient(dep.chainId)
+      const [indexed, revokedInIndexer] = await Promise.all([
+        rc.readContract({
+          address: dep.contracts.indexer,
+          abi: isIndexedAbi,
+          functionName: 'isIndexed',
+          args: [uidArg],
+        }) as Promise<boolean>,
+        rc.readContract({
+          address: dep.contracts.indexer,
+          abi: isRevokedAbi,
+          functionName: 'isRevoked',
+          args: [uidArg],
+        }) as Promise<boolean>,
+      ])
+      // index() self-mirrors an existing EAS revocation at index time
+      // (EFSIndexer.sol:1283-1287), so an unindexed UID needs ONLY index().
+      if (!indexed) {
+        const txHash = await indexerCall('index', uidArg)
+        return { status: 'indexed', txHash }
+      }
+      if (att.revocationTime !== 0n && !revokedInIndexer) {
+        const txHash = await indexerCall('indexRevocation', uidArg)
+        return { status: 'revocation-indexed', txHash }
+      }
+      return { status: 'already-indexed' }
+    },
     batch: () => {
       requireWallet()
       throw new NotImplemented('efs.batch()', {
@@ -1358,6 +1448,8 @@ export {
   makeRedirectsNs,
   type RedirectsNs,
   type RedirectSetOptions,
+  type RedirectRemoveOptions,
+  type RedirectRemoveReceipt,
   type RedirectGetOptions,
   type RedirectHistoryOptions,
   type CanonicalResult,

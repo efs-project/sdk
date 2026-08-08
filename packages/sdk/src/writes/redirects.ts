@@ -32,7 +32,7 @@
 
 import type { Hex } from 'viem'
 import type { EfsDeployment } from '../chain/deployments.js'
-import { EfsError } from '../errors.js'
+import { EfsError, IndexingIncomplete } from '../errors.js'
 import { type ReadContext, resolveAttesters } from '../reads/context.js'
 import {
   canonicalizeSameAs,
@@ -41,14 +41,43 @@ import {
   walkSupersededBy,
 } from '../reads/redirects.js'
 import type { ReadOptions, RedirectKind, RedirectRecord, WriteReceipt } from '../types.js'
-import { type EdgeSubmitContext, submitEdgePlan } from './edge-submit.js'
-import { REDIRECT_KIND, buildRedirectPlan } from './edge.js'
+import { type EdgeSubmitContext, submitEdgePlanWithUID } from './edge-submit.js'
+import { EDGE_REF, REDIRECT_KIND, buildRedirectPlan } from './edge.js'
 
 /** Options for a `redirects.set`. */
 export interface RedirectSetOptions {
   /** The redirect class (ADR-0050). A name (`'sameAs'`/`'supersededBy'`/`'symlink'`/
    * `'relatedVersion'`) or a raw `uint16` code for a reserved kind. Default `'sameAs'`. */
   kind?: RedirectKind | number
+  /** Send the follow-up `EFSIndexer.index(uid)` tx (default `true`). REDIRECT's
+   * resolver does NOT populate the referencing index (AliasResolver is
+   * write-guards-only), and every lens-scoped redirect read routes through it —
+   * so WITHOUT this follow-up the freshly-set redirect is INVISIBLE to
+   * `redirects.get`/`fs.locate` until someone calls the permissionless
+   * `efs.index(uid)`. Opt out only when a relayer/batcher owns eventual
+   * indexing; the caller then owns it (a subsequent `get` returns `undefined`
+   * with no error). Costs one extra tx/prompt on the Tier-1 path — a
+   * correctness necessity, not UX polish (correct > easy > fast). */
+  index?: boolean
+}
+
+/** Options for a `redirects.remove`. */
+export interface RedirectRemoveOptions {
+  /** Send the follow-up `EFSIndexer.indexRevocation(uid)` tx (default `true`).
+   * Filtered reads key on the INDEXER's revocation mirror, not EAS state — an
+   * indexed redirect that is revoked in EAS keeps being SERVED until this runs.
+   * Same opt-out semantics as {@link RedirectSetOptions.index}. */
+  index?: boolean
+}
+
+/** The two-leg result of a `redirects.remove`: the EAS revoke tx plus the
+ * indexer revocation-mirror tx (absent when `{ index: false }` opted out). */
+export type RedirectRemoveReceipt = {
+  /** The `efs.eas.revoke` tx hash (the revocation itself). */
+  revokeTx: Hex
+  /** The `EFSIndexer.indexRevocation(uid)` tx hash — what makes filtered reads
+   * stop serving the redirect. Absent ⇔ the caller opted out. */
+  indexRevocationTx?: Hex
 }
 
 /** Options for the lens-scoped redirect reads. */
@@ -85,11 +114,19 @@ export type HistoryResult = {
 /** The `efs.redirects.*` write+read surface (present only on a write-capable client;
  * the read verbs also surface on the read-only client via `RedirectsReadNs`). */
 export interface RedirectsNs {
-  /** Author a REDIRECT from `from` to `to` (one signature). `kind` defaults to
-   * `'sameAs'`. Does NOT supersede a prior redirect from the same source. */
+  /** Author a REDIRECT from `from` to `to`, then make it DISCOVERABLE with a
+   * follow-up `EFSIndexer.index(uid)` tx (two txs/prompts total; `{ index:
+   * false }` opts out — see {@link RedirectSetOptions.index}). `kind` defaults
+   * to `'sameAs'`. Does NOT supersede a prior redirect from the same source.
+   * @throws {IndexingIncomplete} when the REDIRECT landed but the index tx did
+   *   not — carries the landed UID; `efs.index(uid)` is the safe retry. */
   set(from: Hex, to: Hex, opts?: RedirectSetOptions): Promise<WriteReceipt>
-  /** Revoke a REDIRECT by its attestation UID (via `efs.eas.revoke`, REDIRECT schema). */
-  remove(redirectUID: Hex): Promise<Hex>
+  /** Revoke a REDIRECT by its attestation UID, then sync the indexer's
+   * revocation mirror with `EFSIndexer.indexRevocation(uid)` (sequenced AFTER
+   * the revoke mines — the contract requires it; two txs/prompts total).
+   * @throws {IndexingIncomplete} when the revoke landed but the mirror tx did
+   *   not — the redirect keeps being SERVED until `efs.index(uid)` repairs it. */
+  remove(redirectUID: Hex, opts?: RedirectRemoveOptions): Promise<RedirectRemoveReceipt>
   /** The SELECTED active redirect FROM `from` under the lens (first-attester-wins,
    * lowest-UID tie-break — specs/09 §5/§8), or `undefined` when no lens member
    * asserts one. Any kind; not a chain walk. */
@@ -111,8 +148,17 @@ export interface RedirectsNsDeps {
   /** The lens-scoped read context (for the read verbs). */
   readonly readContext: () => ReadContext | Promise<ReadContext>
   readonly submitContext: () => EdgeSubmitContext
-  /** Revoke a UID under a schema (wired to `efs.eas.revoke`). */
+  /** Revoke a UID under a schema (wired to `efs.eas.revoke`). Returns the tx
+   * hash WITHOUT waiting for the receipt (mirrors the eas verb). */
   readonly revoke: (schema: Hex, uid: Hex) => Promise<Hex>
+  /** Send an `EFSIndexer.index`/`indexRevocation` tx and WAIT for its receipt
+   * (wired by the client through the chain-guarded wallet + public clients).
+   * Returns the tx hash. These calls are indexer txs, not EAS attestations, so
+   * they cannot ride inside the layered `multiAttest` submit. */
+  readonly indexerCall: (fn: 'index' | 'indexRevocation', uid: Hex) => Promise<Hex>
+  /** Wait for a tx to mine (the revoke leg — `indexRevocation` reverts if the
+   * revocation hasn't mined yet, so ordering is mandatory). */
+  readonly waitForReceipt: (txHash: Hex) => Promise<void>
 }
 
 /**
@@ -150,12 +196,61 @@ export function makeRedirectsNs(deps: RedirectsNsDeps): RedirectsNs {
     set: async (from, to, opts) => {
       const dep = deps.getDeployment()
       const plan = buildRedirectPlan(dep.schemas, from, to, kindCode(opts?.kind))
-      return submitEdgePlan(plan, deps.submitContext())
+      const { receipt, uid: redirectUID } = await submitEdgePlanWithUID(
+        plan,
+        deps.submitContext(),
+        EDGE_REF.REDIRECT,
+      )
+      if (opts?.index === false) return receipt // caller owns eventual indexing
+
+      // The follow-up discovery tx. `index(uid)` reverts if the UID doesn't
+      // exist in EAS, so it necessarily runs after the attest mined (it has —
+      // submitEdgePlanWithUID waited for the layer receipt).
+      try {
+        await deps.indexerCall('index', redirectUID)
+      } catch (err) {
+        // The REDIRECT is fully landed and valid; only discovery is pending.
+        // Surface the recoverable state, never lose the UID.
+        throw new IndexingIncomplete({
+          op: 'index',
+          uid: redirectUID,
+          receipt: {
+            ...receipt,
+            status: 'partial',
+            steps: [...receipt.steps, { id: 'index', uid: redirectUID, done: false }],
+          },
+          cause: err,
+        })
+      }
+      return {
+        ...receipt,
+        steps: [...receipt.steps, { id: 'index', uid: redirectUID, done: true }],
+        // The index tx is a real extra prompt on the Tier-1 path.
+        signatureCount: receipt.signatureCount + 1,
+      }
     },
 
-    remove: async (redirectUID) => {
+    remove: async (redirectUID, opts) => {
       const dep = deps.getDeployment()
-      return deps.revoke(dep.schemas.redirect, redirectUID)
+      const revokeTx = await deps.revoke(dep.schemas.redirect, redirectUID)
+      if (opts?.index === false) return { revokeTx }
+
+      // ORDERING IS MANDATORY: indexRevocation reverts 'not revoked in EAS'
+      // until the revoke tx mines — wait for it first.
+      try {
+        await deps.waitForReceipt(revokeTx)
+        const indexRevocationTx = await deps.indexerCall('indexRevocation', redirectUID)
+        return { revokeTx, indexRevocationTx }
+      } catch (err) {
+        // The revoke is landed (or at least broadcast); the mirror is stale —
+        // the redirect keeps being SERVED by filtered reads until repaired.
+        throw new IndexingIncomplete({
+          op: 'indexRevocation',
+          uid: redirectUID,
+          txHash: revokeTx,
+          cause: err,
+        })
+      }
     },
 
     get: async (from, opts) => {
