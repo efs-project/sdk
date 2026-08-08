@@ -4,7 +4,7 @@ pragma solidity ^0.8.26;
 import {Test} from "forge-std/Test.sol";
 import {IEAS} from "@ethereum-attestation-service/eas-contracts/contracts/IEAS.sol";
 import {EFSWriter} from "../src/v1/EFSWriter.sol";
-import {EFSLib} from "../src/v1/EFSLib.sol";
+import {EFSLib, IEFSIndexerWrite} from "../src/v1/EFSLib.sol";
 import {MockEAS} from "./EFSWriter.t.sol";
 
 /// @dev Consumer exposing the new primitive wrappers, to assert the inline (attester = consumer)
@@ -72,16 +72,48 @@ contract WritesConsumerMock is EFSWriter {
         return EFSLib.addAddressEntry(EAS, s, listUID, member);
     }
 
-    function setRedirect(EFSLib.SchemaUIDs memory s, bytes32 source, bytes32 target, uint16 kind)
+    function setRedirect(
+        IEFSIndexerWrite indexer,
+        EFSLib.SchemaUIDs memory s,
+        bytes32 source,
+        bytes32 target,
+        uint16 kind
+    ) external returns (bytes32) {
+        return _efsSetRedirect(indexer, s, source, target, kind);
+    }
+
+    function removeRedirect(IEFSIndexerWrite indexer, EFSLib.SchemaUIDs memory s, bytes32 uid)
         external
-        returns (bytes32)
     {
-        return _efsSetRedirect(s, source, target, kind);
+        _efsRemoveRedirect(indexer, s, uid);
+    }
+}
+
+/// @dev Records the ADR-0017 lifecycle legs so tests can assert the same-tx index calls.
+contract MockIndexer {
+    bytes32[] public indexedUIDs;
+    bytes32[] public revocationMirroredUIDs;
+
+    function index(bytes32 uid) external {
+        indexedUIDs.push(uid);
+    }
+
+    function indexRevocation(bytes32 uid) external {
+        revocationMirroredUIDs.push(uid);
+    }
+
+    function indexedCount() external view returns (uint256) {
+        return indexedUIDs.length;
+    }
+
+    function revocationMirroredCount() external view returns (uint256) {
+        return revocationMirroredUIDs.length;
     }
 }
 
 contract EFSWritesTest is Test {
     MockEAS eas;
+    MockIndexer indexer;
     WritesConsumerMock consumer;
 
     EFSLib.SchemaUIDs schemas = EFSLib.SchemaUIDs({
@@ -103,6 +135,7 @@ contract EFSWritesTest is Test {
 
     function setUp() public {
         consumer = new WritesConsumerMock(IEAS(address(eas = new MockEAS())));
+        indexer = new MockIndexer();
     }
 
     function _uid(uint256 i) internal pure returns (bytes32) {
@@ -326,8 +359,13 @@ contract EFSWritesTest is Test {
         bytes32 source = keccak256("DUP_DATA");
         bytes32 target = keccak256("CANONICAL_DATA");
         vm.prank(ALICE);
-        bytes32 redirectUID =
-            consumer.setRedirect(schemas, source, target, EFSLib.REDIRECT_KIND_SAME_AS);
+        bytes32 redirectUID = consumer.setRedirect(
+            IEFSIndexerWrite(address(indexer)),
+            schemas,
+            source,
+            target,
+            EFSLib.REDIRECT_KIND_SAME_AS
+        );
 
         assertEq(eas.callCount(), 1, "setRedirect = 1 attestation");
         MockEAS.Call memory c = eas.callAt(0);
@@ -347,9 +385,49 @@ contract EFSWritesTest is Test {
         bytes32 source = keccak256("SRC");
         bytes32 target = keccak256("TGT");
         vm.prank(ALICE);
-        consumer.setRedirect(schemas, source, target, EFSLib.REDIRECT_KIND_SYMLINK);
+        consumer.setRedirect(
+            IEFSIndexerWrite(address(indexer)),
+            schemas,
+            source,
+            target,
+            EFSLib.REDIRECT_KIND_SYMLINK
+        );
         (bytes32 gotTarget, uint16 gotKind) = abi.decode(eas.callAt(0).data, (bytes32, uint16));
         assertEq(gotTarget, target, "target round-trips");
         assertEq(gotKind, EFSLib.REDIRECT_KIND_SYMLINK, "kind round-trips");
+    }
+
+    /// @notice ADR-0017 lifecycle, first leg (r3741057696): setRedirect must call
+    ///         `indexer.index(redirectUID)` in the SAME transaction — AliasResolver never
+    ///         populates the referencing index, so an un-indexed redirect is invisible to
+    ///         every SDK discovery read (get/list/canonical/history/symlink walk).
+    function test_SetRedirect_IndexesAtomically() public {
+        vm.prank(ALICE);
+        bytes32 redirectUID = consumer.setRedirect(
+            IEFSIndexerWrite(address(indexer)),
+            schemas,
+            keccak256("SRC"),
+            keccak256("TGT"),
+            EFSLib.REDIRECT_KIND_SAME_AS
+        );
+        assertEq(indexer.indexedCount(), 1, "one same-tx index() call");
+        assertEq(indexer.indexedUIDs(0), redirectUID, "index() got the minted redirect UID");
+        assertEq(indexer.revocationMirroredCount(), 0, "no revocation leg on set");
+    }
+
+    /// @notice ADR-0017 lifecycle, second leg: removeRedirect revokes under the REDIRECT
+    ///         schema AND mirrors the revocation in the same transaction — a bare
+    ///         `eas.revoke()` would leave the redirect SERVED by filtered reads.
+    function test_RemoveRedirect_RevokesAndMirrorsAtomically() public {
+        bytes32 redirectUID = keccak256("EXISTING_REDIRECT");
+        vm.prank(ALICE);
+        consumer.removeRedirect(IEFSIndexerWrite(address(indexer)), schemas, redirectUID);
+        assertEq(eas.revocationCount(), 1, "one EAS revocation");
+        MockEAS.Revocation memory r = eas.revocationAt(0);
+        assertEq(r.schema, schemas.redirect, "revoked under the REDIRECT schema");
+        assertEq(r.uid, redirectUID, "revoked the right UID");
+        assertEq(indexer.revocationMirroredCount(), 1, "one same-tx indexRevocation() call");
+        assertEq(indexer.revocationMirroredUIDs(0), redirectUID, "mirrored the right UID");
+        assertEq(indexer.indexedCount(), 0, "no index leg on remove");
     }
 }

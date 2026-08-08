@@ -4,9 +4,24 @@ pragma solidity ^0.8.26;
 import {
     IEAS,
     AttestationRequest,
-    AttestationRequestData
+    AttestationRequestData,
+    RevocationRequest,
+    RevocationRequestData
 } from "@ethereum-attestation-service/eas-contracts/contracts/IEAS.sol";
 import {Attestation} from "@ethereum-attestation-service/eas-contracts/contracts/Common.sol";
+
+/// @notice The EFSIndexer WRITE surface the REDIRECT lifecycle needs (SDK ADR-0017):
+///         `AliasResolver` is write-guards-only — it does NOT populate the EFSIndexer
+///         referencing index that every discovery read queries (`redirects.get/list`,
+///         canonicalization, history, symlink following). `index`/`indexRevocation` are the
+///         permissionless follow-ups; called in the SAME transaction here, the lifecycle is
+///         ATOMIC — the partial "attested but undiscoverable" state the two-transaction
+///         TypeScript path must model cannot exist for a contract writer. Declared thin (like
+///         the reader's view interfaces) so consumers compile without the full EFSIndexer.
+interface IEFSIndexerWrite {
+    function index(bytes32 uid) external;
+    function indexRevocation(bytes32 uid) external;
+}
 
 /// @title EFSLib
 /// @notice Internal library for **writing** the Ethereum File System (EFS) from *your own*
@@ -599,13 +614,18 @@ library EFSLib {
     ///         REDIRECT UID (which is why this returns it). This is unlike {place}/{anchorAt}, whose
     ///         cardinality-1 PIN supersedes in O(1).
     /// @param  eas     The EAS instance to attest against.
+    /// @param  indexer The EFSIndexer — the SAME-tx `index(uid)` leg that makes the redirect
+    ///                 discoverable (see {IEFSIndexerWrite}; ADR-0017).
     /// @param  schemas The frozen schema UID set (only `redirect` is used).
     /// @param  source  The source UID this redirect points FROM (the edge's `refUID`).
     /// @param  target  The destination UID this redirect points TO (nonzero, != source).
     /// @param  kind    The redirect class (0 = sameAs, 1 = supersededBy, 2 = symlink; ≥ 3 reserved).
-    /// @return redirectUID The created REDIRECT edge UID (revoke it to retract the redirect).
+    /// @return redirectUID The created REDIRECT edge UID ({removeRedirect} it to retract —
+    ///         a bare `eas.revoke()` leaves the revocation UNMIRRORED in the indexer, so the
+    ///         redirect keeps being served by filtered reads).
     function setRedirect(
         IEAS eas,
+        IEFSIndexerWrite indexer,
         SchemaUIDs memory schemas,
         bytes32 source,
         bytes32 target,
@@ -624,6 +644,37 @@ library EFSLib {
                 })
             })
         );
+        // Complete the ADR-0017 lifecycle ATOMICALLY: AliasResolver never populates
+        // the referencing index the discovery reads query, so without this same-tx
+        // leg the redirect exists in EAS but is INVISIBLE to every SDK reader until
+        // someone manually repairs it (`efs.index(uid)`).
+        indexer.index(redirectUID);
+    }
+
+    /// @notice Retract a REDIRECT: `eas.revoke` the edge AND mirror the revocation into the
+    ///         EFSIndexer — ADR-0017's second leg. Without `indexRevocation` the revoked
+    ///         redirect KEEPS BEING SERVED by the filtered discovery reads (the index is
+    ///         append-only and revocation-filtered per its own mirror, not per EAS). Both
+    ///         legs run in THIS transaction, so the stale-mirror window cannot exist.
+    /// @param  eas         The EAS instance to revoke against.
+    /// @param  indexer     The EFSIndexer (the revocation-mirror leg).
+    /// @param  schemas     The frozen schema UID set (only `redirect` is used).
+    /// @param  redirectUID The REDIRECT edge UID to retract.
+    function removeRedirect(
+        IEAS eas,
+        IEFSIndexerWrite indexer,
+        SchemaUIDs memory schemas,
+        bytes32 redirectUID
+    ) internal {
+        eas.revoke(
+            RevocationRequest({
+                schema: schemas.redirect,
+                data: RevocationRequestData({uid: redirectUID, value: NO_VALUE})
+            })
+        );
+        // Same-tx mirror: EAS state is already updated within this transaction, so
+        // the indexer's "revoked in EAS" precondition holds.
+        indexer.indexRevocation(redirectUID);
     }
 
     // ── internal attest helpers (one per node shape) ─────────────────────────────────────────

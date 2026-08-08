@@ -100,8 +100,24 @@ contract MockEAS is IEAS {
         revert("unused");
     }
 
-    function revoke(RevocationRequest calldata) external payable {
-        revert("unused");
+    /// @dev Recorded revocations (schema, uid) — the redirect-retract leg asserts on these.
+    struct Revocation {
+        bytes32 schema;
+        bytes32 uid;
+    }
+
+    Revocation[] public revocations;
+
+    function revocationCount() external view returns (uint256) {
+        return revocations.length;
+    }
+
+    function revocationAt(uint256 i) external view returns (Revocation memory) {
+        return revocations[i];
+    }
+
+    function revoke(RevocationRequest calldata request) external payable {
+        revocations.push(Revocation({schema: request.schema, uid: request.data.uid}));
     }
 
     function revokeByDelegation(DelegatedRevocationRequest calldata) external payable {
