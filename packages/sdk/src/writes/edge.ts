@@ -405,6 +405,11 @@ export function buildMirrorPlan(
   transportDefinition: Hex,
   uri: string,
 ): FileWriteGraph {
+  // Same URI preflight the other mirror paths run (r3741848624): the exported
+  // builder is public surface, and MirrorResolver accepts any nonempty bounded
+  // string — a malformed known locator would mint a MIRROR the SDK itself can
+  // never resolve (unreadable content when it is the DATA's only mirror).
+  validateMirrorUri(uri, 'buildMirrorPlan')
   const mirror: PlannedAttestation = {
     ref: EDGE_REF.MIRROR,
     layer: 1,

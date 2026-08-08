@@ -315,6 +315,29 @@ describe('resolveMirrorTransport', () => {
 
 // ── mirrors namespace ──────────────────────────────────────────────────────────────
 
+describe('buildMirrorPlan URI preflight (review r3741848624)', () => {
+  const DATA = uid(0x900)
+
+  it('REJECTS malformed known locators — the exported builder is public surface', () => {
+    expect(() => buildMirrorPlan(SCHEMAS, DATA, IPFS_TRANSPORT, 'ipfs://!')).toThrowError(
+      /not a valid ipfs: locator/,
+    )
+    expect(() => buildMirrorPlan(SCHEMAS, DATA, IPFS_TRANSPORT, 'web3://0x1234')).toThrowError(
+      /not a valid web3: locator/,
+    )
+    expect(() => buildMirrorPlan(SCHEMAS, DATA, IPFS_TRANSPORT, '')).toThrowError(/empty/)
+  })
+
+  it('ACCEPTS a well-formed locator and a custom scheme (ADR-0056 escape hatch)', () => {
+    expect(buildMirrorPlan(SCHEMAS, DATA, IPFS_TRANSPORT, 'ipfs://QmX').attestations).toHaveLength(
+      1,
+    )
+    expect(
+      buildMirrorPlan(SCHEMAS, DATA, IPFS_TRANSPORT, 'ftps://legacy.example/f').attestations,
+    ).toHaveLength(1)
+  })
+})
+
 describe('makeMirrorsNs', () => {
   const DATA = uid(0x900)
 
