@@ -594,6 +594,36 @@ describe('submitWriteTier1 — hardlink plan', () => {
     expect(sent).toHaveLength(0)
   })
 
+  it('asserts the LIVE chain BEFORE any gate read (r3741637985)', async () => {
+    // A drifted provider must not serve the gates another chain's state — the
+    // assertion fires first, and no validation read ever happens.
+    const plan = buildFileWriteGraph({
+      ...hardlinkBase,
+      content: { kind: 'hardlink', dataUID: EXISTING_DATA },
+    })
+    const { ctx, sent } = makeMockChain()
+    let gateReads = 0
+    const drifted = {
+      ...ctx,
+      publicClient: {
+        ...ctx.publicClient,
+        async readContract(a: unknown) {
+          gateReads += 1
+          return (
+            ctx.publicClient as unknown as { readContract: (x: unknown) => Promise<unknown> }
+          ).readContract(a)
+        },
+      },
+      assertChain: async () => {
+        throw Object.assign(new Error('wrong chain'), { code: 'WrongChain' })
+      },
+    } as SubmitContext
+    const err = await submitWriteTier1(plan, drifted).catch((e) => e)
+    expect((err as { code?: string }).code).toBe('WrongChain')
+    expect(gateReads).toBe(0) // no validation read against the drifted provider
+    expect(sent).toHaveLength(0)
+  })
+
   it('FAILS CLOSED when the context cannot run the authorship read', async () => {
     const plan = buildFileWriteGraph({
       ...hardlinkBase,

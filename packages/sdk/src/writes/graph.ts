@@ -423,6 +423,21 @@ export function buildFileWriteGraph(input: FileWriteGraphInput): FileWriteGraph 
     }
   }
 
+  // A reused file-ANCHOR is only valid when the parent ALREADY exists
+  // (r3741637988): with `missingParents` the direct parent is being created in
+  // THIS write, so no `(parent, fileName, DATA)` slot can pre-exist — any
+  // supplied anchor necessarily names a DIFFERENT slot. Worse, the slot stamps
+  // compare against `parentAnchorUID`, which in this mode is only the deepest
+  // EXISTING ancestor — an existing SIBLING's anchor would pass them while the
+  // requested path ends up with no file. The input doc always said "only valid
+  // when the parent already exists"; enforce it for both content kinds.
+  if ((input.missingParents?.length ?? 0) > 0 && input.existingFileAnchorUID !== undefined) {
+    throw new EfsError(
+      "EFS write plan: `existingFileAnchorUID` cannot be combined with `missingParents` — a brand-new parent cannot already hold this file's anchor slot, so the supplied anchor would place the file at a DIFFERENT path. Omit it; a fresh anchor is minted under the created parent.",
+      { code: 'InvalidArgument' },
+    )
+  }
+
   // ── `mkdir -p` ancestor folders ─────────────────────────────────────────────
   // When ancestor folders are missing they are created FIRST, as a chain of
   // non-revocable ANCHORs (one per segment), each referencing the previous (the

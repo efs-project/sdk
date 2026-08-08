@@ -490,6 +490,30 @@ describe('mkdir -p — missing ancestor folders folded into the write', () => {
   })
 })
 
+describe('missingParents + existingFileAnchorUID is rejected (review r3741637988)', () => {
+  it('bytes: a reused anchor cannot combine with created parents', () => {
+    expect(() =>
+      buildFileWriteGraph({
+        ...baseInput,
+        content: { kind: 'bytes', bytes: new Uint8Array([1, 2, 3]) },
+        missingParents: ['photos'],
+        existingFileAnchorUID: uid(0xcc),
+      }),
+    ).toThrowError(/cannot be combined with `missingParents`/)
+  })
+
+  it('hardlink: same rejection', () => {
+    expect(() =>
+      buildFileWriteGraph({
+        ...hardlinkBase,
+        content: { kind: 'hardlink', dataUID: EXISTING_DATA },
+        missingParents: ['photos'],
+        existingFileAnchorUID: uid(0xcc),
+      }),
+    ).toThrowError(/cannot be combined with `missingParents`/)
+  })
+})
+
 describe('byte-plan builder preflight (reviews r3741586928 / r3741586938)', () => {
   const bytes = new Uint8Array([1, 2, 3])
   const good = {

@@ -914,6 +914,19 @@ export async function submitLayeredTier1(
   // directly), so no entry point can bypass them (r3741216400). Edge plans are
   // hardlink:false, so this is a no-op for them; the Solidity SDK applies the
   // same gates on-chain (ForeignDataUID / NotDataUID).
+  // The boundary gates below read EAS/indexer state through the (unguarded)
+  // submit client — assert the LIVE chain BEFORE those reads (r3741637985): a
+  // mutable provider could otherwise serve another chain's attestation/anchor
+  // state to the gates, switch back, and pass the per-layer assertion at
+  // broadcast — a plan approved with foreign proofs. Only plans that carry a
+  // gate stamp pay the extra assertion.
+  if (
+    plan.hardlink ||
+    plan.existingAnchorUID !== undefined ||
+    plan.symlinkTargetUID !== undefined
+  ) {
+    await ctx.assertChain?.()
+  }
   await assertHardlinkSelfAuthored(plan, ctx)
   await assertConcreteAnchorIsAnchor(plan, ctx)
   await assertSymlinkTargetReadable(plan, ctx)
