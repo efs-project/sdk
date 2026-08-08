@@ -10,7 +10,7 @@ import {
 } from 'viem'
 import { sepolia } from 'viem/chains'
 import { describe, expect, it } from 'vitest'
-import { IndexUnconfirmed } from '../src/errors.js'
+import { IndexSendUnknown, IndexUnconfirmed } from '../src/errors.js'
 import {
   DeploymentNotFound,
   type Lens,
@@ -471,6 +471,7 @@ describe('efs.index (repair verb) — honesty regressions', () => {
     attSchema: `0x${string}`
     receiptStatus: '0x0' | '0x1'
     receiptError?: boolean
+    sendError?: boolean
   }) {
     const selGetAttestation = toFunctionSelector('getAttestation(bytes32)')
     const selIsIndexed = toFunctionSelector('isIndexed(bytes32)')
@@ -529,7 +530,10 @@ describe('efs.index (repair verb) — honesty regressions', () => {
           }
           throw new Error(`unhandled eth_call selector ${sel}`)
         },
-        eth_sendTransaction: () => U(0x77),
+        eth_sendTransaction: () => {
+          if (opts.sendError) throw new Error('fetch failed: socket hang up') // no code
+          return U(0x77)
+        },
         eth_getTransactionReceipt: () => {
           if (opts.receiptError) throw new Error('rpc lost mid-wait')
           return {
@@ -583,6 +587,18 @@ describe('efs.index (repair verb) — honesty regressions', () => {
     const out = await efs.index(U(0xabc))
     expect(out).toEqual({ status: 'already-indexed' })
     expect(provider.callCount('eth_sendTransaction')).toBe(0)
+  })
+
+  it('a LOST SEND response throws IndexSendUnknown — no hash, may still mine (r3741441637)', async () => {
+    const { efs } = harness({
+      attSchema: DEP.schemas.redirect,
+      receiptStatus: '0x1',
+      sendError: true,
+    })
+    const err = await efs.index(U(0xabc)).catch((e) => e)
+    expect(err).toBeInstanceOf(IndexSendUnknown)
+    expect((err as IndexSendUnknown).op).toBe('index')
+    expect(String((err as Error).message)).toMatch(/UNKNOWN and it may STILL MINE/)
   })
 
   it('a lost receipt AFTER broadcast throws IndexUnconfirmed carrying the in-flight tx hash', async () => {

@@ -43,7 +43,15 @@ import {
   verifyAttestationUID,
 } from './eas/index.js'
 import { type EasVerbs, type RevocationRequest, makeEasVerbs } from './eas/verbs.js'
-import { EfsError, IndexUnconfirmed, NotImplemented, WalletRequired } from './errors.js'
+import {
+  EfsError,
+  IndexSendUnknown,
+  IndexUnconfirmed,
+  NotImplemented,
+  WalletRequired,
+  classifyError,
+  isDefiniteSendRefusal,
+} from './errors.js'
 import { toJSON } from './json.js'
 import { type Lens, identity, lens, resolveLens } from './lenses/resolve.js'
 import {
@@ -931,16 +939,29 @@ export function createEfsV1Client(config: EfsClientConfig): EfsClient {
     const wallet = walletClient as WalletClient
     const dep = getDeployment()
     await assertWriteChain(wallet, publicClient, dep.chainId)
-    const hash = (await (
-      wallet as unknown as { writeContract: (args: object) => Promise<Hex> }
-    ).writeContract({
-      address: dep.contracts.indexer,
-      abi: fn === 'index' ? indexAbi : indexRevocationAbi,
-      functionName: fn,
-      args: [uidArg],
-      ...(wallet.account !== undefined ? { account: wallet.account } : {}),
-      ...(wallet.chain !== undefined ? { chain: wallet.chain } : {}),
-    })) as Hex
+    let hash: Hex
+    try {
+      hash = (await (
+        wallet as unknown as { writeContract: (args: object) => Promise<Hex> }
+      ).writeContract({
+        address: dep.contracts.indexer,
+        abi: fn === 'index' ? indexAbi : indexRevocationAbi,
+        functionName: fn,
+        args: [uidArg],
+        ...(wallet.account !== undefined ? { account: wallet.account } : {}),
+        ...(wallet.chain !== undefined ? { chain: wallet.chain } : {}),
+      })) as Hex
+    } catch (cause) {
+      // Refusal-vs-transport split (r3741441637; the same rule as every other
+      // send site): a refusal RESPONSE proves nothing was broadcast — the
+      // classified error propagates and the leg reads as never-sent. A
+      // code-less transport loss proves nothing: the tx may still mine with NO
+      // hash to reconcile by — surface the distinct unknown-send state so the
+      // redirect wrappers don't claim "never broadcast" (and don't undercount
+      // the signed prompt).
+      if (isDefiniteSendRefusal(cause)) throw classifyError(cause)
+      throw new IndexSendUnknown({ op: fn, uid: uidArg, cause })
+    }
     try {
       await waitForReceipt(hash)
     } catch (err) {

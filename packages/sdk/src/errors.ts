@@ -297,6 +297,29 @@ export class IndexUnconfirmed extends EfsError {
   }
 }
 
+/** An EFSIndexer `index`/`indexRevocation` SEND failed WITHOUT a response — the
+ * transport dropped after the request may already have reached the node, so
+ * whether the tx was broadcast is UNKNOWN: it may still mine, and there is NO
+ * hash to reconcile by (unlike {@link IndexUnconfirmed}, where the hash
+ * returned before the receipt wait failed). Recovery is the same idempotent
+ * repair: run `efs.index(uid)` once the RPC recovers — it re-reads on-chain
+ * state and only sends what is still missing. */
+export class IndexSendUnknown extends EfsError {
+  override name = 'IndexSendUnknown'
+  /** Which indexer leg was sent. */
+  readonly op: 'index' | 'indexRevocation'
+  /** The UID the leg was indexing. */
+  readonly uid: Hex
+  constructor(args: { op: 'index' | 'indexRevocation'; uid: Hex; cause: unknown }) {
+    super(
+      `EFS indexer: the ${args.op}('${args.uid}') send failed WITHOUT a response — whether the transaction was broadcast is UNKNOWN and it may STILL MINE (no tx hash is available). Do not blindly resend; run efs.index('${args.uid}') once the RPC recovers (it re-reads on-chain state and only sends what is still missing).`,
+      { code: 'PartialBatchFailure', cause: args.cause },
+    )
+    this.op = args.op
+    this.uid = args.uid
+  }
+}
+
 export class IndexingIncomplete extends EfsError {
   override name = 'IndexingIncomplete'
   /** Which indexing leg failed. */
@@ -310,18 +333,24 @@ export class IndexingIncomplete extends EfsError {
   /** The IN-FLIGHT indexer tx: present when the index/indexRevocation tx
    * BROADCAST but its receipt could not be confirmed — it may still mine, so
    * reconcile its fate (or re-run `efs.index(uid)`, which re-reads state)
-   * before resending. Absent when the leg never broadcast. */
+   * before resending. Absent when the leg never broadcast — or when its SEND
+   * lost the response (see {@link IndexingIncomplete.indexBroadcastUnknown}). */
   readonly indexTx?: Hex
+  /** `true` when the indexing leg's SEND failed without a response — whether it
+   * broadcast is UNKNOWN and it may still mine with NO hash available. `false`/
+   * absent when the leg provably never broadcast (a refusal response). */
+  readonly indexBroadcastUnknown: boolean
   constructor(args: {
     op: 'index' | 'indexRevocation'
     uid: Hex
     txHash?: Hex
     receipt?: WriteReceiptLike
     indexTx?: Hex
+    indexBroadcastUnknown?: boolean
     cause?: unknown
   }) {
     super(
-      `EFS redirects: the ${args.op === 'index' ? 'REDIRECT landed but its EFSIndexer.index(uid)' : 'revoke landed but its EFSIndexer.indexRevocation(uid)'} follow-up did not — the write is valid but not yet ${args.op === 'index' ? 'discoverable' : 'filtered from'} lens-scoped reads. Recovery is safe and permissionless: call efs.index('${args.uid}') from any funded account (idempotent).${args.indexTx !== undefined ? ` The ${args.op} tx ${args.indexTx} WAS broadcast and may still mine — check its fate first (a landed tx makes the repair report 'already-indexed').` : ''}`,
+      `EFS redirects: the ${args.op === 'index' ? 'REDIRECT landed but its EFSIndexer.index(uid)' : 'revoke landed but its EFSIndexer.indexRevocation(uid)'} follow-up did not — the write is valid but not yet ${args.op === 'index' ? 'discoverable' : 'filtered from'} lens-scoped reads. Recovery is safe and permissionless: call efs.index('${args.uid}') from any funded account (idempotent).${args.indexTx !== undefined ? ` The ${args.op} tx ${args.indexTx} WAS broadcast and may still mine — check its fate first (a landed tx makes the repair report 'already-indexed').` : args.indexBroadcastUnknown === true ? ` The ${args.op} send LOST ITS RESPONSE — whether it broadcast is UNKNOWN and it may still mine (no hash available); the idempotent repair re-reads state, so it is safe once the RPC recovers.` : ''}`,
       { code: 'PartialBatchFailure', cause: args.cause },
     )
     this.op = args.op
@@ -329,6 +358,7 @@ export class IndexingIncomplete extends EfsError {
     if (args.txHash !== undefined) this.txHash = args.txHash
     if (args.receipt !== undefined) this.receipt = args.receipt
     if (args.indexTx !== undefined) this.indexTx = args.indexTx
+    this.indexBroadcastUnknown = args.indexBroadcastUnknown === true
   }
 }
 

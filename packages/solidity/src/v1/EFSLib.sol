@@ -126,6 +126,12 @@ library EFSLib {
     ///         but undiscoverable placement.
     error NotFileBucketAnchor(bytes32 anchorUID, bytes32 forSchema);
 
+    /// @notice The reused key-anchor is not an ANCHOR in the PROPERTY bucket. The canonical
+    ///         reader resolves values via `resolveAnchor(dataUID, key, schemas.property)` —
+    ///         a PROPERTY bound at a file/folder anchor (or any other attestation) confirms
+    ///         successfully but that lookup never reaches the binding.
+    error NotPropertyKeyAnchor(bytes32 uid, bytes32 schema, bytes32 forSchema);
+
     /// @dev The reused-anchor SLOT-BINDING gate shared by {writeFile} and the 6-arg
     ///      {placeExisting}: beyond being an ANCHOR, the reused UID must name EXACTLY
     ///      the requested `(parent, fileName, DATA)` slot.
@@ -600,6 +606,18 @@ library EFSLib {
         bytes32 keyAnchorUID,
         string memory value
     ) internal returns (bytes32 propertyUID, bytes32 bindingPinUID) {
+        // The reused definition must BE a PROPERTY-bucket key-ANCHOR (r3741441639):
+        // the canonical reader resolves via `resolveAnchor(dataUID, key, PROPERTY)`,
+        // so binding at a file/folder anchor (or any other attestation) confirms
+        // UIDs that no read ever reaches. (This wrapper takes the anchor directly,
+        // so there is no requested (dataUID, key) slot to bind — the TS reuse path
+        // stamps and checks that too; here callers resolve the anchor themselves.)
+        Attestation memory ka = eas.getAttestation(keyAnchorUID);
+        if (ka.schema != schemas.anchor) revert NotAnchorUID(keyAnchorUID, ka.schema);
+        (, bytes32 kFor) = abi.decode(ka.data, (string, bytes32));
+        if (kFor != schemas.property) {
+            revert NotPropertyKeyAnchor(keyAnchorUID, ka.schema, kFor);
+        }
         (propertyUID, bindingPinUID) = _bindProperty(eas, schemas, keyAnchorUID, value);
     }
 

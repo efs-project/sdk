@@ -216,12 +216,30 @@ contract EFSWritesTest is Test {
         assertEq(bp.attester, address(consumer));
     }
 
+    /// @notice setPropertyAt refuses a reused definition outside the PROPERTY bucket
+    ///         (r3741441639): a PROPERTY bound at a FILE anchor confirms UIDs the
+    ///         canonical resolveAnchor(dataUID, key, PROPERTY) lookup never reaches.
+    function test_SetPropertyAt_RevertsOnNonPropertyKeyAnchor() public {
+        bytes32 fileAnchor = keccak256("A_FILE_ANCHOR_NOT_A_KEY");
+        eas.seedSchema(fileAnchor, schemas.anchor);
+        eas.seedAnchorSlot(fileAnchor, keccak256("P"), "readme.md", schemas.data); // DATA bucket
+        vm.prank(ALICE);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                EFSLib.NotPropertyKeyAnchor.selector, fileAnchor, schemas.anchor, schemas.data
+            )
+        );
+        consumer.setPropertyAt(schemas, fileAnchor, "bob");
+    }
+
     function test_SetPropertyAt_ReusesAnchorOnUpdate() public {
         // An UPDATE must NOT re-mint the permanent key-ANCHOR: it mints only the new
         // PROPERTY + binding-PIN against the supplied (pre-resolved) key-ANCHOR, so the
         // cardinality-1 binding supersedes the prior value. (Re-minting the anchor would
         // revert on the duplicate permanent (DATA, key, PROPERTY) slot — the bug.)
         bytes32 keyAnchorUID = keccak256("EXISTING_KEY_ANCHOR");
+        eas.seedSchema(keyAnchorUID, schemas.anchor); // the key-anchor gate (r3741441639)
+        eas.seedAnchorSlot(keyAnchorUID, keccak256("SOME_DATA"), "author", schemas.property);
         vm.prank(ALICE);
         (bytes32 propertyUID, bytes32 bindingPinUID) =
             consumer.setPropertyAt(schemas, keyAnchorUID, "bob");

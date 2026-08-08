@@ -32,7 +32,13 @@
 
 import type { Hex } from 'viem'
 import type { EfsDeployment } from '../chain/deployments.js'
-import { EfsError, IndexUnconfirmed, IndexingIncomplete, RevokeUnconfirmed } from '../errors.js'
+import {
+  EfsError,
+  IndexSendUnknown,
+  IndexUnconfirmed,
+  IndexingIncomplete,
+  RevokeUnconfirmed,
+} from '../errors.js'
 import { type ReadContext, resolveAttesters } from '../reads/context.js'
 import {
   canonicalizeSameAs,
@@ -217,16 +223,22 @@ export function makeRedirectsNs(deps: RedirectsNsDeps): RedirectsNs {
           op: 'index',
           uid: redirectUID,
           // The index tx may have BROADCAST before the confirmation failed —
-          // keep its hash so callers can reconcile before the repair.
+          // keep its hash so callers can reconcile before the repair; a send
+          // that lost its response is flagged UNKNOWN (no hash exists).
           ...(err instanceof IndexUnconfirmed ? { indexTx: err.txHash } : {}),
+          ...(err instanceof IndexSendUnknown ? { indexBroadcastUnknown: true } : {}),
           receipt: {
             ...receipt,
             status: 'partial',
             steps: [...receipt.steps, { id: 'index', uid: redirectUID, done: false }],
-            // A BROADCAST index tx (the IndexUnconfirmed case) was signed and
-            // sent by the user — the recovery artifact must not underreport the
-            // write's prompts/cost. A leg that never broadcast adds nothing.
-            signatureCount: receipt.signatureCount + (err instanceof IndexUnconfirmed ? 1 : 0),
+            // The user SIGNED the index tx when it broadcast (IndexUnconfirmed)
+            // — and also when the SEND lost its response (IndexSendUnknown: the
+            // wallet prompted and signed before the transport dropped) — so the
+            // recovery artifact must not underreport the write's prompts/cost.
+            // Only a refusal (never signed/broadcast) adds nothing.
+            signatureCount:
+              receipt.signatureCount +
+              (err instanceof IndexUnconfirmed || err instanceof IndexSendUnknown ? 1 : 0),
           },
           cause: err,
         })

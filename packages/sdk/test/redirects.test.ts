@@ -27,6 +27,7 @@ import { attestedEventAbi } from '../src/eas/abi.js'
 import { SchemaEncoder } from '../src/eas/schema-encoder.js'
 import { EFS_SCHEMA_FIELDS } from '../src/eas/schemas.js'
 import {
+  IndexSendUnknown,
   IndexUnconfirmed,
   IndexingIncomplete,
   RedirectScanTruncated,
@@ -875,6 +876,26 @@ describe('makeRedirectsNs', () => {
     // The user SIGNED AND SENT the index tx — the recovery artifact counts it
     // (r3740796049): 1 attest layer + 1 broadcast index tx.
     expect(ii.receipt?.signatureCount).toBe(2)
+  })
+
+  it('a LOST-RESPONSE index send is flagged UNKNOWN — never "never broadcast" (r3741441637)', async () => {
+    // The wallet prompted and signed; the transport dropped before the hash
+    // returned. The partial state must say UNKNOWN (may still mine, no hash)
+    // and count the signed prompt.
+    const { ctx } = makeSubmitCtx()
+    const lost = new IndexSendUnknown({
+      op: 'index',
+      uid: uid(0xd000),
+      cause: new Error('fetch failed: socket hang up'),
+    })
+    const { ns } = harness(makeChain({}), ctx, { failIndexerCallWith: lost })
+    const err = await ns.set(FROM, TO).catch((e) => e)
+    expect(err).toBeInstanceOf(IndexingIncomplete)
+    const ii = err as IndexingIncomplete
+    expect(ii.indexBroadcastUnknown).toBe(true)
+    expect(ii.indexTx).toBeUndefined() // no hash exists to carry
+    expect(String(ii.message)).toMatch(/UNKNOWN and it may still mine/)
+    expect(ii.receipt?.signatureCount).toBe(2) // the signed prompt counts
   })
 
   it('remove preserves the in-flight indexRevocation tx hash alongside the revoke tx', async () => {
