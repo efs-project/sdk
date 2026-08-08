@@ -222,12 +222,19 @@ export async function selectLensRedirect(
     // is a safe verdict.
     if (!complete) throw new RedirectScanTruncated(source, attester, MAX_REDIRECT_SCAN)
     if (uids.length === 0) continue
-    // Lowest UID by bytes32 comparison — lowercase-hex strings compare bytewise.
-    const winner = uids.reduce((a, b) => (b.toLowerCase() < a.toLowerCase() ? b : a))
-    const record = await fetchRedirectRecord(ctx, source, winner, attester)
-    // A malformed winner (foreign data) is treated as this attester asserting
-    // nothing — resolver-validated writes cannot produce it.
-    if (record !== undefined) return record
+    // Ascending bytes32 order (lowercase-hex compares bytewise) — the §4.2
+    // lowest-UID discipline. Decode candidates IN THAT ORDER until one survives
+    // the EAS recheck: the scan and the decode are two reads, so the lowest UID
+    // may have been revoked in between while the SAME attester still asserts
+    // others — first-attester-wins means falling through to a lower-priority
+    // attester is only legal when every candidate of this one is gone
+    // (r3740967874). A malformed candidate (foreign data — unreachable for
+    // resolver-validated writes) is likewise treated as not-a-record.
+    const ordered = [...uids].sort((a, b) => (a.toLowerCase() < b.toLowerCase() ? -1 : 1))
+    for (const candidate of ordered) {
+      const record = await fetchRedirectRecord(ctx, source, candidate, attester)
+      if (record !== undefined) return record
+    }
   }
   return undefined
 }

@@ -227,6 +227,10 @@ describe('storeOnchain', () => {
     expect(p.chunkAddress).toMatch(/^0x/)
     expect(p.chunkTx).toMatch(/^0x/)
     expect((p.cause as Error).name).toBe('AbortError')
+    // A PRE-send guard failure (abort between deploys) is definitively
+    // never-broadcast — the code-less abort reason must NOT read as an
+    // unknown-send (the guard split, r3740967877).
+    expect(p.managerBroadcastUnknown).toBe(false)
     expect(calls.filter((c) => c.kind === 'chunk')).toHaveLength(1) // chunk did deploy
     expect(calls.filter((c) => c.kind === 'manager')).toHaveLength(0) // manager never sent
   })
@@ -288,7 +292,27 @@ describe('OnchainStoreIncomplete (review r3740549054)', () => {
     const p = err as OnchainStoreIncomplete
     expect(p.chunkAddress).toMatch(/^0x/)
     expect((p.cause as { code?: string })?.code).toBe('UserRejected')
+    // A refusal RESPONSE (code 4001) proves the manager was never broadcast.
+    expect(p.managerBroadcastUnknown).toBe(false)
     expect(calls.filter((c) => c.kind === 'chunk')).toHaveLength(1)
+  })
+
+  it('a CODE-LESS transport loss on the manager send is an UNKNOWN broadcast, not "never sent" (r3740967877)', async () => {
+    // The RPC may have accepted the manager deploy before the connection
+    // dropped — no response, no hash. The confident "wrap the chunk again"
+    // recovery would pay for a DUPLICATE manager while the original mines.
+    const { ctx, calls } = makeCtx()
+    ;(ctx.walletClient as { deployContract: unknown }).deployContract = async () => {
+      throw new Error('fetch failed: socket hang up') // no code anywhere — pure transport loss
+    }
+    const err = await storeOnchain(new Uint8Array([1, 2, 3]), ctx).catch((e) => e)
+    expect(err).toBeInstanceOf(OnchainStoreIncomplete)
+    const p = err as OnchainStoreIncomplete
+    expect(p.managerBroadcastUnknown).toBe(true)
+    expect(p.managerTx).toBeUndefined() // no hash exists to carry
+    expect(String(p.message)).toMatch(/UNKNOWN and it may STILL MINE/)
+    expect(String(p.message)).toMatch(/Do NOT immediately wrap the chunk again/)
+    expect(calls.filter((c) => c.kind === 'chunk')).toHaveLength(1) // chunk landed first
   })
 })
 

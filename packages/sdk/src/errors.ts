@@ -566,6 +566,32 @@ export class RpcError extends EfsError {
  * carrying `4001`) under contract/transaction errors, so the code is often on a
  * nested cause, not the outer error — walk the chain or wrapped failures fall
  * through to a generic `EfsError`. Cycle-guarded. */
+/** Classified codes that PROVE a send/deploy was refused with a RESPONSE — the
+ * wallet/node answered (an error code, a decoded revert) or one of our own
+ * pre-send guards fired — so the transaction was never broadcast and a
+ * confident "nothing was sent" state is safe. Anything else (a code-less
+ * transport failure: connection drop/timeout after the request may already
+ * have reached the node) proves nothing — the tx may have been accepted and
+ * still mine, so callers must surface an UNKNOWN-send state instead. Shared by
+ * the layered submitter and the on-chain storage deploys. */
+const DEFINITE_SEND_REFUSALS: ReadonlySet<string> = new Set([
+  'UserRejected',
+  'Unauthorized',
+  'UnsupportedMethod',
+  'Disconnected',
+  'ContractReverted',
+  'RpcError',
+  'WrongChain',
+  'InvalidArgument',
+  'WalletRequired',
+])
+
+/** `true` when `err` classifies to a definite send REFUSAL (see
+ * {@link DEFINITE_SEND_REFUSALS}) — the tx was provably never broadcast. */
+export function isDefiniteSendRefusal(err: unknown): boolean {
+  return DEFINITE_SEND_REFUSALS.has(classifyError(err).code)
+}
+
 function numericCode(err: unknown): number | undefined {
   const seen = new Set<unknown>()
   let cur: unknown = err

@@ -74,7 +74,7 @@ import { easAbi } from '../eas/abi.js'
 import { buildMultiAttest } from '../eas/attest.js'
 import { SchemaEncoder } from '../eas/schema-encoder.js'
 import { EFS_SCHEMA_FIELDS } from '../eas/schemas.js'
-import { EfsError, classifyError } from '../errors.js'
+import { EfsError, classifyError, isDefiniteSendRefusal } from '../errors.js'
 import {
   type FileWriteGraph,
   type PlannedAttestation,
@@ -375,23 +375,6 @@ export class WriteSendUnknownError extends EfsError {
   }
 }
 
-/** Classified codes that PROVE the send was refused with a RESPONSE (a wallet/
- * node answer or a decoded revert or our own pre-send guard) — the tx was never
- * broadcast, so {@link WriteNotSentError}'s contract is safe to assert. Any
- * other failure (no JSON-RPC/EIP-1193 code — i.e. transport-level loss) cannot
- * prove non-broadcast → {@link WriteSendUnknownError}. */
-const DEFINITE_REFUSALS: ReadonlySet<string> = new Set([
-  'UserRejected',
-  'Unauthorized',
-  'UnsupportedMethod',
-  'Disconnected',
-  'ContractReverted',
-  'RpcError',
-  'WrongChain',
-  'InvalidArgument',
-  'WalletRequired',
-])
-
 // One PIN encoder, reused to re-encode `definition` once it's resolved. The PIN
 // schema is `bytes32 definition` (EFS_SCHEMA_FIELDS.pin).
 const pinEncoder = new SchemaEncoder(EFS_SCHEMA_FIELDS.pin)
@@ -685,7 +668,7 @@ export async function submitLayeredTier1(
       // request may have reached the node and the tx may still mine, so the
       // not-sent contract ("no tx exists, this layer is clean") must not be
       // asserted.
-      if (DEFINITE_REFUSALS.has(classifyError(cause).code)) {
+      if (isDefiniteSendRefusal(cause)) {
         throw new WriteNotSentError(layer, flatRefs, new Map(resolved), cause)
       }
       throw new WriteSendUnknownError(layer, flatRefs, new Map(resolved), cause)

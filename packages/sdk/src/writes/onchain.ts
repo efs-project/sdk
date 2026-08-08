@@ -48,7 +48,7 @@
  */
 
 import { type Address, type Hex, toHex } from 'viem'
-import { EfsError, classifyError } from '../errors.js'
+import { EfsError, classifyError, isDefiniteSendRefusal } from '../errors.js'
 import { EFS_BYTES_STORE_BYTECODE } from './onchain-bytecode.js'
 
 /**
@@ -274,6 +274,12 @@ export async function storeOnchain(
     // is the user's chance to switch networks; the manager must not land on the new chain
     // while the chunk's receipt was awaited on the deployment chain (orphaned storage).
     await ctx.assertChain?.()
+  } catch (cause) {
+    // PRE-send guard failures (abort / chain drift) are definitively
+    // never-broadcast — the confident "wrap the existing chunk" recovery holds.
+    throw new OnchainStoreIncomplete(chunkAddress, chunkTx, cause)
+  }
+  try {
     managerTx = await classified(() =>
       ctx.walletClient.deployContract({
         abi: EFS_BYTES_STORE_ABI,
@@ -285,7 +291,14 @@ export async function storeOnchain(
       }),
     )
   } catch (cause) {
-    throw new OnchainStoreIncomplete(chunkAddress, chunkTx, cause)
+    // Refusal-vs-transport split, same rule as the layered submitter
+    // (r3740967877): a classified refusal RESPONSE proves the manager deploy
+    // was never broadcast; a code-less transport failure proves nothing — the
+    // deploy may still mine, and an immediate re-wrap would pay for a
+    // DUPLICATE manager. The flag switches the recovery guidance.
+    throw new OnchainStoreIncomplete(chunkAddress, chunkTx, cause, undefined, {
+      managerBroadcastUnknown: !isDefiniteSendRefusal(cause),
+    })
   }
   let chunkManager: Address
   try {
@@ -379,17 +392,34 @@ export class OnchainStoreIncomplete extends EfsError {
   /** The manager deploy tx, when the failure happened AT/AFTER its broadcast
    * (its receipt failed or lacked a contract address — see `cause`; an
    * `OnchainDeployUnconfirmed` cause means the manager may STILL mine). Absent
-   * when the write stopped before the manager was ever sent. */
+   * when the write stopped before the manager was ever sent — or when its send
+   * failed WITHOUT a response (see `managerBroadcastUnknown`). */
   readonly managerTx?: Hex
-  constructor(chunkAddress: Address, chunkTx: Hex, cause: unknown, managerTx?: Hex) {
+  /** `true` when the manager SEND failed without a response (code-less
+   * transport loss) — whether it was broadcast is UNKNOWN and it may STILL
+   * MINE even though no hash is available. `false` when the failure was a
+   * refusal RESPONSE or happened before the send, which proves the manager was
+   * never broadcast (the confident re-wrap recovery is then safe). */
+  readonly managerBroadcastUnknown: boolean
+  constructor(
+    chunkAddress: Address,
+    chunkTx: Hex,
+    cause: unknown,
+    managerTx?: Hex,
+    opts?: { managerBroadcastUnknown?: boolean },
+  ) {
+    const unknownSend = opts?.managerBroadcastUnknown === true
     super(
-      managerTx === undefined
-        ? `EFS write: the SSTORE2 chunk landed at ${chunkAddress} (tx ${chunkTx}), but the write stopped before the chunk-manager deploy. The chunk is on-chain and paid for — a blind fs.write retry deploys a DUPLICATE; recovery should wrap the existing chunk in a manager instead.`
-        : `EFS write: the SSTORE2 chunk landed at ${chunkAddress} (tx ${chunkTx}), but the chunk-manager leg (tx ${managerTx}) failed — see cause for whether it may still mine. The chunk is on-chain and paid for — a blind fs.write retry deploys a DUPLICATE; recovery should check the manager tx's fate and wrap the existing chunk if it did not land.`,
+      managerTx !== undefined
+        ? `EFS write: the SSTORE2 chunk landed at ${chunkAddress} (tx ${chunkTx}), but the chunk-manager leg (tx ${managerTx}) failed — see cause for whether it may still mine. The chunk is on-chain and paid for — a blind fs.write retry deploys a DUPLICATE; recovery should check the manager tx's fate and wrap the existing chunk if it did not land.`
+        : unknownSend
+          ? `EFS write: the SSTORE2 chunk landed at ${chunkAddress} (tx ${chunkTx}), and the chunk-manager deploy's send failed WITHOUT a response — whether it was broadcast is UNKNOWN and it may STILL MINE (no tx hash is available). Do NOT immediately wrap the chunk again (a broadcast manager would be duplicated and paid twice): check the signing account's pending transactions/nonce first, and wrap the existing chunk only once no manager lands.`
+          : `EFS write: the SSTORE2 chunk landed at ${chunkAddress} (tx ${chunkTx}), but the write stopped before the chunk-manager deploy. The chunk is on-chain and paid for — a blind fs.write retry deploys a DUPLICATE; recovery should wrap the existing chunk in a manager instead.`,
       { code: 'PartialBatchFailure', cause },
     )
     this.chunkAddress = chunkAddress
     this.chunkTx = chunkTx
+    this.managerBroadcastUnknown = unknownSend
     if (managerTx !== undefined) this.managerTx = managerTx
   }
 }

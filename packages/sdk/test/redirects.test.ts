@@ -32,6 +32,7 @@ import {
   RedirectScanTruncated,
   RevokeUnconfirmed,
 } from '../src/errors.js'
+import { lens } from '../src/lenses/resolve.js'
 import type { ReadContext } from '../src/reads/context.js'
 import {
   DEFAULT_REDIRECT_HOPS,
@@ -973,6 +974,41 @@ describe('makeRedirectsNs', () => {
     expect(err).toBe(reverted) // the RAW failure, not IndexingIncomplete
     expect(err).not.toBeInstanceOf(IndexingIncomplete)
     expect(indexerCalls).toHaveLength(0) // indexRevocation never attempted
+  })
+
+  it('re-selects WITHIN the winning attester after a raced revoke — never falls through (r3740967874)', async () => {
+    // Attester A's lowest-UID redirect is revoked between the scan and the EAS
+    // decode, but A still asserts a second active redirect. First-attester-wins:
+    // the selection must return A's surviving record, never fall through to the
+    // lower-priority attester B.
+    const B = addr(0xacc02)
+    const chain = makeChain({
+      [FROM]: [
+        {
+          attester: ATTESTER,
+          redirectUID: uid(0xf1), // lowest — raced away
+          target: TO,
+          kind: REDIRECT_KIND.sameAs,
+          revokedAfterScan: true,
+        },
+        {
+          attester: ATTESTER,
+          redirectUID: uid(0xf2), // A's surviving record — the honest winner
+          target: uid(0x222),
+          kind: REDIRECT_KIND.sameAs,
+        },
+        {
+          attester: B,
+          redirectUID: uid(0xf3),
+          target: uid(0x333),
+          kind: REDIRECT_KIND.sameAs,
+        },
+      ],
+    })
+    const rec = await nsWith(chain).get(FROM, { lens: lens([ATTESTER, B]) })
+    expect(rec?.attester).toBe(ATTESTER) // not B — no fall-through
+    expect(rec?.redirectUID).toBe(uid(0xf2))
+    expect(rec?.to).toBe(uid(0x222))
   })
 
   it('a redirect revoked BETWEEN the scan and the EAS decode is discarded (r3740949738)', async () => {
