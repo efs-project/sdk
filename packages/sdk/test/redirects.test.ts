@@ -740,7 +740,7 @@ describe('makeRedirectsNs', () => {
   function harness(
     chain: ReadContext['publicClient'],
     ctx = makeSubmitCtx().ctx,
-    opts?: { failIndexerCall?: boolean },
+    opts?: { failIndexerCall?: boolean; failWaitForReceipt?: Error },
   ) {
     const indexerCalls: { fn: string; uid: Hex }[] = []
     const waited: Hex[] = []
@@ -755,6 +755,7 @@ describe('makeRedirectsNs', () => {
         return uid(0x1dc)
       },
       waitForReceipt: async (tx) => {
+        if (opts?.failWaitForReceipt) throw opts.failWaitForReceipt
         waited.push(tx)
       },
     })
@@ -872,6 +873,24 @@ describe('makeRedirectsNs', () => {
     expect(ii.op).toBe('indexRevocation')
     expect(ii.uid).toBe(uid(0xabc))
     expect(ii.txHash).toBe(uid(0xfee)) // the landed revoke leg
+  })
+
+  it('REGRESSION: a failed/REVERTED revoke wait escapes RAW — never rebranded IndexingIncomplete', async () => {
+    // A mined-but-reverted revoke means the redirect is still fully active in
+    // EAS: IndexingIncomplete's "the revoke landed — efs.index(uid) repairs it"
+    // guidance would be false on every clause, and the repair would then report
+    // 'already-indexed' (closing the loop on the lie). The revoke leg's failure
+    // must surface as itself.
+    const reverted = Object.assign(new Error('transaction reverted on-chain (tx 0xfee).'), {
+      code: 'ContractReverted',
+    })
+    const { ns, indexerCalls } = harness(makeChain({}), makeSubmitCtx().ctx, {
+      failWaitForReceipt: reverted,
+    })
+    const err = await ns.remove(uid(0xabc)).catch((e) => e)
+    expect(err).toBe(reverted) // the RAW failure, not IndexingIncomplete
+    expect(err).not.toBeInstanceOf(IndexingIncomplete)
+    expect(indexerCalls).toHaveLength(0) // indexRevocation never attempted
   })
 
   it('get returns the SELECTED record (any kind, ratified selection) under the default lens', async () => {

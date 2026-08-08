@@ -183,3 +183,34 @@ describe('NFC is part of canonicity (SDK-checkable; the contract cannot)', () =>
     expect(encodeName(decodeName(nfc))).toBe(nfc)
   })
 })
+
+describe('NFC on the DECODED name (escape-adjacent compositions)', () => {
+  it('rejects a canonical-looking string whose DECODED form is not NFC (%3D + U+0338 → ≠)', () => {
+    // The escaped form is NFC-stable ('D' + U+0338 has no composition) but the
+    // decoded '=' + U+0338 composes to '≠' — accepting it would vouch for a
+    // name whose decode→re-encode round trip lands on a DIFFERENT slot.
+    const sneaky = '%3D\u0338'
+    expect(isCanonicalName(sneaky)).toBe(false)
+    expect(() => decodeName(sneaky)).toThrow(InvalidAnchorNameError)
+  })
+
+  it('accepts a legitimate escape-adjacent combining mark (no false-reject of encodeName output)', () => {
+    // ':' + U+0300 encodes to '%3A' + U+0300; the ESCAPED form's 'A' + U+0300
+    // composes under NFC, so the old escaped-string check wrongly rejected the
+    // codec's own output. The decoded form is legitimately NFC.
+    const human = ':\u0300'
+    const c = encodeName(human)
+    expect(c).toBe('%3A\u0300')
+    expect(isCanonicalName(c)).toBe(true)
+    expect(decodeName(c)).toBe(human.normalize('NFC'))
+    expect(encodeName(decodeName(c))).toBe(c)
+  })
+
+  it('rejects lone UTF-16 surrogates (TextEncoder would rewrite them to U+FFFD)', () => {
+    const lonely = '\uD800abc'
+    expect(() => encodeName(lonely)).toThrow(InvalidAnchorNameError)
+    expect(isCanonicalName(lonely)).toBe(false)
+    // A well-formed astral pair stays fine.
+    expect(encodeName('📁ok')).toBe('📁ok')
+  })
+})

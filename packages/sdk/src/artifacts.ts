@@ -66,22 +66,40 @@ export class MalformedArtifact extends EfsError {
 }
 
 const BIGINT_TAG = '$efsbigint'
+/** A single-key object whose key is the tag, or the tag + N escape `$`s —
+ * the family the escaping scheme below owns. */
+const TAG_FAMILY_RE = /^\$efsbigint\$*$/
 
-/** JSON replacer: tag bigints so the parser can revive them losslessly. */
+/** JSON replacer: tag bigints so the parser can revive them losslessly.
+ * INJECTIVE over arbitrary user `data`/`ext`: a user object that happens to
+ * look like the tag (single key `$efsbigint`, or an already-escaped form) is
+ * escaped by appending `$` to its key; the reviver strips one. Without this,
+ * `{ $efsbigint: "5" }` in an ext bag would silently revive as `5n`. */
 function replacer(_key: string, value: unknown): unknown {
-  return typeof value === 'bigint' ? { [BIGINT_TAG]: value.toString(10) } : value
+  if (typeof value === 'bigint') return { [BIGINT_TAG]: value.toString(10) }
+  if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
+    const keys = Object.keys(value)
+    const k = keys[0]
+    if (keys.length === 1 && k !== undefined && TAG_FAMILY_RE.test(k)) {
+      return { [`${k}$`]: (value as Record<string, unknown>)[k] }
+    }
+  }
+  return value
 }
 
-/** JSON reviver: restore tagged bigints. */
+/** JSON reviver: restore tagged bigints; unescape the escaped tag family. */
 function reviver(_key: string, value: unknown): unknown {
-  if (
-    typeof value === 'object' &&
-    value !== null &&
-    BIGINT_TAG in value &&
-    typeof (value as Record<string, unknown>)[BIGINT_TAG] === 'string' &&
-    Object.keys(value).length === 1
-  ) {
-    return BigInt((value as Record<string, string>)[BIGINT_TAG] as string)
+  if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
+    const keys = Object.keys(value)
+    const k = keys[0]
+    if (keys.length === 1 && k !== undefined) {
+      if (k === BIGINT_TAG && typeof (value as Record<string, unknown>)[k] === 'string') {
+        return BigInt((value as Record<string, string>)[k] as string)
+      }
+      if (k.length > BIGINT_TAG.length && TAG_FAMILY_RE.test(k)) {
+        return { [k.slice(0, -1)]: (value as Record<string, unknown>)[k] }
+      }
+    }
   }
   return value
 }
@@ -155,8 +173,10 @@ export function parseDataRef(json: string): DataRef & { ext?: Record<string, unk
     throw new MalformedArtifact('DataRef payload missing uid/chainId/resolvedBy/profile')
   }
   return {
-    __brand: 'DataRef',
+    // Spread FIRST; every load-bearing field (including the brand) is set
+    // AFTER it so a crafted payload key can never clobber one.
     ...(d as object),
+    __brand: 'DataRef',
     profile: 'efs/v1',
     uid: d.uid as DataRef['uid'],
     chainId: d.chainId,

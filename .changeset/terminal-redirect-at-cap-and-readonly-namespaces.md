@@ -2,6 +2,8 @@
 "@efs/sdk": patch
 ---
 
+> **Redirect half superseded in the same release**: `followRedirectChain` and `RedirectHopLimit` were replaced wholesale by the ratified specs/09 engine (see the ratified-redirect-resolution change) — the at-cap-terminal semantics survive inside `walkSymlinks`. The read-only-namespace half below stands.
+
 Two fixes:
 
 - **A redirect chain whose length equals the hop cap is no longer rejected.** `followRedirectChain`

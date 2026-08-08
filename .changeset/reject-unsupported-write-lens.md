@@ -2,6 +2,8 @@
 "@efs/sdk": patch
 ---
 
+> **Option renamed in the same release**: the write-side option is now `author` (the v1-profile change — a lens is reader policy; the write-side identity is the author). The guard semantics below are unchanged under the new name.
+
 `fs.write`/`fs.setOverview` now reject a `lens` other than the connected account with a
 typed `NotImplemented` error instead of silently ignoring it. The Tier-1 write path always
 attests as the wallet account (EFS lenses key on the attester), so a foreign `opts.lens`

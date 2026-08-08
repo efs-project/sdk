@@ -132,7 +132,6 @@ async function resolveFilePathWithSymlinks(
     functionName: 'rootAnchorUID',
   })
 
-  const budget: HopBudget = { remaining: cap }
   const via: RedirectRecord[] = []
   let parent = root
 
@@ -161,6 +160,12 @@ async function resolveFilePathWithSymlinks(
     if (child === ZERO_UID) return { kind: 'not-found' }
 
     // Landed on an anchor: follow its symlink chain in the SAME lens scope.
+    // The budget is PER LANDED ANCHOR (specs/09 §8: the reference algorithm
+    // re-initializes `hops = 0` on each follower re-entry after descent — the
+    // D_MAX bound describes one walk, not the whole path; §3's exceedance
+    // example is a single 17-CHAINED-symlink walk). Total work stays bounded
+    // by segments × cap; the visited-set is likewise fresh per walk.
+    const budget: HopBudget = { remaining: cap }
     const walk = await walkSymlinks(ctx, { uid: child, isData: false }, attesters, budget)
     via.push(...walk.via)
     if (walk.status !== 'Resolved') {

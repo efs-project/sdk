@@ -236,14 +236,20 @@ export function makeRedirectsNs(deps: RedirectsNsDeps): RedirectsNs {
       if (opts?.index === false) return { revokeTx }
 
       // ORDERING IS MANDATORY: indexRevocation reverts 'not revoked in EAS'
-      // until the revoke tx mines — wait for it first.
+      // until the revoke tx mines — wait for it first. The two legs fail
+      // DIFFERENTLY and must not share a catch: a failed/REVERTED revoke means
+      // the redirect is still fully active in EAS — IndexingIncomplete's
+      // "the write landed, efs.index(uid) repairs it" story would be false on
+      // every clause (and the repair would report 'already-indexed', closing
+      // the loop on the lie). Only an indexing-leg failure AFTER a successful
+      // revoke wait is the recoverable partial state.
+      await deps.waitForReceipt(revokeTx) // throws raw on revert/unknown — NOT IndexingIncomplete
       try {
-        await deps.waitForReceipt(revokeTx)
         const indexRevocationTx = await deps.indexerCall('indexRevocation', redirectUID)
         return { revokeTx, indexRevocationTx }
       } catch (err) {
-        // The revoke is landed (or at least broadcast); the mirror is stale —
-        // the redirect keeps being SERVED by filtered reads until repaired.
+        // The revoke IS landed; the mirror is stale — the redirect keeps being
+        // SERVED by filtered reads until repaired via efs.index(uid).
         throw new IndexingIncomplete({
           op: 'indexRevocation',
           uid: redirectUID,

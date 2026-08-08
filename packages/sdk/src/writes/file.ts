@@ -459,7 +459,7 @@ export async function writeFileTier1(
   const submitter = selectSingle(profile, plan)
 
   // 6. Submit via the seam. The attester is the connected account (lenses key on
-  // it, computed in step 3a); `opts.lens` is reserved but not yet honored on Tier-1.
+  // it, computed in step 3a); `opts.author` is reserved but not yet honored on Tier-1.
   //
   // Map the public `opts.onProgress` to the submitter's per-layer `onLayer` event so a
   // caller driving UI from it advances as each layer's `multiAttest` lands (the layered

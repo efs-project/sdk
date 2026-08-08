@@ -112,3 +112,42 @@ describe('WriteReceipt round-trip', () => {
     expect(() => parseWriteReceipt(logged)).toThrow(MalformedArtifact)
   })
 })
+
+describe('adversarial-review regressions', () => {
+  it('bigint tag is INJECTIVE: user ext/data shaped like the tag round-trips verbatim', async () => {
+    const { parseWriteReceipt, serializeWriteReceipt } = await import('../src/artifacts.js')
+    const receipt = {
+      profile: 'efs/v1',
+      path: '/x',
+      resolvedBy: '0x0000000000000000000000000000000000000001',
+      steps: [],
+      signatureCount: 1,
+      mechanism: 'direct',
+    } as never
+    const ext = {
+      literal: { $efsbigint: '5' }, // looks exactly like the tag
+      escapedShape: { $efsbigint$: 'x' }, // looks like the escaped form
+      real: 7n, // an actual bigint alongside
+    }
+    const out = parseWriteReceipt(serializeWriteReceipt(receipt, ext))
+    expect(out.ext?.literal).toEqual({ $efsbigint: '5' }) // NOT revived as 5n
+    expect(out.ext?.escapedShape).toEqual({ $efsbigint$: 'x' })
+    expect(out.ext?.real).toBe(7n)
+  })
+
+  it('parseDataRef: a crafted payload cannot clobber __brand (or any load-bearing field)', async () => {
+    const { parseDataRef, serializeDataRef } = await import('../src/artifacts.js')
+    const ref = {
+      __brand: 'DataRef',
+      profile: 'efs/v1',
+      uid: `0x${'11'.repeat(32)}`,
+      chainId: 1,
+      resolvedBy: '0x0000000000000000000000000000000000000002',
+    } as never
+    const json = serializeDataRef(ref)
+    // Inject a hostile __brand into the payload.
+    const tampered = json.replace('"data":{', '"data":{"__brand":"EvilRef",')
+    const out = parseDataRef(tampered)
+    expect(out.__brand).toBe('DataRef')
+  })
+})

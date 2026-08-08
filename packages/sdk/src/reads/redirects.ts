@@ -262,10 +262,10 @@ export type RedirectWalkResult = {
   via: readonly RedirectRecord[]
 }
 
-/** A mutable hop budget shared across one path resolution: each followed
- * symlink decrements it, so N segments cannot multiply the cap (specs/09 §3's
- * budget describes a walk; the SDK conservatively scopes ONE budget per path
- * resolution — flagged upstream as spec feedback). */
+/** A mutable hop budget for ONE navigational walk (specs/09 §8: the reference
+ * algorithm re-initializes the hop counter per follower re-entry, so the
+ * D_MAX bound is per landed anchor — the path resolver mints a fresh budget
+ * per walk; total work stays bounded by segments × cap). */
 export type HopBudget = { remaining: number }
 
 /**

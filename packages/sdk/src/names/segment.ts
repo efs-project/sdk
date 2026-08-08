@@ -50,6 +50,7 @@ export type InvalidNameReason =
   | 'empty'
   | 'dot-segment'
   | 'not-nfc'
+  | 'lone-surrogate'
   | 'bare-reserved-byte'
   | 'malformed-escape'
   | 'lowercase-escape'
@@ -127,6 +128,10 @@ export function encodeName(human: string): CanonicalName {
   const nfc = human.normalize('NFC')
   if (nfc.length === 0) throw new InvalidAnchorNameError(human, 'empty')
   if (nfc === '.' || nfc === '..') throw new InvalidAnchorNameError(human, 'dot-segment')
+  // A lone UTF-16 surrogate survives NFC (identity) but TextEncoder replaces it
+  // with U+FFFD on the wire - two different inputs would mint ONE on-chain name
+  // (injectivity broken) and neither round-trips. Reject up front.
+  if (LONE_SURROGATE_RE.test(nfc)) throw new InvalidAnchorNameError(human, 'lone-surrogate')
   // The reserved set is entirely ASCII, and a multi-byte UTF-8 sequence contains
   // only bytes ≥0x80 — so a code-point walk suffices: escape reserved ASCII,
   // keep everything else (including all non-ASCII) literal.
@@ -142,37 +147,65 @@ export function encodeName(human: string): CanonicalName {
   return out as CanonicalName
 }
 
-/** Validation verdict for a claimed-canonical string — mirrors
+/** An unpaired UTF-16 surrogate: a high surrogate not followed by a low, or a
+ * low not preceded by a high. Such strings are not valid Unicode; TextEncoder
+ * silently substitutes U+FFFD, destroying injectivity and round-trips. */
+const LONE_SURROGATE_RE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/
+
+/** Parse + validate a claimed-canonical string in ONE pass - mirrors
  * `EFSIndexer._isValidAnchorName` byte-for-byte (over-escape rejection
- * included) PLUS the NFC rule the contract cannot check but the SDK can:
- * specs/02 canonical = NFC + escaping, so a non-NFC string is NOT canonical —
- * admitting one would let `asCanonicalName`/the graph dev-guard pass an NFD
- * segment that mints a permanent anchor slot the (NFC-normalizing) path
- * pipeline can never resolve. Returns the failing rule, or `undefined`. */
-function validateCanonical(s: string): InvalidNameReason | undefined {
-  if (s.length === 0) return 'empty'
-  if (s === '.' || s === '..') return 'dot-segment'
-  if (s !== s.normalize('NFC')) return 'not-nfc'
+ * included) PLUS the two rules the contract cannot check but the SDK can:
+ *   - well-formed UTF-16 (no lone surrogates - TextEncoder would silently
+ *     rewrite them to U+FFFD, breaking one-spelling-per-name);
+ *   - NFC, checked on the DECODED human name, not the escaped string.
+ *     specs/02 canonical = NFC(human) THEN escape, so the NFC invariant
+ *     belongs to the decoded form: checking the escaped string both MISSES an
+ *     escape-adjacent composition (`%3D` + U+0338 decodes to a non-NFC
+ *     `=`+overlay while the escaped form is NFC-stable) and FALSE-REJECTS a
+ *     legitimate one (`:`+U+0300 encodes to `%3A`+U+0300, whose `A`+U+0300
+ *     composes in the escaped form only).
+ * Admitting a non-NFC name would let `asCanonicalName`/the graph dev-guard
+ * pass a segment that mints a permanent anchor slot the (NFC-normalizing)
+ * path pipeline can never resolve. */
+function parseCanonical(s: string): { human: string } | { reason: InvalidNameReason } {
+  if (s.length === 0) return { reason: 'empty' }
+  if (s === '.' || s === '..') return { reason: 'dot-segment' }
+  if (LONE_SURROGATE_RE.test(s)) return { reason: 'lone-surrogate' }
   const bytes = new TextEncoder().encode(s)
+  const out = new Uint8Array(bytes.length)
+  let n = 0
   for (let i = 0; i < bytes.length; i++) {
     const b = bytes[i] as number
     if (b === 0x25) {
-      if (i + 2 >= bytes.length) return 'malformed-escape'
+      if (i + 2 >= bytes.length) return { reason: 'malformed-escape' }
       const h1 = String.fromCharCode(bytes[i + 1] as number)
       const h2 = String.fromCharCode(bytes[i + 2] as number)
       if (!isUpperHexChar(h1) || !isUpperHexChar(h2)) {
         // Distinguish the lowercase case for a better error; the contract
         // rejects both identically.
-        return /[a-f]/.test(h1) || /[a-f]/.test(h2) ? 'lowercase-escape' : 'malformed-escape'
+        return {
+          reason: /[a-f]/.test(h1) || /[a-f]/.test(h2) ? 'lowercase-escape' : 'malformed-escape',
+        }
       }
       const decoded = Number.parseInt(h1 + h2, 16)
-      if (!isReservedByte(decoded) && decoded !== 0x25) return 'over-escape'
+      if (!isReservedByte(decoded) && decoded !== 0x25) return { reason: 'over-escape' }
+      out[n++] = decoded
       i += 2
     } else if (isReservedByte(b)) {
-      return 'bare-reserved-byte'
+      return { reason: 'bare-reserved-byte' }
+    } else {
+      out[n++] = b
     }
   }
-  return undefined
+  const human = new TextDecoder().decode(out.slice(0, n))
+  if (human !== human.normalize('NFC')) return { reason: 'not-nfc' }
+  return { human }
+}
+
+/** Validation verdict only - see {@link parseCanonical}. */
+function validateCanonical(s: string): InvalidNameReason | undefined {
+  const parsed = parseCanonical(s)
+  return 'reason' in parsed ? parsed.reason : undefined
 }
 
 /** Type guard: is `s` a canonical anchor name (would the resolver accept it)? */
@@ -196,21 +229,7 @@ export function asCanonicalName(s: string): CanonicalName {
  * @throws {InvalidAnchorNameError} if `canonical` is not canonical.
  */
 export function decodeName(canonical: string): string {
-  const reason = validateCanonical(canonical)
-  if (reason !== undefined) throw new InvalidAnchorNameError(canonical, reason)
-  const bytes = new TextEncoder().encode(canonical)
-  const out = new Uint8Array(bytes.length)
-  let n = 0
-  for (let i = 0; i < bytes.length; i++) {
-    const b = bytes[i] as number
-    if (b === 0x25) {
-      const h1 = String.fromCharCode(bytes[i + 1] as number)
-      const h2 = String.fromCharCode(bytes[i + 2] as number)
-      out[n++] = Number.parseInt(h1 + h2, 16)
-      i += 2
-    } else {
-      out[n++] = b
-    }
-  }
-  return new TextDecoder().decode(out.slice(0, n))
+  const parsed = parseCanonical(canonical)
+  if ('reason' in parsed) throw new InvalidAnchorNameError(canonical, parsed.reason)
+  return parsed.human
 }
