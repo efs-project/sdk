@@ -128,6 +128,8 @@ interface MockChainOptions {
   mintUID?: (globalIndex: number) => Hex
   /** Override the DATA author the mock EAS reports (the hardlink gate read). */
   hardlinkAuthor?: Address
+  /** Override the schema the mock EAS reports for the hardlink target. */
+  hardlinkSchema?: Hex
   /** Layer (1-based call index) at which `writeContract` throws a CODED refusal. */
   revertOnCall?: number
   /** Layer at which `writeContract` fails with a CODE-LESS transport error. */
@@ -225,7 +227,10 @@ function makeMockChain(opts: MockChainOptions = {}) {
     // `hardlinkAuthor` overrides it to simulate a foreign DATA.
     async readContract(args: { functionName: string }) {
       if (args.functionName === 'getAttestation') {
-        return { attester: opts.hardlinkAuthor ?? ACCOUNT }
+        return {
+          attester: opts.hardlinkAuthor ?? ACCOUNT,
+          schema: opts.hardlinkSchema ?? SCHEMAS.data,
+        }
       }
       throw new Error(`mock: unexpected readContract ${args.functionName}`)
     },
@@ -435,6 +440,34 @@ describe('submitWriteTier1 — hardlink plan', () => {
     expect(String((err as Error).message)).toMatch(/authored by 0x0+beef/i)
     expect(String((err as Error).message)).toMatch(/ForeignDataUID/) // Solidity parity pointer
     expect(sent).toHaveLength(0) // nothing broadcast — the gate runs first
+  })
+
+  it('REFUSES a self-authored NON-DATA target — schema gate (r3741189815)', async () => {
+    // EdgeResolver indexes the PIN under the TARGET's schema; file resolution
+    // reads the DATA slot — a confirmed receipt for an invisible file.
+    const plan = buildFileWriteGraph({
+      ...hardlinkBase,
+      content: { kind: 'hardlink', dataUID: EXISTING_DATA },
+    })
+    const { ctx, sent } = makeMockChain({ hardlinkSchema: SCHEMAS.anchor })
+    const err = await submitWriteTier1(plan, ctx).catch((e) => e)
+    expect((err as { code?: string }).code).toBe('InvalidArgument')
+    expect(String((err as Error).message)).toMatch(/not a DATA attestation/)
+    expect(String((err as Error).message)).toMatch(/NotDataUID/) // Solidity parity pointer
+    expect(sent).toHaveLength(0)
+  })
+
+  it('FAILS CLOSED on a hardlink plan without the dataSchemaUID stamp', async () => {
+    const plan = buildFileWriteGraph({
+      ...hardlinkBase,
+      content: { kind: 'hardlink', dataUID: EXISTING_DATA },
+    })
+    const stripped = { ...plan, dataSchemaUID: undefined } as typeof plan
+    const { ctx, sent } = makeMockChain()
+    const err = await submitWriteTier1(stripped, ctx).catch((e) => e)
+    expect((err as { code?: string }).code).toBe('InvalidArgument')
+    expect(String((err as Error).message)).toMatch(/dataSchemaUID stamp/)
+    expect(sent).toHaveLength(0)
   })
 
   it('FAILS CLOSED when the context cannot run the authorship read', async () => {

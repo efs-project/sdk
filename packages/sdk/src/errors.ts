@@ -586,6 +586,25 @@ const DEFINITE_SEND_REFUSALS: ReadonlySet<string> = new Set([
   'WalletRequired',
 ])
 
+/** A raw EAS verb's `writeContract` failed WITHOUT a response — the transport
+ * dropped after the request may already have reached the node, so whether the
+ * transaction was broadcast is UNKNOWN: it may still mine, and there is NO
+ * hash to reconcile by. The refusal-vs-transport split every send path applies
+ * (see {@link isDefiniteSendRefusal}); a response-backed refusal propagates as
+ * the ordinary classified error instead. */
+export class EasSendUnknown extends EfsError {
+  override name = 'EasSendUnknown'
+  /** Which verb sent. */
+  readonly op: 'attest' | 'multiAttest' | 'revoke'
+  constructor(op: 'attest' | 'multiAttest' | 'revoke', cause: unknown) {
+    super(
+      `EFS eas.${op}: the send failed WITHOUT a response — whether the transaction was broadcast is UNKNOWN and it may STILL MINE (no tx hash is available). Do NOT blindly retry: ${op === 'revoke' ? 'a landed revoke makes the resend REVERT (AlreadyRevoked)' : 'a landed send would DUPLICATE the attestation(s)'}. Check the signing account's pending transactions/nonce first.`,
+      { code: 'PartialBatchFailure', cause },
+    )
+    this.op = op
+  }
+}
+
 /** `true` when `err` classifies to a definite send REFUSAL (see
  * {@link DEFINITE_SEND_REFUSALS}) — the tx was provably never broadcast. */
 export function isDefiniteSendRefusal(err: unknown): boolean {

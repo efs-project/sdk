@@ -16,7 +16,7 @@
  */
 
 import type { Account, Address, Chain, Hex } from 'viem'
-import { classifyError } from '../errors.js'
+import { EasSendUnknown, classifyError, isDefiniteSendRefusal } from '../errors.js'
 import type { Attestation } from '../types.js'
 import { easAbi } from './abi.js'
 import {
@@ -153,7 +153,12 @@ export function makeEasVerbs(ctx: EasVerbContext): EasVerbs {
           ...txExtras(ctx),
         })
       } catch (err) {
-        throw classifyError(err)
+        // Refusal-vs-transport split (r3741189816; the same rule as the layered
+        // submitter and the storage deploys): a code-less transport failure
+        // cannot prove the tx was never broadcast — it may still mine, and a
+        // blind retry duplicates the attestation (or reverts AlreadyRevoked).
+        if (isDefiniteSendRefusal(err)) throw classifyError(err)
+        throw new EasSendUnknown('attest', err)
       }
     },
     multiAttest: async (requests) => {
@@ -171,7 +176,12 @@ export function makeEasVerbs(ctx: EasVerbContext): EasVerbs {
           ...txExtras(ctx),
         })
       } catch (err) {
-        throw classifyError(err)
+        // Refusal-vs-transport split (r3741189816; the same rule as the layered
+        // submitter and the storage deploys): a code-less transport failure
+        // cannot prove the tx was never broadcast — it may still mine, and a
+        // blind retry duplicates the attestation (or reverts AlreadyRevoked).
+        if (isDefiniteSendRefusal(err)) throw classifyError(err)
+        throw new EasSendUnknown('multiAttest', err)
       }
     },
     revoke: async (request) => {
@@ -190,7 +200,12 @@ export function makeEasVerbs(ctx: EasVerbContext): EasVerbs {
           ...txExtras(ctx),
         })
       } catch (err) {
-        throw classifyError(err)
+        // Refusal-vs-transport split (r3741189816; the same rule as the layered
+        // submitter and the storage deploys): a code-less transport failure
+        // cannot prove the tx was never broadcast — it may still mine, and a
+        // blind retry duplicates the attestation (or reverts AlreadyRevoked).
+        if (isDefiniteSendRefusal(err)) throw classifyError(err)
+        throw new EasSendUnknown('revoke', err)
       }
     },
     getAttestation: async (uid) => {

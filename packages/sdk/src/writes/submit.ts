@@ -418,11 +418,31 @@ async function assertHardlinkSelfAuthored(plan: FileWriteGraph, ctx: SubmitConte
     abi: getAttestationAbi,
     functionName: 'getAttestation',
     args: [dataUID],
-  })) as { attester?: Address } | undefined
+  })) as { attester?: Address; schema?: Hex } | undefined
   const author = att?.attester
   if (author === undefined || author.toLowerCase() !== submitter.toLowerCase()) {
     throw new EfsError(
       `EFS write: the hardlink DATA ${dataUID} is authored by ${author ?? '0x0 (unknown UID)'}, not the submitting account ${submitter}. A foreign hardlink resolves to a file whose mirrors/properties are INVISIBLE under your lens (unreadable, unverifiable). Re-publish the bytes as your own write instead. (Solidity parity: EFSLib.ForeignDataUID.)`,
+      { code: 'InvalidArgument' },
+    )
+  }
+  // The target must BE a DATA (r3741189815): EdgeResolver indexes the PIN under
+  // the TARGET's actual schema while file resolution reads the DATA slot, so a
+  // self-authored ANCHOR/PROPERTY target would yield a confirmed receipt for a
+  // file no SDK reader can find. The expected UID rides ON THE PLAN (the
+  // builder stamps `dataSchemaUID` from its schema set) — a plan without the
+  // stamp fails CLOSED. (Solidity parity: EFSLib.NotDataUID.)
+  const expected = plan.dataSchemaUID
+  if (expected === undefined) {
+    throw new EfsError(
+      'EFS write: this HARDLINK plan carries no dataSchemaUID stamp — rebuild it with buildFileWriteGraph (the gate must verify the target is a DATA attestation before placement).',
+      { code: 'InvalidArgument' },
+    )
+  }
+  const schema = att?.schema
+  if (schema === undefined || schema.toLowerCase() !== expected.toLowerCase()) {
+    throw new EfsError(
+      `EFS write: the hardlink target ${dataUID} is not a DATA attestation (schema ${schema ?? 'unknown'}, expected ${expected}). The placement PIN would index under the target's actual schema while file resolution reads the DATA slot — a confirmed receipt for a file no reader can find. (Solidity parity: EFSLib.NotDataUID.)`,
       { code: 'InvalidArgument' },
     )
   }

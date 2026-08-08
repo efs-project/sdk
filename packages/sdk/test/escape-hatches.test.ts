@@ -17,6 +17,8 @@ import {
   encodeAbiParameters,
 } from 'viem'
 import { describe, expect, it } from 'vitest'
+import { makeEasVerbs } from '../src/eas/verbs.js'
+import { EasSendUnknown } from '../src/errors.js'
 import {
   type Attestation,
   type DeploymentsMap,
@@ -414,3 +416,32 @@ function encodeAttestation(att: Attestation): Hex {
     ],
   )
 }
+
+describe('eas verbs send-outcome split (review r3741189816)', () => {
+  const makeVerbs = (writeError: unknown) =>
+    makeEasVerbs({
+      requireWallet: () => {},
+      easAddress: contracts.eas,
+      walletClient: {
+        async writeContract() {
+          throw writeError
+        },
+      },
+    } as never)
+
+  it('a code-less transport loss is EasSendUnknown (may still mine), never an ordinary error', async () => {
+    const verbs = makeVerbs(new Error('fetch failed: socket hang up')) // no code — transport loss
+    const err = await verbs.revoke({ schema: pad32(0x102), uid: pad32(0xabc) }).catch((e) => e)
+    expect(err).toBeInstanceOf(EasSendUnknown)
+    expect((err as EasSendUnknown).op).toBe('revoke')
+    expect(String((err as Error).message)).toMatch(/UNKNOWN and it may STILL MINE/)
+    expect(String((err as Error).message)).toMatch(/AlreadyRevoked/)
+  })
+
+  it('a coded refusal stays the classified error (clean retry)', async () => {
+    const verbs = makeVerbs(Object.assign(new Error('User rejected the request.'), { code: 4001 }))
+    const err = await verbs.revoke({ schema: pad32(0x102), uid: pad32(0xabc) }).catch((e) => e)
+    expect(err).not.toBeInstanceOf(EasSendUnknown)
+    expect((err as { code?: string }).code).toBe('UserRejected')
+  })
+})
