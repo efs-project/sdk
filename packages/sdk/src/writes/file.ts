@@ -58,6 +58,7 @@ import {
   WriteUidsUnknownError,
 } from './submit.js'
 import type { SubmitterContext } from './submitter.js'
+import { type TransportGateClient, assertTransportAnchors } from './transport-gate.js'
 
 /** Extract the URI scheme (`ipfs` from `ipfs://Qm…`, `web3` from `web3://0x…`). */
 function schemeOf(uri: string): string {
@@ -239,6 +240,19 @@ export async function resolveMirrors(
     deployment,
     opts,
     ctx.publicClient,
+  )
+  // Validate the transport anchor BEFORE the irreversible deploys
+  // (r3741715493): `transportDefinitionFor` accepts a well-shaped
+  // `opts.transportDefinition` or a stale deployment-map UID, and
+  // MirrorResolver only rejects it at the MIRROR layer — by which point the
+  // chunk + manager are deployed and PAID FOR (orphaned storage for a write
+  // that can never complete). The submitter re-checks at its own boundary; this
+  // is the same shared predicate, run before anything irreversible.
+  await assertTransportAnchors(
+    ctx.publicClient as unknown as TransportGateClient,
+    { eas: deployment.contracts.eas, indexer: deployment.contracts.indexer },
+    deployment.schemas.anchor,
+    [transportDefinition],
   )
   const { web3Uri, chunkManager, chunkAddress, txHashes } = await storeOnchain(bytes, {
     walletClient: ctx.walletClient,

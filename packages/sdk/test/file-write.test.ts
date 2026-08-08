@@ -398,6 +398,34 @@ describe('writeFileTier1 — full Tier-1 path with on-chain (web3://) default st
   })
 })
 
+describe('transport gate before paid storage (review r3741715493)', () => {
+  it('REFUSES a non-/transports/ transportDefinition BEFORE the chunk/manager deploys', async () => {
+    // The auto-store path deploys (and pays for) the chunk + manager before the
+    // submitter's boundary gate runs — an invalid transport would leave that
+    // storage orphaned for a write that can never complete.
+    const { ctx, deploys } = makeCtx()
+    const orphan = uid(0xbad0)
+    const orig = ctx.publicClient.readContract.bind(ctx.publicClient)
+    ;(ctx.publicClient as { readContract: unknown }).readContract = async (a: {
+      functionName: string
+      args?: readonly unknown[]
+    }) => {
+      // The orphan anchor is a REAL anchor whose parent chain never reaches
+      // /transports; everything else answers as usual.
+      if (a.functionName === 'getAttestation' && (a.args as [Hex])[0] === orphan) {
+        return { uid: orphan, schema: SCHEMAS.anchor, refUID: ZERO_UID }
+      }
+      return orig(a as never)
+    }
+    const err = await writeFileTier1('/docs/readme.md', CONTENT, ctx, {
+      transportDefinition: orphan,
+    }).catch((e) => e)
+    expect((err as { code?: string }).code).toBe('InvalidArgument')
+    expect(String((err as Error).message)).toMatch(/not a descendant of \/transports\//)
+    expect(deploys).toHaveLength(0) // nothing deployed, nothing paid
+  })
+})
+
 describe('writeFileTier1 — caller-supplied mirrors', () => {
   it('does NOT count any storage tx (signatureCount = EAS layers only, no deploys)', async () => {
     const { ctx, sent, deploys } = makeCtx()

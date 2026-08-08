@@ -73,8 +73,6 @@ import { decodeAbiParameters, parseEventLogs } from 'viem'
 import {
   getReferencingBySchemaAndAttesterAbi,
   getReferencingBySchemaAndAttesterCountAbi,
-  resolvePathAbi,
-  rootAnchorUidAbi,
 } from '../chain/abi/indexer.js'
 import { easAbi, getAttestationAbi } from '../eas/abi.js'
 import { buildMultiAttest } from '../eas/attest.js'
@@ -91,6 +89,7 @@ import {
   isSymbolicRef,
 } from './graph.js'
 import type { CompletedOnchainStorage } from './onchain.js'
+import { type TransportGateClient, assertTransportAnchors } from './transport-gate.js'
 
 /** A resolved `ref → mined UID` table, accumulated layer by layer. */
 export type RefMap = ReadonlyMap<string, Hex>
@@ -695,15 +694,11 @@ async function assertSymlinkTargetReadable(
   }
 }
 
-/** MirrorResolver's transport predicate, run BEFORE layer 1 (r3741671356):
- * each `transportDefinition` must be an ANCHOR attestation that descends from
- * the `/transports/` anchor (MirrorResolver.onAttest: `InvalidTransport`
- * otherwise). Without this the DATA + file-ANCHOR layer mines and only the
- * layer-2 MIRROR reverts — a paid partial graph. Walks parents via each
- * ANCHOR's `refUID` (an anchor's refUID IS its parent, the same edge
- * `EFSIndexer.getParent` reports) with the contract's depth bound; usually one
- * read per distinct transport (the common `/transports/<scheme>` sits directly
- * under the root). Fails CLOSED when the context cannot read. */
+/** MirrorResolver's transport predicate, run BEFORE layer 1 (r3741671356) —
+ * the backstop for the exported builder + executor pair (the orchestrated
+ * fs.write path runs the SAME shared check before its paid storage deploys,
+ * r3741715493). Skipped for mirror-less plans; fails CLOSED when the context
+ * cannot read. */
 async function assertMirrorTransportsValid(
   plan: FileWriteGraph,
   ctx: SubmitContext,
@@ -723,57 +718,12 @@ async function assertMirrorTransportsValid(
       { code: 'InvalidArgument' },
     )
   }
-  const read = ctx.publicClient.readContract
-  const attestationOf = (uid: Hex) =>
-    read({
-      address: ctx.easAddress,
-      abi: getAttestationAbi,
-      functionName: 'getAttestation',
-      args: [uid],
-    }) as Promise<{ schema?: Hex; refUID?: Hex } | undefined>
-  // The `/transports` root, resolved once (the same lookup the fs.write path's
-  // transport resolver performs).
-  const rootAnchor = (await read({
-    address: ctx.indexerAddress,
-    abi: rootAnchorUidAbi,
-    functionName: 'rootAnchorUID',
-    args: [],
-  })) as Hex
-  const transportsRoot = (await read({
-    address: ctx.indexerAddress,
-    abi: resolvePathAbi,
-    functionName: 'resolvePath',
-    args: [rootAnchor, 'transports'],
-  })) as Hex
-  const MAX_TRANSPORT_DEPTH = 8 // MirrorResolver.MAX_TRANSPORT_DEPTH
-  for (const def of defs) {
-    const att = await attestationOf(def)
-    if (
-      att?.schema === undefined ||
-      att.schema.toLowerCase() !== expectedAnchorSchema.toLowerCase()
-    ) {
-      throw new EfsError(
-        `EFS write: mirror transportDefinition ${def} is not an ANCHOR attestation (schema ${att?.schema ?? 'unknown'}) — MirrorResolver rejects it (InvalidTransport) after the DATA layer has mined.`,
-        { code: 'InvalidArgument' },
-      )
-    }
-    let parent = att.refUID
-    let ok = false
-    for (let depth = 0; depth < MAX_TRANSPORT_DEPTH; depth++) {
-      if (parent === undefined || parent === ZERO_UID) break
-      if (parent.toLowerCase() === transportsRoot.toLowerCase()) {
-        ok = true
-        break
-      }
-      parent = (await attestationOf(parent))?.refUID
-    }
-    if (!ok) {
-      throw new EfsError(
-        `EFS write: mirror transportDefinition ${def} is not a descendant of /transports/ — MirrorResolver rejects it (InvalidTransport) after the DATA layer has mined. Use the deployment's transports map or the /transports/<scheme> anchor.`,
-        { code: 'InvalidArgument' },
-      )
-    }
-  }
+  await assertTransportAnchors(
+    ctx.publicClient as TransportGateClient,
+    { eas: ctx.easAddress, indexer: ctx.indexerAddress },
+    expectedAnchorSchema,
+    defs,
+  )
 }
 
 // One PIN encoder, reused to re-encode `definition` once it's resolved. The PIN
