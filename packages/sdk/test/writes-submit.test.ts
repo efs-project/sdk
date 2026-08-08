@@ -8,6 +8,7 @@ import {
 } from 'viem'
 import { describe, expect, it } from 'vitest'
 import type { EfsSchemaUIDs } from '../src/chain/deployments.js'
+import { hashContent } from '../src/content/hash.js'
 import { attestedEventAbi } from '../src/eas/abi.js'
 import { SchemaEncoder } from '../src/eas/schema-encoder.js'
 import { EFS_SCHEMA_FIELDS } from '../src/eas/schemas.js'
@@ -43,7 +44,7 @@ const SCHEMAS: EfsSchemaUIDs = {
 const EAS: Address = '0x000000000000000000000000000000000000eA51'
 const PARENT = uid(0x100)
 const TRANSPORT = uid(0x200)
-const CONTENT_HASH = uid(0x300)
+const CONTENT_HASH = hashContent(new Uint8Array([1, 2, 3])) // must MATCH the bytes
 const EXISTING_DATA = uid(0x400)
 const EXISTING_ANCHOR = uid(0xea00)
 const ACCOUNT: Address = '0x00000000000000000000000000000000000acc01'
@@ -53,7 +54,7 @@ const baseInput = {
   mirrors: [{ uri: 'ipfs://QmExample', transportDefinition: TRANSPORT }] as const,
   contentType: 'text/markdown',
   contentHash: CONTENT_HASH,
-  size: 1234n,
+  size: 3n,
   schemas: SCHEMAS,
   parentAnchorUID: PARENT,
   fileName: 'readme.md',

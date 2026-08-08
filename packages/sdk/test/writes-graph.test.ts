@@ -39,7 +39,7 @@ const baseInput = {
   mirrors: [{ uri: 'ipfs://QmExample', transportDefinition: TRANSPORT }] as const,
   contentType: 'text/markdown',
   contentHash: CONTENT_HASH,
-  size: 1234n,
+  size: 3n, // must MATCH the bytes — the builder verifies correspondence
   schemas: SCHEMAS,
   parentAnchorUID: PARENT,
   fileName: 'readme.md',
@@ -216,7 +216,7 @@ describe('reserved-key triplets (contentType / contentHash / size)', () => {
   const cases: { key: 'contentType' | 'contentHash' | 'size'; value: string }[] = [
     { key: 'contentType', value: 'text/markdown' },
     { key: 'contentHash', value: CONTENT_HASH },
-    { key: 'size', value: '1234' },
+    { key: 'size', value: '3' },
   ]
 
   for (const { key, value } of cases) {
@@ -487,6 +487,50 @@ describe('mkdir -p — missing ancestor folders folded into the write', () => {
       const maxLayer = Math.max(...atts.map((a) => a.layer))
       expect(tags.every((t) => t.layer === maxLayer)).toBe(true)
     })
+  })
+})
+
+describe('byte-plan builder preflight (reviews r3741586928 / r3741586938)', () => {
+  const bytes = new Uint8Array([1, 2, 3])
+  const good = {
+    ...baseInput,
+    content: { kind: 'bytes' as const, bytes },
+  }
+
+  it('REJECTS a blank mirror URI before any layer is built', () => {
+    expect(() =>
+      buildFileWriteGraph({
+        ...good,
+        mirrors: [{ uri: '', transportDefinition: baseInput.mirrors[0]!.transportDefinition }],
+      }),
+    ).toThrowError(/InvalidArgument|URI/i)
+  })
+
+  it('REJECTS an oversized mirror URI (MirrorResolver would revert at layer 2)', () => {
+    expect(() =>
+      buildFileWriteGraph({
+        ...good,
+        mirrors: [
+          {
+            uri: `ipfs://${'Q'.repeat(9000)}`,
+            transportDefinition: baseInput.mirrors[0]!.transportDefinition,
+          },
+        ],
+      }),
+    ).toThrowError(/URI|8192|length/i)
+  })
+
+  it('REJECTS a STALE contentHash — permanent metadata must describe the bytes', () => {
+    expect(() =>
+      buildFileWriteGraph({
+        ...good,
+        contentHash: hashContent(new Uint8Array([9, 9, 9])), // hash of OTHER bytes
+      }),
+    ).toThrowError(/contentHash.*does not match/)
+  })
+
+  it('REJECTS a wrong size', () => {
+    expect(() => buildFileWriteGraph({ ...good, size: 999n })).toThrowError(/size.*does not match/)
   })
 })
 

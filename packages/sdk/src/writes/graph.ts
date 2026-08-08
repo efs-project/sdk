@@ -76,11 +76,13 @@
 
 import type { Address, Hex } from 'viem'
 import type { EfsSchemaUIDs } from '../chain/deployments.js'
+import { hashContent } from '../content/hash.js'
 import type { ContentHash } from '../content/hash.js'
 import { SchemaEncoder } from '../eas/schema-encoder.js'
 import { EFS_SCHEMA_FIELDS } from '../eas/schemas.js'
 import { EfsError } from '../errors.js'
 import { type CanonicalName, isCanonicalName } from '../names/segment.js'
+import { validateMirrorUri } from './edge.js'
 
 /** The zero address — `recipient` is 0x0 for every EFS write attestation. */
 export const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000' as const
@@ -540,6 +542,32 @@ export function buildFileWriteGraph(input: FileWriteGraphInput): FileWriteGraph 
   if (input.mirrors.length === 0) {
     throw new EfsError(
       'EFS write plan: a byte-write plan must carry at least one mirror — a mirror-less file is unreadable (every read() fails AllMirrorsFailed). Use fs.write (which auto-stores on-chain when you pass no mirrors), or include the storage-backed web3:// mirror / your own URIs.',
+      { code: 'InvalidArgument' },
+    )
+  }
+  // Per-URI preflight (r3741586928): a blank or oversized URI ENCODES fine and
+  // only reverts at the layer-2 MirrorResolver — AFTER layer 1 (DATA +
+  // file-ANCHOR) mined: a paid partial graph. Same validation fs.write and
+  // mirrors.add run before their submits.
+  for (const m of input.mirrors) {
+    validateMirrorUri(m.uri, 'EFS write plan')
+  }
+  // METADATA CORRESPONDENCE (r3741586938): the reserved triplets persist into
+  // PERMANENT value-interned records, and the ContentHash brand checks FORMAT
+  // only — a stale hash bricks every fail-closed read (readText etc. reject
+  // forever) and a wrong size is false metadata. The builder holds the bytes;
+  // verify both before constructing any layer.
+  const actualSize = BigInt(input.content.bytes.byteLength)
+  if (input.size !== actualSize) {
+    throw new EfsError(
+      `EFS write plan: \`size\` (${input.size}) does not match the supplied bytes (${actualSize}) — the size triplet is permanent metadata and must describe the content.`,
+      { code: 'InvalidArgument' },
+    )
+  }
+  const actualHash = hashContent(input.content.bytes)
+  if (input.contentHash !== actualHash) {
+    throw new EfsError(
+      `EFS write plan: \`contentHash\` does not match the supplied bytes (expected ${actualHash}) — a stale hash would persist permanently and make every fail-closed read reject. Recompute it with hashContent(bytes).`,
       { code: 'InvalidArgument' },
     )
   }
