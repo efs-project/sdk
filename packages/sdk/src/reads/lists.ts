@@ -249,7 +249,7 @@ function parseCursor(cursor: string | undefined): { start: bigint; attester?: Ad
   }
 }
 
-/** Re-align the shared selection to a BOUND cursor's attester: still ranked ⇒
+/** Derive this request's selection from a BOUND cursor: still ranked ⇒
  * continue ITS listing at the cursor's offset (the cursor is a continuation
  * token of THAT listing — no skip, no duplicate, even if a higher-priority
  * attester has since gained entries); gone from the candidate set ⇒ the cursor
@@ -258,17 +258,17 @@ function parseCursor(cursor: string | undefined): { start: bigint; attester?: Ad
 function alignCursor(
   parsed: { start: bigint; attester?: Address },
   candidates: readonly Address[],
-  sel: { i: number },
-): bigint {
-  if (parsed.attester === undefined) return parsed.start
+): { start: bigint; i: number } {
+  // PURE (r3741791442): selection is derived PER REQUEST from the cursor, never
+  // carried in shared primed state — an `EfsList` handle can be paged, iterated
+  // and `toArray`'d independently, and a B-bound cursor on one call must not
+  // silently move a later UNBOUND call off the first-ranked candidate.
+  if (parsed.attester === undefined) return { start: parsed.start, i: 0 }
   const bound = parsed.attester.toLowerCase()
   const idx = candidates.findIndex((c) => c.toLowerCase() === bound)
-  if (idx >= 0) {
-    sel.i = idx
-    return parsed.start
-  }
-  sel.i = 0
-  return 0n
+  // Bound attester still ranked ⇒ continue ITS listing at the offset; gone ⇒
+  // the cursor is void, restart the ranked walk at 0.
+  return idx >= 0 ? { start: parsed.start, i: idx } : { start: 0n, i: 0 }
 }
 
 /** Disambiguate an EMPTY page: `true` iff the attester's listing is genuinely
@@ -423,7 +423,6 @@ export function listEntries(
     | Promise<{
         ctx: ReadContext
         candidates: readonly Address[]
-        sel: { i: number }
         kind: ListTargetType
         dedupe: boolean
       }>
@@ -439,12 +438,12 @@ export function listEntries(
         )
         if (!config.exists) throw new ListNotFound(listUID)
         const candidates = await resolveListAttesters(ctx, opts, listUID, config.curator)
-        // `sel.i` is the CURRENT candidate — advanced by byPage when a leader
-        // evaporates between the selection probe and its first page read.
+        // NOTE: no selection index here — each page request derives its own
+        // from its cursor (r3741791442), so independent consumers of this
+        // handle (byPage / toArray / iteration) never influence each other.
         return {
           ctx,
           candidates,
-          sel: { i: 0 },
           kind: config.targetType,
           dedupe: !config.allowsDuplicates,
         }
@@ -473,20 +472,16 @@ export function listEntries(
     cursor?: string
   }): Promise<Page<ListEntry>> => {
     assertPositiveLimit(pageOpts?.limit)
-    const { ctx, candidates, sel, kind, dedupe } = await prime()
+    const { ctx, candidates, kind, dedupe } = await prime()
     // No per-page cursor ⇒ fall back to the constructor-level `opts.cursor` (a caller
     // who persisted a `Page.cursor` and resumed via `entries(uid, { cursor })` must start
     // there, not restart at offset 0 and duplicate entries).
-    let start = alignCursor(parseCursor(pageOpts?.cursor ?? opts?.cursor), candidates, sel)
+    // Request-LOCAL selection (r3741791442): derived from this call's cursor.
+    const aligned = alignCursor(parseCursor(pageOpts?.cursor ?? opts?.cursor), candidates)
+    let { start } = aligned
+    let i = aligned.i
     const pageSize = pageOpts?.limit ?? defaultLimit
-    let page = await readEntriesPage(
-      ctx,
-      listUID,
-      candidates[sel.i] as Address,
-      kind,
-      start,
-      pageSize,
-    )
+    let page = await readEntriesPage(ctx, listUID, candidates[i] as Address, kind, start, pageSize)
     // An EMPTY page means either the normal end of pagination or an EVAPORATED
     // candidate (a revoke landed after the selection probe). At offset 0 it is
     // always the latter (probe-selected candidates had entries); at a RESUMED
@@ -494,23 +489,13 @@ export function listEntries(
     // leader's empty page is the honest end, an evaporated one falls through to
     // the next ranked candidate, RESTARTING at 0 (the old cursor indexed the
     // evaporated attester's listing and is void for the new one).
-    while (page.length === 0 && sel.i + 1 < candidates.length) {
-      if (
-        start > 0n &&
-        (await attesterStillHasEntries(ctx, listUID, candidates[sel.i] as Address))
-      ) {
+    while (page.length === 0 && i + 1 < candidates.length) {
+      if (start > 0n && (await attesterStillHasEntries(ctx, listUID, candidates[i] as Address))) {
         break // honest end of the standing leader's listing
       }
-      sel.i += 1
+      i += 1
       start = 0n
-      page = await readEntriesPage(
-        ctx,
-        listUID,
-        candidates[sel.i] as Address,
-        kind,
-        start,
-        pageSize,
-      )
+      page = await readEntriesPage(ctx, listUID, candidates[i] as Address, kind, start, pageSize)
     }
     // A short page (fewer than requested) means the end; otherwise advance the cursor
     // by the raw window size (BEFORE page-local dedupe — the on-chain index counts
@@ -519,7 +504,7 @@ export function listEntries(
     const next =
       page.length < pageSize
         ? undefined
-        : `${(start + BigInt(page.length)).toString()}:${candidates[sel.i]}`
+        : `${(start + BigInt(page.length)).toString()}:${candidates[i]}`
     const items = dedupePage(page, dedupe)
     return next !== undefined ? { items, cursor: next } : { items }
   }
@@ -546,33 +531,34 @@ export function listEntries(
   /** Like `byPage` but WITHOUT page-local dedupe — the iterator / `toArray` dedupe
    * globally, so the windowed reads must surface raw entries. */
   const byPageRaw = async (cursor: string | undefined): Promise<Page<ListEntry>> => {
-    const { ctx, candidates, sel, kind } = await prime()
+    const { ctx, candidates, kind } = await prime()
     // The first page (cursor undefined) honors the constructor-level `opts.cursor`;
-    // subsequent pages thread their own advanced cursor.
-    let start = alignCursor(parseCursor(cursor ?? opts?.cursor), candidates, sel)
+    // subsequent pages thread their own advanced cursor. Selection is
+    // request-LOCAL, derived from that cursor (r3741791442) — the iterator's
+    // continuity rides the BOUND cursor, not shared state.
+    const aligned = alignCursor(parseCursor(cursor ?? opts?.cursor), candidates)
+    let { start } = aligned
+    let i = aligned.i
     let page = await readEntriesPage(
       ctx,
       listUID,
-      candidates[sel.i] as Address,
+      candidates[i] as Address,
       kind,
       start,
       defaultLimit,
     )
     // Same evaporated-leader fall-through as byPage, incl. the resumed-offset
     // disambiguation (r3741157007 / r3741418197).
-    while (page.length === 0 && sel.i + 1 < candidates.length) {
-      if (
-        start > 0n &&
-        (await attesterStillHasEntries(ctx, listUID, candidates[sel.i] as Address))
-      ) {
+    while (page.length === 0 && i + 1 < candidates.length) {
+      if (start > 0n && (await attesterStillHasEntries(ctx, listUID, candidates[i] as Address))) {
         break
       }
-      sel.i += 1
+      i += 1
       start = 0n
       page = await readEntriesPage(
         ctx,
         listUID,
-        candidates[sel.i] as Address,
+        candidates[i] as Address,
         kind,
         start,
         defaultLimit,
@@ -581,7 +567,7 @@ export function listEntries(
     const next =
       page.length < defaultLimit
         ? undefined
-        : `${(start + BigInt(page.length)).toString()}:${candidates[sel.i]}`
+        : `${(start + BigInt(page.length)).toString()}:${candidates[i]}`
     return next !== undefined ? { items: page, cursor: next } : { items: page }
   }
 

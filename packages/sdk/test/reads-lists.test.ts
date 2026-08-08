@@ -701,6 +701,50 @@ describe('list attester re-selection after a raced revoke (review r3741157007)',
     expect(page.items[0]?.attester).toBe(B)
   })
 
+  it('a B-bound page does NOT move a later UNBOUND read off the ranked leader (r3741791442)', async () => {
+    // Selection must be per-request: paging B via a bound cursor, then calling
+    // byPage() again with no cursor on the SAME handle, must restart at the
+    // first-ranked candidate — not continue from B. Both attesters hold one
+    // entry here, so whichever one is read is unambiguous.
+    const bothHold: ReadContext['publicClient'] = {
+      async readContract(args: { functionName: string; args?: readonly unknown[] }) {
+        const a = (args.args ?? []) as readonly unknown[]
+        switch (args.functionName) {
+          case 'getMode':
+            return {
+              exists: true,
+              curator: CURATOR,
+              allowsDuplicates: false,
+              appendOnly: false,
+              targetType: 0,
+              targetSchema: ZERO,
+              maxEntries: 0n,
+            }
+          case 'length':
+            return 1n // both A and B hold exactly one entry
+          case 'entries': {
+            const who = (a[1] as string).toLowerCase()
+            const start = a[2] as bigint
+            if (start > 0n) return []
+            return who === A.toLowerCase()
+              ? [{ entryUID: uid(0xea1), identityKey: uid(0xaaa) }]
+              : [{ entryUID: uid(0xeb1), identityKey: uid(0xbbb) }]
+          }
+          default:
+            throw new Error(`unexpected ${args.functionName}`)
+        }
+      },
+    } as unknown as ReadContext['publicClient']
+    const ctx = ctxOf(bothHold)
+    const list = listEntries((() => ctx) as never, LIST_UID, { lens: lens([A, B]) })
+    const bound = await list.byPage({ cursor: `0:${B}` })
+    expect(bound.items[0]?.attester).toBe(B) // the bound call reads B
+    const unbound = await list.byPage()
+    // A is ranked first — the unbound call must read A, proving the earlier
+    // bound call left no shared selection behind.
+    expect(unbound.items[0]?.attester).toBe(A)
+  })
+
   it('a BOUND cursor continues ITS attester even when outranked (no skip, no dup)', async () => {
     // B gained entries and now outranks... rather: the cursor belongs to B's
     // listing; even with A ranked first, the bound cursor continues B at its

@@ -146,6 +146,8 @@ interface MockChainOptions {
   revertOnCall?: number
   /** Layer at which `writeContract` fails with a CODE-LESS transport error. */
   transportErrorOnCall?: number
+  /** Layer at which `writeContract` fails with an AMBIGUOUS JSON-RPC error. */
+  rpcErrorOnCall?: number
   /** Layer (1-based call index) whose receipt reports `status: 'reverted'`. */
   receiptRevertOnCall?: number
   /** Layer (1-based call index) whose `waitForTransactionReceipt` THROWS (the tx was
@@ -174,16 +176,19 @@ function makeMockChain(opts: MockChainOptions = {}) {
       callIndex += 1
       const thisCall = callIndex
       if (opts.revertOnCall === thisCall) {
-        // A REFUSAL RESPONSE: carries a JSON-RPC code, so the classifier can
-        // prove the node answered (→ WriteNotSentError, mode (a)). Code-less
-        // transport loss is the separate `transportErrorOnCall` (mode (a′)).
-        throw Object.assign(
-          new Error(`mock revert at call ${thisCall} (execution reverted: NotRevocable)`),
-          { code: -32000 },
-        )
+        // A DEFINITE refusal: the wallet declined (EIP-1193 4001), so nothing
+        // was broadcast (→ WriteNotSentError, mode (a)). Code-less transport
+        // loss is `transportErrorOnCall`; an AMBIGUOUS JSON-RPC send error
+        // (-32000 'already known') is `rpcErrorOnCall` — both mode (a′).
+        throw Object.assign(new Error(`mock: user rejected at call ${thisCall}`), { code: 4001 })
       }
       if (opts.transportErrorOnCall === thisCall) {
         throw new Error('fetch failed: socket hang up') // NO code anywhere — pure transport loss
+      }
+      if (opts.rpcErrorOnCall === thisCall) {
+        // The node ANSWERED — but 'already known' means the tx is already in
+        // the mempool and may mine (r3741791441): NOT a never-sent proof.
+        throw Object.assign(new Error('already known'), { code: -32000 })
       }
 
       // Flatten the schema-grouped requests in EAS emission order.
@@ -940,6 +945,17 @@ describe('submitWriteTier1 — partial-write boundary: three distinct failure mo
     expect(we.landed.get('DATA')).toBe(uid(0xd000)) // prior layer preserved
     expect(we.refs).toContain('mirror:0') // a layer-2 ref (the anchor now lands in L1)
     expect(String(we.message)).toMatch(/UNKNOWN and it MAY still mine/)
+  })
+
+  it("an AMBIGUOUS RPC send error ('already known') is UNKNOWN, never 'not sent' (r3741791441)", async () => {
+    // The node answered — but the transaction is already in the mempool and may
+    // mine. Claiming it was never broadcast invites a duplicating retry.
+    const plan = buildFileWriteGraph(bytesInput)
+    const { ctx } = makeMockChain({ rpcErrorOnCall: 2 })
+    const err = await submitWriteTier1(plan, ctx).catch((e) => e)
+    expect(err).toBeInstanceOf(WriteSendUnknownError)
+    expect(err).not.toBeInstanceOf(WriteNotSentError)
+    expect(String((err as Error).message)).toMatch(/UNKNOWN and it MAY still mine/)
   })
 
   it('receipt-wait throw after a hash → WriteRevertedError(mined:false) carrying the in-flight txHash', async () => {

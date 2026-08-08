@@ -605,15 +605,25 @@ export class RpcError extends EfsError {
  * still mine, so callers must surface an UNKNOWN-send state instead. Shared by
  * the layered submitter and the on-chain storage deploys. */
 const DEFINITE_SEND_REFUSALS: ReadonlySet<string> = new Set([
-  'UserRejected',
-  'Unauthorized',
-  'UnsupportedMethod',
-  'Disconnected',
+  // Wallet/provider REFUSALS (EIP-1193): the request was answered with a
+  // refusal, so no transaction entered the mempool.
+  'UserRejected', // 4001 — the user declined to sign
+  'Unauthorized', // 4100 — the method is not authorized for this account
+  'UnsupportedMethod', // 4200 — the provider does not implement the method
+  'Disconnected', // 4900/4901 — the provider is not connected to a chain
+  // A DECODED contract revert: the node simulated and rejected it.
   'ContractReverted',
-  'RpcError',
+  // Our OWN pre-send guards — the send never happened at all.
   'WrongChain',
   'InvalidArgument',
   'WalletRequired',
+  // NOTE (r3741791441): `RpcError` is deliberately ABSENT. A JSON-RPC error
+  // response proves only that the node ANSWERED — not that nothing was
+  // broadcast. `-32000: already known` / `nonce too low` / `replacement
+  // transaction underpriced` all mean the transaction (or a rival for its
+  // nonce) is ALREADY in the mempool and may mine; treating those as
+  // never-sent invited retries that duplicate attestations or storage. They
+  // fall through to the UNKNOWN-send states instead.
 ])
 
 /** A raw EAS verb's `writeContract` failed WITHOUT a response — the transport
