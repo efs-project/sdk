@@ -507,6 +507,7 @@ contract EFSWriterTest is Test {
         bytes32 existingAnchor = keccak256("ALREADY_RESOLVED_FILE_ANCHOR");
         eas.seedAuthor(existingData, address(consumer));
         eas.seedSchema(existingData, schemas.data);
+        eas.seedSchema(existingAnchor, schemas.anchor); // the reused-anchor gate
         indexer.seedActiveMirrors(existingData, 1);
 
         vm.prank(ALICE);
@@ -576,6 +577,25 @@ contract EFSWriterTest is Test {
         );
         consumer.placeExisting(
             IEFSIndexerWrite(address(indexer)), schemas, unknownData, PARENT, "unknown.txt"
+        );
+    }
+
+    /// @notice A reused existingFileAnchorUID that is NOT an ANCHOR is rejected
+    ///         (r3741288476): the relink funnel assigned it directly, confirming a
+    ///         placement (and EFSFileWritten) path resolution can never find.
+    function test_PlaceExistingAt_RevertsOnNonAnchorReuse() public {
+        bytes32 existingData = keccak256("PRE_EXISTING_DATA_4");
+        eas.seedAuthor(existingData, address(consumer));
+        eas.seedSchema(existingData, schemas.data);
+        indexer.seedActiveMirrors(existingData, 1);
+        bytes32 notAnchor = keccak256("A_PROPERTY_AS_ANCHOR");
+        eas.seedSchema(notAnchor, schemas.property);
+        vm.prank(ALICE);
+        vm.expectRevert(
+            abi.encodeWithSelector(EFSLib.NotAnchorUID.selector, notAnchor, schemas.property)
+        );
+        consumer.placeExistingAt(
+            IEFSIndexerWrite(address(indexer)), schemas, existingData, PARENT, "x.txt", notAnchor
         );
     }
 

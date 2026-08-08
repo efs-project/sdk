@@ -45,6 +45,7 @@ const PARENT = uid(0x100)
 const TRANSPORT = uid(0x200)
 const CONTENT_HASH = uid(0x300)
 const EXISTING_DATA = uid(0x400)
+const EXISTING_ANCHOR = uid(0xea00)
 const ACCOUNT: Address = '0x00000000000000000000000000000000000acc01'
 
 const baseInput = {
@@ -132,6 +133,8 @@ interface MockChainOptions {
   hardlinkSchema?: Hex
   /** Override the submitter's mirror count on the hardlink target (default 1n). */
   hardlinkMirrorCount?: bigint
+  /** Override the schema the mock reports for EXISTING_ANCHOR (default ANCHOR). */
+  anchorSchema?: Hex
   /** Layer (1-based call index) at which `writeContract` throws a CODED refusal. */
   revertOnCall?: number
   /** Layer at which `writeContract` fails with a CODE-LESS transport error. */
@@ -227,8 +230,14 @@ function makeMockChain(opts: MockChainOptions = {}) {
     // The hardlink self-authorship gate's EAS read (r3741157003): by default the
     // mock reports the submitting ACCOUNT as the DATA author (self-authored);
     // `hardlinkAuthor` overrides it to simulate a foreign DATA.
-    async readContract(args: { functionName: string }) {
+    async readContract(args: { functionName: string; args?: readonly unknown[] }) {
       if (args.functionName === 'getAttestation') {
+        // Per-UID dispatch: the gates read BOTH the hardlink target and any
+        // reused concrete file-ANCHOR.
+        const [queried] = (args.args ?? []) as [Hex]
+        if (queried === EXISTING_ANCHOR) {
+          return { uid: queried, schema: opts.anchorSchema ?? SCHEMAS.anchor }
+        }
         return {
           attester: opts.hardlinkAuthor ?? ACCOUNT,
           schema: opts.hardlinkSchema ?? SCHEMAS.data,
@@ -524,6 +533,31 @@ describe('submitWriteTier1 — hardlink plan', () => {
     expect((err as { code?: string }).code).toBe('InvalidArgument')
     expect(String((err as Error).message)).toMatch(/indexerAddress/)
     expect(sent).toHaveLength(0)
+  })
+
+  it('REFUSES a reused concrete anchor that is NOT an ANCHOR (r3741288472)', async () => {
+    // An arbitrary existingFileAnchorUID skips the anchor mint — if it is a
+    // PROPERTY/DATA/nonexistent UID, the placement confirms but path
+    // resolution can never discover it.
+    const plan = buildFileWriteGraph({
+      ...bytesInput,
+      existingFileAnchorUID: EXISTING_ANCHOR,
+    })
+    const { ctx, sent } = makeMockChain({ anchorSchema: SCHEMAS.property })
+    const err = await submitWriteTier1(plan, ctx).catch((e) => e)
+    expect((err as { code?: string }).code).toBe('InvalidArgument')
+    expect(String((err as Error).message)).toMatch(/not an ANCHOR attestation/)
+    expect(sent).toHaveLength(0)
+  })
+
+  it('a GENUINE reused anchor passes the concrete-anchor gate and submits', async () => {
+    const plan = buildFileWriteGraph({
+      ...bytesInput,
+      existingFileAnchorUID: EXISTING_ANCHOR,
+    })
+    const { ctx, sent } = makeMockChain()
+    await submitWriteTier1(plan, ctx)
+    expect(sent.length).toBeGreaterThan(0) // the overwrite write went through
   })
 
   it('FAILS CLOSED when the context cannot run the authorship read', async () => {

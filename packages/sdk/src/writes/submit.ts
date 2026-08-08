@@ -520,6 +520,49 @@ async function assertHardlinkSelfAuthored(plan: FileWriteGraph, ctx: SubmitConte
   }
 }
 
+/** r3741288472: a plan that REUSES a concrete existing file-ANCHOR
+ * (overwrite/relink) must prove the reused definition IS an ANCHOR before
+ * broadcasting — path resolution only reaches ANCHOR definitions, so a
+ * PROPERTY/DATA/nonexistent UID skips the anchor mint and confirms a placement
+ * `fs.*` can never discover. Runs at the layered boundary like the hardlink
+ * gates; a no-op for plans that mint a fresh anchor. Fails CLOSED when the
+ * context lacks `readContract` or the plan lacks the `anchorSchemaUID` stamp.
+ * (fs.write resolves the UID via `resolveAnchor` — an ANCHOR by construction —
+ * so for it this is one extra defense-in-depth read per overwrite.) */
+async function assertConcreteAnchorIsAnchor(
+  plan: FileWriteGraph,
+  ctx: SubmitContext,
+): Promise<void> {
+  const target = plan.existingAnchorUID
+  if (target === undefined) return
+  const expected = plan.anchorSchemaUID
+  if (expected === undefined) {
+    throw new EfsError(
+      'EFS write: this plan reuses a concrete file-ANCHOR but carries no anchorSchemaUID stamp — rebuild it with buildFileWriteGraph (the gate must verify the reused definition is an ANCHOR).',
+      { code: 'InvalidArgument' },
+    )
+  }
+  if (ctx.publicClient.readContract === undefined) {
+    throw new EfsError(
+      'EFS write: a plan reusing a concrete file-ANCHOR requires a publicClient with readContract — the gate must verify the reused definition is an ANCHOR before placement.',
+      { code: 'InvalidArgument' },
+    )
+  }
+  const att = (await ctx.publicClient.readContract({
+    address: ctx.easAddress,
+    abi: getAttestationAbi,
+    functionName: 'getAttestation',
+    args: [target],
+  })) as { schema?: Hex } | undefined
+  const schema = att?.schema
+  if (schema === undefined || schema.toLowerCase() !== expected.toLowerCase()) {
+    throw new EfsError(
+      `EFS write: the reused file-ANCHOR ${target} is not an ANCHOR attestation (schema ${schema ?? 'unknown'}, expected ${expected}) — path resolution discovers placements through ANCHOR nodes only, so this placement would confirm but never be found.`,
+      { code: 'InvalidArgument' },
+    )
+  }
+}
+
 // One PIN encoder, reused to re-encode `definition` once it's resolved. The PIN
 // schema is `bytes32 definition` (EFS_SCHEMA_FIELDS.pin).
 const pinEncoder = new SchemaEncoder(EFS_SCHEMA_FIELDS.pin)
@@ -742,6 +785,7 @@ export async function submitLayeredTier1(
   // hardlink:false, so this is a no-op for them; the Solidity SDK applies the
   // same gates on-chain (ForeignDataUID / NotDataUID).
   await assertHardlinkSelfAuthored(plan, ctx)
+  await assertConcreteAnchorIsAnchor(plan, ctx)
   const resolved = new Map<string, Hex>()
   const layerTxHashes: Hex[] = []
   const layers: LayerResult[] = []

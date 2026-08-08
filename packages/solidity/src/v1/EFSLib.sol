@@ -394,6 +394,16 @@ library EFSLib {
         // The target must BE a DATA — a self-authored non-DATA UID pins into the wrong
         // schema slot and the placement is invisible to readers (see {NotDataUID}).
         if (att.schema != schemas.data) revert NotDataUID(dataUID, att.schema);
+        // A REUSED file-ANCHOR must actually BE an ANCHOR (r3741288476): the same
+        // undiscoverability as place()'s definition gate — path resolution only
+        // reaches ANCHOR nodes, so a PROPERTY/DATA/nonexistent reused UID would
+        // confirm a placement (and emit EFSFileWritten) no reader can find.
+        if (existingFileAnchorUID != EMPTY_UID) {
+            Attestation memory anchorAtt = eas.getAttestation(existingFileAnchorUID);
+            if (anchorAtt.schema != schemas.anchor) {
+                revert NotAnchorUID(existingFileAnchorUID, anchorAtt.schema);
+            }
+        }
         _requireActiveMirror(indexer, schemas, dataUID);
         fileAnchorUID = existingFileAnchorUID != EMPTY_UID
             ? existingFileAnchorUID

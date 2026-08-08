@@ -313,6 +313,14 @@ export interface FileWriteGraph {
    * proof scans the submitter's active mirrors on the target DATA with it
    * (r3741235144). Same fail-closed rule as `dataSchemaUID`. */
   readonly mirrorSchemaUID?: Hex
+  /** The deployment's ANCHOR schema UID + the CONCRETE existing file-ANCHOR the
+   * plan reuses (overwrite/relink), when one was supplied — the submitter
+   * verifies the reused definition IS an ANCHOR before broadcasting
+   * (r3741288472): path resolution only reaches ANCHOR definitions, so a
+   * PROPERTY/DATA/nonexistent UID would confirm an undiscoverable placement. */
+  readonly anchorSchemaUID?: Hex
+  /** See {@link FileWriteGraph.anchorSchemaUID}. */
+  readonly existingAnchorUID?: Hex
   /** Every planned attestation, ordered by layer (L1 → L2 → L3). The submitter
    * groups by {@link PlannedAttestation.layer} into `multiAttest` batches. */
   readonly attestations: readonly PlannedAttestation[]
@@ -476,6 +484,8 @@ export function buildFileWriteGraph(input: FileWriteGraphInput): FileWriteGraph 
       hardlink: true,
       dataSchemaUID: schemas.data,
       mirrorSchemaUID: schemas.mirror,
+      anchorSchemaUID: schemas.anchor,
+      ...(existingFileAnchorUID !== undefined ? { existingAnchorUID: existingFileAnchorUID } : {}),
       attestations: stableSortByLayer([
         ...folderAttestations,
         ...fileAnchorAtts,
@@ -630,6 +640,8 @@ export function buildFileWriteGraph(input: FileWriteGraphInput): FileWriteGraph 
     hardlink: false,
     dataSchemaUID: schemas.data,
     mirrorSchemaUID: schemas.mirror,
+    anchorSchemaUID: schemas.anchor,
+    ...(existingFileAnchorUID !== undefined ? { existingAnchorUID: existingFileAnchorUID } : {}),
     attestations: ordered,
   }
 }

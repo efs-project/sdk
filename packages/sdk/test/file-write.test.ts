@@ -170,6 +170,12 @@ function makeCtx(
         const [parent, name, schema] = args.args as [Hex, string, Hex]
         return anchors[`${parent}|${name}|${schema}`] ?? ZERO_UID
       }
+      if (args.functionName === 'getAttestation') {
+        // The layered submitter's concrete-anchor gate (r3741288472): this
+        // harness's overwrite anchors are genuine ANCHORs by construction.
+        const [u] = args.args as [Hex]
+        return { uid: u, schema: SCHEMAS.anchor }
+      }
       if (args.functionName === 'getActiveTagWeight') {
         // (attester, target, definition, targetSchema) — the active visibility-TAG
         // check. `target` is the folder anchor being walked.
