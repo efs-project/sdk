@@ -38,7 +38,10 @@ describe('buildFileWriteGraph — Overview `system` TAG before placement (ADR-00
   const baseInput = {
     path: '/docs/README.md',
     content: { kind: 'bytes' as const, bytes: new Uint8Array([1, 2, 3]) },
-    mirrors: [{ uri: 'web3://0xabc:31337', transportDefinition: uid(0x200) }] as const,
+    // A real 20-byte store address — the write preflight parses web3:// locators.
+    mirrors: [
+      { uri: `web3://0x${'ab'.repeat(20)}:31337`, transportDefinition: uid(0x200) },
+    ] as const,
     contentType: 'text/markdown',
     contentHash: hashContent(new Uint8Array([1, 2, 3])),
     size: 3n,

@@ -560,6 +560,33 @@ describe('byte-plan builder preflight (reviews r3741586928 / r3741586938)', () =
     ).toThrowError(/not a valid ipfs: locator/)
   })
 
+  it('REJECTS a malformed web3:// locator (r3741771347)', () => {
+    // resolveTransport's web3 branch defers address parsing to the reader, so
+    // the strict parseWeb3Uri must run in preflight — otherwise the file
+    // confirms with an unreadable sole mirror.
+    expect(() =>
+      buildFileWriteGraph({
+        ...good,
+        mirrors: [
+          { uri: 'web3://0x1234', transportDefinition: baseInput.mirrors[0]!.transportDefinition },
+        ],
+      }),
+    ).toThrowError(/not a valid web3: locator/)
+  })
+
+  it('ACCEPTS a well-formed web3:// locator', () => {
+    const g = buildFileWriteGraph({
+      ...good,
+      mirrors: [
+        {
+          uri: `web3://0x${'cd'.repeat(20)}`,
+          transportDefinition: baseInput.mirrors[0]!.transportDefinition,
+        },
+      ],
+    })
+    expect(g.attestations.some((a) => a.kind === 'MIRROR')).toBe(true)
+  })
+
   it('ACCEPTS an unknown/custom scheme untouched (the ADR-0056 escape hatch)', () => {
     const g = buildFileWriteGraph({
       ...good,

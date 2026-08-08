@@ -46,6 +46,7 @@ import { SchemaEncoder } from '../eas/schema-encoder.js'
 import { EFS_SCHEMA_FIELDS } from '../eas/schemas.js'
 import { EfsError, InvalidListConfig } from '../errors.js'
 import { TRANSPORT, UnsupportedUriError, resolveTransport } from '../mirror/transport.js'
+import { Web3ReadError, parseWeb3Uri } from '../mirror/web3.js'
 import type { CanonicalName } from '../names/segment.js'
 import type { ListTargetType } from '../types.js'
 import { type FileWriteGraph, type PlannedAttestation, ZERO_ADDRESS, ZERO_UID } from './graph.js'
@@ -657,7 +658,18 @@ export function validateMirrorUri(uri: string, verb: string): void {
   if (known) {
     try {
       resolveTransport(uri, {})
+      // `resolveTransport`'s web3 branch defers ADDRESS parsing to the reader
+      // (resolution needs a chain client), so it accepts `web3://0x1234` —
+      // which then fails every read at `parseWeb3Uri` (r3741771347). Run that
+      // strict parser here; it is pure, so preflight can use it directly.
+      if (scheme === 'web3') parseWeb3Uri(uri)
     } catch (err) {
+      if (err instanceof Web3ReadError) {
+        throw new EfsError(
+          `${verb}: the mirror URI '${uri}' is not a valid web3: locator (${err.message}). MirrorResolver would accept it, but every read would fail to resolve it — pass \`web3://<20-byte-address>\`.`,
+          { code: 'InvalidArgument', cause: err },
+        )
+      }
       if (err instanceof UnsupportedUriError) {
         throw new EfsError(
           `${verb}: the mirror URI '${uri}' is not a valid ${scheme}: locator (${err.message}). MirrorResolver would accept it, but every read would fail to resolve it — fix the URI, or use a custom scheme if this transport is not one the SDK resolves.`,
