@@ -285,7 +285,7 @@ export interface FileWriteContext {
   readonly onchainAutoLimit?: number
   /**
    * INTERNAL (ADR-0011, `efs.fs.setOverview`): the resolved `/tags/system`
-   * definition anchor UID. When present, the file write tags its OWN anchor `system`
+   * definition anchor UID. When present, the file write tags its DATA `system`
    * in the layer before the placement PIN (no untagged flash) — see
    * {@link buildFileWriteGraph}'s `overviewSystemTagDef`. Not on the public
    * `WriteOptions`; only the `setOverview` orchestrator sets it.
@@ -475,7 +475,7 @@ export async function writeFileTier1(
     // graph then emits NO file-ANCHOR and points the placement PIN at this concrete UID.
     ...(existingFileAnchorUID !== undefined ? { existingFileAnchorUID } : {}),
     fileName,
-    // ADR-0011 Overview marker: tag the README's OWN anchor `system` before the
+    // ADR-0011 Overview marker: tag the README's DATA `system` before the
     // placement PIN (the setOverview path sets this on the context; a normal write
     // leaves it undefined and the graph is unchanged).
     ...(ctx.overviewSystemTagDef !== undefined

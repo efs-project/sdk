@@ -66,9 +66,11 @@ describe('buildFileWriteGraph — Overview `system` TAG before placement (ADR-00
     })
     const tag = find(attestations, REF.OVERVIEW_SYSTEM_TAG)
     const pin = find(attestations, REF.PLACEMENT_PIN)
-    // The TAG targets the file's OWN anchor (symbolic, fresh sibling).
+    // The TAG targets the file's DATA (symbolic) — the on-chain filter's FILE
+    // branch keys exclusion off resolved DATA UIDs, never the anchor
+    // (r3741476421: an anchor-targeted marker never hides the Overview).
     expect(tag.kind).toBe('TAG')
-    expect(tag.refUID).toEqual({ ref: REF.FILE_ANCHOR })
+    expect(tag.refUID).toEqual({ ref: REF.DATA })
     // STRICTLY earlier layer than the placement PIN → mines in an earlier multiAttest
     // (no untagged flash). PIN shifted from base L3 to L4.
     expect(tag.layer).toBeLessThan(pin.layer)
@@ -105,7 +107,7 @@ describe('buildFileWriteGraph — Overview `system` TAG before placement (ADR-00
     expect(hardlink).toBe(true)
     const tag = find(attestations, REF.OVERVIEW_SYSTEM_TAG)
     const pin = find(attestations, REF.PLACEMENT_PIN)
-    expect(tag.refUID).toEqual({ ref: REF.FILE_ANCHOR }) // the file's own anchor
+    expect(tag.refUID).toBe(uid(0xda7a)) // the CONCRETE pre-existing DATA (filter keys off DATA)
     expect(tag.layer).toBeLessThan(pin.layer) // strictly earlier multiAttest
     expect(tag.layer).toBe(2)
     expect(pin.layer).toBe(3)

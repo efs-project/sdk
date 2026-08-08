@@ -233,10 +233,14 @@ export interface FileWriteGraphBaseInput {
   readonly existingFileAnchorUID?: Hex
   /**
    * Folder-Overview marker (ADR-0011): when set, emit a `system` TAG on the file's
-   * OWN anchor — `TAG(definition = overviewSystemTagDef, refUID = file-ANCHOR,
-   * weight = 1)` — in the layer STRICTLY BEFORE the placement PIN, so the file is
-   * already `system`-tagged the moment it becomes visible (it never flashes as a
-   * visible untagged sibling). `overviewSystemTagDef` is the resolved `/tags/system`
+   * DATA — `TAG(definition = overviewSystemTagDef, refUID = DATA, weight = 1)` —
+   * in the layer STRICTLY BEFORE the placement PIN, so the file is already
+   * `system`-tagged the moment it becomes visible (it never flashes as a visible
+   * untagged sibling). The target is the DATA (not the file-ANCHOR) because the
+   * on-chain filter's FILE branch resolves each placement's DATA UIDs and tests
+   * exclude TAGs on THOSE (`getDirectoryPageFiltered`/ADR-0054 asymmetry; the
+   * anchor branch is folders-only) — an anchor-targeted marker never hides the
+   * file (r3741476421). `overviewSystemTagDef` is the resolved `/tags/system`
    * definition anchor UID — the SAME def the directory filter excludes on (so a
    * `SAFETY_EXCLUDES` listing hides the README from its own folder). Omitted ⇒ a
    * normal file write (no marker, placement PIN at the base L3). This is the
@@ -467,8 +471,9 @@ export function buildFileWriteGraph(input: FileWriteGraphInput): FileWriteGraph 
     // hardlinked README must carry the `system` TAG in a layer STRICTLY BEFORE
     // its placement PIN — the early return previously dropped the marker,
     // leaving the Overview visible in safety-filtered directory listings. Same
-    // shape as the normal path: TAG targets the file's own anchor (symbolic on
-    // a fresh mint, concrete on relink) and `ov` shifts the PIN + TAGs.
+    // shape as the normal path: the TAG targets the (concrete, pre-existing)
+    // DATA — the filter's FILE branch keys off resolved DATA UIDs
+    // (r3741476421) — and `ov` shifts the PIN + TAGs.
     const overviewTag: PlannedAttestation[] =
       input.overviewSystemTagDef !== undefined
         ? [
@@ -479,7 +484,9 @@ export function buildFileWriteGraph(input: FileWriteGraphInput): FileWriteGraph 
               schema: schemas.tag,
               data: tagEncoder.encodeData([input.overviewSystemTagDef, VISIBILITY_TAG_WEIGHT]),
               revocable: true, // EdgeResolver.sol — TAG must be revocable
-              refUID: existingFileAnchorUID ?? { ref: REF.FILE_ANCHOR },
+              // The CONCRETE pre-existing DATA — the filter's FILE branch keys
+              // exclusion off resolved DATA UIDs, never the anchor.
+              refUID: input.content.dataUID,
               dataRefs: [],
             },
           ]
@@ -628,10 +635,12 @@ export function buildFileWriteGraph(input: FileWriteGraphInput): FileWriteGraph 
   }
 
   // ── Overview `system` TAG (base L3, BEFORE the placement PIN) ─────────────────
-  // ADR-0011: tag the file's OWN anchor `system` in the layer STRICTLY BEFORE the
+  // ADR-0011: tag the file's DATA `system` in the layer STRICTLY BEFORE the
   // placement PIN, so the README is already hidden the instant it becomes visible
-  // (no untagged flash). `refUID` is the freshly-minted file-ANCHOR (symbolic);
-  // `definition` = the resolved `/tags/system` def. When this is emitted (`ov === 1`)
+  // (no untagged flash). `refUID` is the fresh DATA (symbolic) — the on-chain
+  // filter's FILE branch tests exclude TAGs on each placement's resolved DATA
+  // UIDs, never the anchor (r3741476421); `definition` = the resolved
+  // `/tags/system` def. When this is emitted (`ov === 1`)
   // the placement + binding PINs shift to base L4 (`m + 4`) — guaranteeing the TAG
   // mines in an earlier `multiAttest` than the placement. Absent ⇒ `ov === 0`,
   // nothing emitted, layers unchanged from a normal write.
@@ -643,9 +652,9 @@ export function buildFileWriteGraph(input: FileWriteGraphInput): FileWriteGraph 
       schema: schemas.tag,
       data: tagEncoder.encodeData([input.overviewSystemTagDef, VISIBILITY_TAG_WEIGHT]),
       revocable: true, // EdgeResolver.sol — TAG must be revocable
-      // The file's own anchor: a fresh L2 sibling (symbolic) on a first write, or the
-      // concrete reused UID on an overwrite (Bug-1 fix).
-      refUID: fileAnchorRef,
+      // The file's DATA (symbolic, from the first layer) — the filter's FILE
+      // branch keys exclusion off resolved DATA UIDs, never the anchor.
+      refUID: { ref: REF.DATA },
       dataRefs: [],
     })
   }

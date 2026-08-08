@@ -937,10 +937,14 @@ describe('writeFileTier1 — overwrite (reuse the existing file anchor, Bug-1)',
     const names = await anchorNames(sent)
     expect(names).not.toContain('README.md')
 
-    // The Overview `system` TAG targets the CONCRETE existing anchor (not a fresh ref).
+    // The Overview `system` TAG targets the fresh DATA (r3741476421): the
+    // on-chain filter's FILE branch keys exclusion off resolved DATA UIDs, so
+    // an anchor-targeted marker would never hide the README.
+    const dataStep = receipt.steps.find((st) => st.id === 'DATA')
+    expect(dataStep?.uid).toBeDefined()
     const systemTag = sent
       .flatMap((l) => l.entries)
-      .find((e) => e.schema === SCHEMAS.tag && e.refUID === README_ANCHOR)
+      .find((e) => e.schema === SCHEMAS.tag && e.refUID === dataStep?.uid)
     expect(systemTag).toBeDefined()
 
     // The placement PIN's definition is the existing anchor too.
