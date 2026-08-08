@@ -60,9 +60,16 @@ The SDK never emits a bare `'verified'` that an attacker's lens could satisfy.
 
 - **Mirror selection:** `fetch` resolves mirrors only from attesters in the resolving
   lens stack — never lens-blind (an attacker can attest a MIRROR onto popular DATA).
-- **Streaming under a size cap:** hash incrementally while fetching; abort and report
-  `mismatch` if bytes exceed the smaller of the declared `size` and a hard SDK
-  ceiling — never buffer an unbounded/declared-50GB stream.
+- **Streaming under a size cap:** hash incrementally while fetching; abort the
+  attempt once bytes exceed the SDK ceiling (caller `maxBytes`, 50 MB default) —
+  never buffer an unbounded stream. The author-declared `size` is untrusted
+  metadata, NOT a transport cap: it neither lowers nor raises the ceiling. It is
+  enforced as a POST-fetch consistency check — a complete body larger than the
+  claim reports `mismatch`. (Folding the claim into the cap would turn any
+  under-declared `size` into an every-mirror transport failure instead of the
+  documented `mismatch`; conversely a caller needing a tighter allocation bound
+  must set `maxBytes` — the claim cannot provide it, so a `size: 1` claim still
+  buffers up to the ceiling before reporting `mismatch`.)
 - **No transport trust:** ignore the HTTP `Content-Type`; use the lens-resolved
   `contentType` PROPERTY only. A CID is a *locator*, never a verification input in
   the engine (a raw CIDv1 shares the canonical digest; dag-pb/chunked CIDs do not).

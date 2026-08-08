@@ -124,7 +124,14 @@ export function makePropsNs(deps: PropsNsDeps): PropsNs {
       // Resolve the existing key-anchor FIRST: when present, the plan reuses it and emits
       // ONLY the new PROPERTY + a binding-PIN bound to it (the cardinality-1 binding
       // supersedes in O1); when absent, the full key-ANCHOR + PROPERTY + binding triple.
-      const existingKeyAnchorUID = (await read<Hex>(deps.publicClient, {
+      // The lookup goes through the drift-GUARDED read client (same as every other
+      // planner): `assertChain` above samples ONCE, so a mutable provider could
+      // switch chains between that check and this read — a chain-B key-anchor UID
+      // fed into the chain-A plan would mine the layer-1 PROPERTY and revert only
+      // the layer-2 binding PIN (a partial write). The guard re-asserts the live
+      // chain around the read itself.
+      const planClient = deps.guardReadClient?.(dep.chainId) ?? deps.publicClient
+      const existingKeyAnchorUID = (await read<Hex>(planClient, {
         address: dep.contracts.indexer,
         abi: indexerAbi,
         functionName: 'resolveAnchor',

@@ -593,6 +593,37 @@ describe('makePropsNs', () => {
     expect(calls).toHaveLength(0) // nothing submitted
   })
 
+  it('set routes the key-anchor planning read through the chain-pinned client', async () => {
+    // r3740726896: the resolveAnchor lookup FEEDS the plan, so it must go through
+    // `guardReadClient(dep.chainId)` like every other planner — `assertChain` samples
+    // once, and a provider drifting AFTER it could feed a wrong-chain key-anchor UID
+    // into the plan (layer-1 PROPERTY mines, layer-2 binding PIN reverts: partial
+    // write). Prove the raw fallback is untouched when the guard is supplied.
+    const { ctx, calls } = makeSubmitCtx()
+    const guarded = makeReadClient((fn) => (fn === 'resolveAnchor' ? KEY_ANCHOR : uid(0)))
+    const props = makePropsNs({
+      getDeployment: () => deployment,
+      guardReadClient: () => guarded as never,
+      publicClient: makeReadClient(() => {
+        throw new Error('unguarded publicClient used by set planning read')
+      }) as never,
+      readContext,
+      submitContext: () => ctx,
+      attester: () => ATTESTER,
+    })
+    await props.set(DATA, KEY, VALUE)
+    // The reused existing key-anchor proves the GUARDED client served the lookup:
+    // no fresh key-ANCHOR is minted, and the binding-PIN binds the existing one.
+    const allEntries = calls.flat()
+    expect(allEntries.some((r) => r.schema === SCHEMAS.anchor)).toBe(false)
+    const pinReq = allEntries.find((r) => r.schema === SCHEMAS.pin)
+    const [definition] = decodeAbiParameters(
+      [{ type: 'bytes32' }],
+      pinReq?.data[0]?.data as Hex,
+    ) as [Hex]
+    expect(definition).toBe(KEY_ANCHOR)
+  })
+
   it('get reads the active value the lens attester bound', async () => {
     const props = makePropsNs({
       getDeployment: () => deployment,

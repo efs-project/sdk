@@ -139,9 +139,22 @@ describe('efs.raw.* pre-wired contract instances', () => {
   it('buildRawContracts is usable standalone (binds via the deployment thunk)', () => {
     const provider = createMockProvider({ chainId: CHAIN_ID })
     const publicClient = createPublicClient({ chain: localChain, transport: custom(provider) })
-    const raw = buildRawContracts(() => deployment, { public: publicClient, wallet: undefined })
+    // No wallet → the READ-ONLY overload (`EfsRawReadContracts`); the wallet may
+    // now be omitted entirely (previously the type demanded `wallet: undefined`).
+    const raw = buildRawContracts(() => deployment, { public: publicClient })
     expect(raw.eas.address).toBe(contracts.eas)
     expect(raw.indexer.address).toBe(contracts.indexer)
+    // The `.write.*` surface is absent at the TYPE level (r3740726893: the old
+    // always-write return type let `raw.eas.write.revoke(...)` type-check and
+    // TypeError at runtime) — and absent at RUNTIME, which vitest can enforce.
+    // @ts-expect-error — no wallet ⇒ EfsRawReadContracts has no `.write`
+    expect(raw.eas.write).toBeUndefined()
+    const rawExplicit = buildRawContracts(() => deployment, {
+      public: publicClient,
+      wallet: undefined,
+    })
+    // @ts-expect-error — explicit `wallet: undefined` hits the same read-only overload
+    expect(rawExplicit.indexer.write).toBeUndefined()
   })
 })
 

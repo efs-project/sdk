@@ -37,7 +37,7 @@ import { easAbi } from '../eas/abi.js'
  */
 export type RawClients = {
   public: PublicClient
-  wallet: WalletClient | undefined
+  wallet?: WalletClient | undefined
 }
 
 /** The wallet-backed client shape (`.write.*` present on every instance). */
@@ -98,11 +98,31 @@ function clientArg(clients: RawClients): RawReadClient | RawWriteClient {
  * clients in index.ts) — drift is NOT re-resolved into another chain's
  * deployment. A caller-supplied `deployments` OVERRIDE is reflected (the lazy
  * getters re-read the resolver), which is a different thing from chain drift.
+ *
+ * Overloaded on the wallet: building WITHOUT a wallet client returns
+ * `EfsRawReadContracts`, whose instances have NO `.write.*` surface at the type
+ * level — viem generates no write methods without a wallet, so the old
+ * always-`EfsRawContracts` return let a no-wallet consumer type-check
+ * `raw.eas.write.revoke(...)` that was a runtime TypeError. A statically
+ * unknown wallet (`WalletClient | undefined`) returns the union — narrow the
+ * wallet BEFORE building to get the precise surface.
  */
 export function buildRawContracts(
   getDeployment: () => EfsDeployment,
+  clients: { public: PublicClient; wallet: WalletClient },
+): EfsRawContracts
+export function buildRawContracts(
+  getDeployment: () => EfsDeployment,
+  clients: { public: PublicClient; wallet?: undefined },
+): EfsRawReadContracts
+export function buildRawContracts(
+  getDeployment: () => EfsDeployment,
   clients: RawClients,
-): EfsRawContracts {
+): EfsRawContracts | EfsRawReadContracts
+export function buildRawContracts(
+  getDeployment: () => EfsDeployment,
+  clients: RawClients,
+): EfsRawContracts | EfsRawReadContracts {
   const client = clientArg(clients)
   const at = <const TAbi extends readonly unknown[]>(
     pick: (d: EfsDeployment) => `0x${string}`,
@@ -145,3 +165,15 @@ export function buildRawContracts(
     },
   }
 }
+
+// Compile-time contract checks (tsc-enforced — the test tree is excluded from
+// `typecheck`, so the wallet-gate typing is pinned here): the read-only
+// instances must NOT expose `.write` (it is `undefined` at runtime), the
+// wallet-backed ones MUST.
+type _AssertTrue<T extends true> = T
+type _ReadSurfaceHasNoWrite = _AssertTrue<
+  'write' extends keyof EfsRawReadContracts['eas'] ? false : true
+>
+type _WriteSurfaceHasWrite = _AssertTrue<
+  'write' extends keyof EfsRawContracts['eas'] ? true : false
+>
