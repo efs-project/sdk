@@ -211,6 +211,24 @@ function dataRefShapeError(d: Record<string, unknown>): string | undefined {
   return undefined
 }
 
+/** Construct the branded {@link DataRef} from a SHAPE-VALIDATED payload record.
+ * Spread FIRST; every load-bearing field (including the brand) is set AFTER it
+ * so a crafted payload key can never clobber one. Shared by `parseDataRef` and
+ * the receipt's nested `data` — which must be REBUILT, never spread through:
+ * an external payload can omit or FORGE `__brand`, and passing it verbatim
+ * would violate the branded `WriteReceipt.data: DataRef` contract exactly
+ * where `parseDataRef` refuses to (r3740877070). */
+function brandDataRef(d: Record<string, unknown>): DataRef {
+  return {
+    ...(d as object),
+    __brand: 'DataRef',
+    profile: 'efs/v1',
+    uid: d.uid as DataRef['uid'],
+    chainId: d.chainId as number,
+    resolvedBy: d.resolvedBy as DataRef['resolvedBy'],
+  } as DataRef
+}
+
 /** Parse a persisted {@link DataRef}. Unknown payload keys are PRESERVED on the
  * returned object (opaque-extension rule).
  * @throws {UnsupportedArtifact} foreign profile / newer version.
@@ -233,14 +251,7 @@ export function parseDataRef(json: string): DataRef & { ext?: Record<string, unk
   const shapeErr = dataRefShapeError(d)
   if (shapeErr !== undefined) throw new MalformedArtifact(shapeErr)
   return {
-    // Spread FIRST; every load-bearing field (including the brand) is set
-    // AFTER it so a crafted payload key can never clobber one.
-    ...(d as object),
-    __brand: 'DataRef',
-    profile: 'efs/v1',
-    uid: d.uid as DataRef['uid'],
-    chainId: d.chainId,
-    resolvedBy: d.resolvedBy as DataRef['resolvedBy'],
+    ...brandDataRef(d),
     ...(env.ext !== undefined ? { ext: env.ext } : {}),
   }
 }
@@ -371,6 +382,10 @@ export function parseWriteReceipt(json: string): WriteReceipt & { ext?: Record<s
   return {
     ...(d as unknown as WriteReceipt),
     profile: 'efs/v1',
+    // The nested ref is REBUILT from its validated shape — never spread
+    // through — so its brand/profile are OURS even when the payload omitted or
+    // forged them.
+    ...(d.data !== undefined ? { data: brandDataRef(d.data as Record<string, unknown>) } : {}),
     ...(env.ext !== undefined ? { ext: env.ext } : {}),
   }
 }

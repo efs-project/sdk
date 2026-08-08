@@ -107,7 +107,12 @@ import type {
   WriteOptions,
   WriteReceipt,
 } from './types.js'
-import { type DetectClient, detectAccount, toCapabilities } from './writes/detect.js'
+import {
+  type DetectClient,
+  detectAccount,
+  invalidateAccountProfile,
+  toCapabilities,
+} from './writes/detect.js'
 import type { EdgeSubmitContext } from './writes/edge-submit.js'
 import { type FileWriteContext, writeFileTier1 } from './writes/file.js'
 import { type ListsWriteNs, makeListsWriteNs } from './writes/lists.js'
@@ -334,10 +339,20 @@ export type EfsAccountNs = {
    * The curated {@link AccountCapabilities} for the connected signing account
    * (`canOneSig`/`gasless`/`sponsored`/`kind`). Runs `detectAccount` lazily
    * (`getCode` + the wallet's `getCapabilities` when supported) and caches the
-   * profile per `(address, chainId)`, so this is NOT on the write hot path — a
-   * `fs.write` never triggers it. Tolerant of a wallet without `getCapabilities`.
+   * profile per `(address, chainId)` within the connector, so this is NOT on
+   * the write hot path — a `fs.write` never triggers it. Tolerant of a wallet
+   * without `getCapabilities`.
+   *
+   * The probed inputs are MUTABLE on-chain state: deploying a counterfactual
+   * smart account or adding/removing an EIP-7702 delegation changes the
+   * account's code — and with it `kind` and the capability profile — WITHOUT
+   * changing the cache key, so the cached profile goes stale. Pass
+   * `{ refresh: true }` after such a transition (or from a UI "re-check"
+   * affordance) to drop the cached profile and re-probe live state. This is
+   * the client-level invalidation lever: provider-form callers cannot reach
+   * the internally-created wallet object that scopes the cache.
    */
-  capabilities(): Promise<AccountCapabilities>
+  capabilities(opts?: { refresh?: boolean }): Promise<AccountCapabilities>
 }
 
 /** Read-capable EAS namespace: the pure tools + raw `getAttestation` (no wallet). */
@@ -1202,7 +1217,7 @@ export function createEfsV1Client(config: EfsClientConfig): EfsClient {
     decode,
     toJSON,
     account: {
-      capabilities: async () => {
+      capabilities: async (opts?: { refresh?: boolean }) => {
         requireWallet()
         const wallet = walletClient as WalletClient
         const address = wallet.account?.address
@@ -1227,6 +1242,11 @@ export function createEfsV1Client(config: EfsClientConfig): EfsClient {
         // `getCapabilities` comes from the wallet (absent on wallets that don't implement
         // it — detection tolerates that). Lazy + cached per (address, chainId); never on
         // the write hot path.
+        // Account code is MUTABLE (a counterfactual deploy, a 7702 delegation
+        // added/removed) while the cache key (address@chain, per connector) is
+        // not — `{ refresh: true }` evicts the cached profile for the LIVE
+        // chain sampled above, so the probe below re-reads real state.
+        if (opts?.refresh) invalidateAccountProfile(address, liveChainId, wallet)
         const guardedForProbe = guardReadClient(liveChainId)
         const detectClient: DetectClient = {
           getCode: (args) => (guardedForProbe as unknown as DetectClient).getCode(args),

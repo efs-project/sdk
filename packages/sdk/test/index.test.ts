@@ -618,4 +618,39 @@ describe('capability probe chain-pinning (review r3740495867)', () => {
     const err = await efs.account.capabilities().catch((e) => e)
     expect((err as { code?: string }).code).toBe('WrongChain')
   })
+
+  it('capabilities({ refresh: true }) re-probes mutable account code; a plain call serves the cache (r3740877068)', async () => {
+    // Same account, same chain — but the CODE changes (an EIP-7702 delegation
+    // lands). The cache key can't see that, so the plain call keeps serving
+    // the stale profile; `{ refresh: true }` is the client-level invalidation
+    // lever (provider-form callers cannot reach the internally-created wallet
+    // that scopes the cache).
+    let code = '0x'
+    const provider = createMockProvider({
+      chainId: 31337,
+      handlers: {
+        eth_getCode: () => code,
+        // A wallet that doesn't support EIP-5792 rejects with 4200 — the
+        // DURABLE no-capabilities answer, so the profile is cacheable (a
+        // transient failure would be evicted and defeat the cache assertion).
+        wallet_getCapabilities: () => {
+          throw Object.assign(new Error('Unsupported method'), { code: 4200 })
+        },
+      },
+    })
+    const chain31337 = { ...sepolia, id: 31337 }
+    const pc = createPublicClient({ chain: chain31337, transport: custom(provider) })
+    const wc = createWalletClient({
+      chain: chain31337,
+      account: addr(0xbe0),
+      transport: custom(provider),
+    }) as WalletClient
+    const efs = createEfsClient({ publicClient: pc, walletClient: wc }) as unknown as {
+      account: { capabilities(o?: { refresh?: boolean }): Promise<{ kind: string }> }
+    }
+    expect((await efs.account.capabilities()).kind).toBe('eoa')
+    code = `0xef0100${'11'.repeat(20)}` // the delegation designator lands on-chain
+    expect((await efs.account.capabilities()).kind).toBe('eoa') // stale cache, documented
+    expect((await efs.account.capabilities({ refresh: true })).kind).toBe('eoa-7702-delegated')
+  })
 })

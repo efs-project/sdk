@@ -291,6 +291,29 @@ describe('optional typed receipt fields validate when present (review r374056398
   })
 })
 
+describe('nested receipt data brand (review r3740877070)', () => {
+  it('a FORGED nested __brand is rebuilt to DataRef (never spread through)', () => {
+    const raw = JSON.parse(serializeWriteReceipt({ ...RECEIPT, data: REF })) as {
+      data: { data: Record<string, unknown> }
+    }
+    raw.data.data.__brand = 'Forged'
+    const out = parseWriteReceipt(JSON.stringify(raw))
+    expect(out.data?.__brand).toBe('DataRef')
+    expect(out.data?.uid).toBe(REF.uid)
+    expect(out.data?.profile).toBe('efs/v1')
+  })
+
+  it('a MISSING nested __brand is added by the parser', () => {
+    const raw = JSON.parse(serializeWriteReceipt({ ...RECEIPT, data: REF })) as {
+      data: { data: Record<string, unknown> }
+    }
+    raw.data.data.__brand = undefined // JSON.stringify drops undefined-valued keys → absent
+    const out = parseWriteReceipt(JSON.stringify(raw))
+    expect(out.data?.__brand).toBe('DataRef')
+    expect(out.data?.chainId).toBe(REF.chainId)
+  })
+})
+
 describe('envelope ext round-trip (review r3740769006)', () => {
   it('serializeDataRef(parseDataRef(json)) keeps the bag at the ENVELOPE, never in the payload', () => {
     const first = serializeDataRef(REF, { relayHint: 'https://r.example' })
