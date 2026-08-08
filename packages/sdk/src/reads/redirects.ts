@@ -174,12 +174,18 @@ async function fetchRedirectRecord(
   redirectUID: Hex,
   attester: Address,
 ): Promise<RedirectRecord | undefined> {
-  const att = await read<{ data: Hex }>(ctx.publicClient, {
+  const att = await read<{ data: Hex; revocationTime: bigint }>(ctx.publicClient, {
     address: ctx.deployment.contracts.eas,
     abi: getAttestationAbi,
     functionName: 'getAttestation',
     args: [redirectUID],
   })
+  // The indexer scan that produced `redirectUID` was ACTIVE-only, but this EAS
+  // lookup is a SECOND read — a revoke landing between the two still decodes
+  // here. Recheck revocation on the authoritative record and discard: a
+  // just-retracted redirect must not be honored by get/list/canonical/history
+  // or the symlink walk for one more read (r3740949738).
+  if (att.revocationTime !== 0n) return undefined
   const decoded = decodeRedirectData(att.data)
   if (decoded === undefined || decoded.target === ZERO_UID) return undefined
   const kind = redirectKindName(decoded.kindCode)

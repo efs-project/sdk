@@ -101,7 +101,16 @@ function redirectData(target: Hex, kind: number): Hex {
 // dangling check reads. Unknown getAttestation UIDs return the empty struct
 // (uid 0), like EAS.
 
-type Edge = { attester: Address; redirectUID: Hex; target: Hex; kind: number; revoked?: boolean }
+type Edge = {
+  attester: Address
+  redirectUID: Hex
+  target: Hex
+  kind: number
+  revoked?: boolean
+  /** Simulate a revoke landing BETWEEN the active-only indexer scan and the
+   * EAS decode: the scan serves the UID, but getAttestation reports revoked. */
+  revokedAfterScan?: boolean
+}
 type Node = { schema: Hex; revoked?: boolean }
 
 function makeChain(
@@ -144,7 +153,7 @@ function makeChain(
           return {
             uid: u,
             schema: SCHEMAS.redirect,
-            revocationTime: edge.revoked ? 1n : 0n,
+            revocationTime: edge.revoked || edge.revokedAfterScan ? 1n : 0n,
             data: redirectData(edge.target, edge.kind),
           }
         }
@@ -964,6 +973,26 @@ describe('makeRedirectsNs', () => {
     expect(err).toBe(reverted) // the RAW failure, not IndexingIncomplete
     expect(err).not.toBeInstanceOf(IndexingIncomplete)
     expect(indexerCalls).toHaveLength(0) // indexRevocation never attempted
+  })
+
+  it('a redirect revoked BETWEEN the scan and the EAS decode is discarded (r3740949738)', async () => {
+    // The indexer scan is active-only, but the follow-up getAttestation is a
+    // second read — a revoke landing in that window used to be honored for one
+    // more read. The decode now rechecks revocationTime on the authoritative
+    // record and reports absence.
+    const chain = makeChain({
+      [FROM]: [
+        {
+          attester: ATTESTER,
+          redirectUID: uid(0xf1),
+          target: TO,
+          kind: REDIRECT_KIND.sameAs,
+          revokedAfterScan: true,
+        },
+      ],
+    })
+    expect(await nsWith(chain).get(FROM)).toBeUndefined()
+    expect(await nsWith(chain).list(FROM)).toEqual([])
   })
 
   it('get returns the SELECTED record (any kind, ratified selection) under the default lens', async () => {
