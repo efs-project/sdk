@@ -848,6 +848,67 @@ describe('makePropsNs', () => {
     expect(out).toEqual([{ key: KEY, value: VALUE, propertyUID: PROP_UID }])
   })
 
+  it('CAPS the raw key-anchor scan — a spammed DATA cannot force unbounded work (r3741898815)', async () => {
+    // Key anchors are attester-independent and non-revocable: anyone can append
+    // rows under any DATA. The scan must be bounded regardless of rawCount.
+    let pageCalls = 0
+    const props = makePropsNs({
+      getDeployment: () => deployment,
+      publicClient: makeReadClient((fn, args) => {
+        if (fn === 'getChildCountBySchema') return 10_000_000n // griefed namespace
+        if (fn === 'getAnchorsBySchema') {
+          pageCalls += 1
+          const start = args[2] as bigint
+          // The KEY anchor sits first (earliest-minted survives the cap).
+          return start === 0n
+            ? [KEY_ANCHOR, ...Array.from({ length: 255 }, (_, i) => uid(0x5000 + i))]
+            : Array.from({ length: 256 }, (_, i) => uid(0x6000 + i))
+        }
+        if (fn === 'resolveAnchor') return args[1] === KEY ? KEY_ANCHOR : uid(0)
+        if (fn === 'getActivePinTarget') return args[0] === KEY_ANCHOR ? PROP_UID : uid(0)
+        if (fn === 'getAttestation') {
+          if (args[0] === KEY_ANCHOR) return { data: anchorEnc.encodeData([KEY, SCHEMAS.property]) }
+          if (args[0] === PROP_UID) return { data: propEnc.encodeData([VALUE]) }
+          return { data: anchorEnc.encodeData([`k${String(args[0])}`, SCHEMAS.property]) }
+        }
+        return uid(0)
+      }) as never,
+      readContext,
+      submitContext: () => makeSubmitCtx().ctx,
+      attester: () => ATTESTER,
+    })
+    const out = await props.list(DATA)
+    expect(pageCalls).toBe(4) // 1024 / 256 — the cap, not the 10M raw count
+    expect(out).toEqual([{ key: KEY, value: VALUE, propertyUID: PROP_UID }])
+  })
+
+  it('honors a caller-supplied maxKeys below the default cap', async () => {
+    let pageCalls = 0
+    const props = makePropsNs({
+      getDeployment: () => deployment,
+      publicClient: makeReadClient((fn, args) => {
+        if (fn === 'getChildCountBySchema') return 10_000n
+        if (fn === 'getAnchorsBySchema') {
+          pageCalls += 1
+          return (args[2] as bigint) === 0n ? [KEY_ANCHOR] : []
+        }
+        if (fn === 'resolveAnchor') return args[1] === KEY ? KEY_ANCHOR : uid(0)
+        if (fn === 'getActivePinTarget') return args[0] === KEY_ANCHOR ? PROP_UID : uid(0)
+        if (fn === 'getAttestation') {
+          if (args[0] === KEY_ANCHOR) return { data: anchorEnc.encodeData([KEY, SCHEMAS.property]) }
+          return { data: propEnc.encodeData([VALUE]) }
+        }
+        return uid(0)
+      }) as never,
+      readContext,
+      submitContext: () => makeSubmitCtx().ctx,
+      attester: () => ATTESTER,
+    })
+    const out = await props.list(DATA, { maxKeys: 10 })
+    expect(pageCalls).toBe(1) // one window covers the 10-row bound
+    expect(out).toEqual([{ key: KEY, value: VALUE, propertyUID: PROP_UID }])
+  })
+
   it('list stops AT the raw count — an exact page multiple sends no reverting extra probe (r3741115239)', async () => {
     // Exactly 256 property anchors: the old full-page-implies-more loop probed
     // start=256, which the slice helper REVERTS (InvalidOffset) — the whole

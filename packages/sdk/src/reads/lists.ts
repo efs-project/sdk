@@ -148,9 +148,10 @@ async function readConfig(
  * a stable attester rather than throwing). The curator is folded in as a last
  * candidate so a single-curator list reads its own entries with no lens knowledge.
  *
- * One `length` read per candidate, fanned with `Promise.all` (multicall-coalesced),
- * then the first non-zero wins.
+ * Returns the FULL ranked set; the verbs select among it with LIVE per-candidate
+ * checks as they walk (no pre-filtering probe — see the body).
  */
+
 async function resolveListAttesters(
   ctx: ReadContext,
   opts: ListReadOptions | undefined,
@@ -176,23 +177,15 @@ async function resolveListAttesters(
       candidates.push(a)
     }
   }
-  const lengths = await Promise.all(
-    candidates.map((attester) =>
-      read<bigint>(ctx.publicClient, {
-        address: ctx.deployment.contracts.listReader,
-        abi: listReaderAbi,
-        functionName: 'length',
-        args: [listUID, attester],
-      }),
-    ),
-  )
-  // EVERY candidate with entries, in lens order (r3741157007): the probe and
-  // the verb's follow-up read are two reads, so a revoke can empty the leading
-  // candidate in between — the verbs RE-CHECK and fall through to the next
-  // candidate instead of reporting a false empty/zero/false, preserving
-  // first-attester-WITH-ENTRIES. Fallback: the first candidate (stable, empty).
-  const withEntries = candidates.filter((_, i) => (lengths[i] ?? 0n) > 0n)
-  return withEntries.length > 0 ? withEntries : [candidates[0] as Address]
+  // The FULL ranked candidate set — deliberately NOT pre-filtered by a `length`
+  // probe (r3741898817). Every verb already checks liveness per candidate as it
+  // walks (`length`/`countOf`/an empty page + the standing-leader
+  // disambiguation), so a probe would only add a race: a candidate that is
+  // empty AT PROBE TIME but gains an entry before the follow-up read must still
+  // be reachable — and `entries()` memoizes its candidate list, which made that
+  // staleness persist for the handle's lifetime. Dropping the probe also
+  // removes one read per candidate.
+  return candidates
 }
 
 /** Read one raw `entries` page for a resolved attester. */
@@ -477,24 +470,28 @@ export function listEntries(
     // who persisted a `Page.cursor` and resumed via `entries(uid, { cursor })` must start
     // there, not restart at offset 0 and duplicate entries).
     // Request-LOCAL selection (r3741791442): derived from this call's cursor.
-    const aligned = alignCursor(parseCursor(pageOpts?.cursor ?? opts?.cursor), candidates)
+    const parsed = parseCursor(pageOpts?.cursor ?? opts?.cursor)
+    const aligned = alignCursor(parsed, candidates)
     let { start } = aligned
     let i = aligned.i
     const pageSize = pageOpts?.limit ?? defaultLimit
     let page = await readEntriesPage(ctx, listUID, candidates[i] as Address, kind, start, pageSize)
-    // An EMPTY page means either the normal end of pagination or an EVAPORATED
-    // candidate (a revoke landed after the selection probe). At offset 0 it is
-    // always the latter (probe-selected candidates had entries); at a RESUMED
-    // offset, disambiguate via a live length read (r3741418197) — a standing
-    // leader's empty page is the honest end, an evaporated one falls through to
-    // the next ranked candidate, RESTARTING at 0 (the old cursor indexed the
-    // evaporated attester's listing and is void for the new one).
+    // An EMPTY page at offset 0 means this candidate holds nothing right now —
+    // advance to the next ranked one. At a RESUMED offset it is ambiguous, so
+    // disambiguate via a live length read (r3741418197): a standing leader's
+    // empty page is the honest end of pagination, while an emptied one falls
+    // through to the next candidate RESTARTING at 0 (the old cursor indexed the
+    // emptied attester's listing and is void for the new one).
     while (page.length === 0 && i + 1 < candidates.length) {
       if (start > 0n && (await attesterStillHasEntries(ctx, listUID, candidates[i] as Address))) {
         break // honest end of the standing leader's listing
       }
+      // A BOUND cursor indexed THAT attester's listing: once we leave it the
+      // offset is void, so restart at 0. An UNBOUND (legacy/hand-written)
+      // cursor indexes "the selection" — the first candidate that actually has
+      // entries — so skipping empty candidates preserves it.
+      if (parsed.attester !== undefined) start = 0n
       i += 1
-      start = 0n
       page = await readEntriesPage(ctx, listUID, candidates[i] as Address, kind, start, pageSize)
     }
     // A short page (fewer than requested) means the end; otherwise advance the cursor
@@ -536,7 +533,8 @@ export function listEntries(
     // subsequent pages thread their own advanced cursor. Selection is
     // request-LOCAL, derived from that cursor (r3741791442) — the iterator's
     // continuity rides the BOUND cursor, not shared state.
-    const aligned = alignCursor(parseCursor(cursor ?? opts?.cursor), candidates)
+    const parsed = parseCursor(cursor ?? opts?.cursor)
+    const aligned = alignCursor(parsed, candidates)
     let { start } = aligned
     let i = aligned.i
     let page = await readEntriesPage(
@@ -553,8 +551,8 @@ export function listEntries(
       if (start > 0n && (await attesterStillHasEntries(ctx, listUID, candidates[i] as Address))) {
         break
       }
+      if (parsed.attester !== undefined) start = 0n // see byPage
       i += 1
-      start = 0n
       page = await readEntriesPage(
         ctx,
         listUID,

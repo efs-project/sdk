@@ -42,9 +42,24 @@ import { type EdgeSubmitContext, submitEdgePlan } from './edge-submit.js'
 import { buildPropertyPlan } from './edge.js'
 
 /** Lens option for the property read verbs. */
+/** Default cap on RAW key-ANCHOR rows `props.list` scans under one DATA
+ * (r3741898815 — key anchors are attester-independent and non-revocable, so the
+ * namespace under any DATA is third-party-writable and must never be
+ * materialized unbounded). Override per call with `PropReadOptions.maxKeys`. */
+export const MAX_PROPERTY_SCAN = 1024n
+
 export interface PropReadOptions {
   /** The attester whose bound value(s) to read. Defaults to the connected attester. */
   lens?: Address
+  /**
+   * `list` only — cap the number of RAW key-ANCHOR rows scanned under the DATA
+   * (default {@link MAX_PROPERTY_SCAN}). Key anchors are attester-independent
+   * and non-revocable, so anyone can append rows under any DATA; the scan is
+   * always bounded, and this lowers the bound further for a caller that wants
+   * tighter work limits. The index is append-ordered, so the earliest-minted
+   * (typically genuine) keys are the ones retained.
+   */
+  maxKeys?: number
 }
 
 /** One property key→value entry (with the source PROPERTY UID for provenance). */
@@ -194,8 +209,18 @@ export function makePropsNs(deps: PropsNsDeps): PropsNs {
         functionName: 'getChildCountBySchema',
         args: [dataUID, dep.schemas.property],
       })
+      // GRIEFING BOUND (r3741898815): key-ANCHORs are attester-INDEPENDENT and
+      // NON-REVOCABLE, so any account can permanently append PROPERTY-bucket
+      // anchors under someone else's DATA. Trusting the raw count would let a
+      // third party make this public read consume unbounded memory + RPC (an
+      // EAS read AND a value read per row) even though almost none of the spam
+      // keys have a binding under the requested lens. The scan is capped; the
+      // index is append-ordered, so a DATA's genuine (earlier-minted) keys are
+      // the ones that survive. `opts.maxKeys` lets a caller bound it further.
+      const scanCap = opts?.maxKeys !== undefined ? BigInt(opts.maxKeys) : MAX_PROPERTY_SCAN
+      const limit = rawCount < scanCap ? rawCount : scanCap
       const anchorUIDs: Hex[] = []
-      for (let start = 0n; start < rawCount; start += PAGE) {
+      for (let start = 0n; start < limit; start += PAGE) {
         const page = await read<readonly Hex[]>(pc, {
           address: dep.contracts.indexer,
           abi: indexerAbi,

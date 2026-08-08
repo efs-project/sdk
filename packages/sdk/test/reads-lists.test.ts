@@ -607,12 +607,13 @@ describe('list attester re-selection after a raced revoke (review r3741157007)',
   /** A hand-rolled client: attester A reports one entry on its FIRST `length`
    * read (the selection probe) and zero afterwards (a revoke landed between the
    * probe and the verb's follow-up read); B holds one entry throughout. */
+  /** A is EMPTY (its entries were revoked) unless `aStable`; B always holds one
+   * entry. Exercises the live per-candidate failover the verbs perform. */
   function racedClient(opts?: {
     bCountOf?: bigint
-    /** Keep A alive (length stays 1) — the honest-end-of-pagination case. */
+    /** Keep A alive (length 1) — the honest-end / standing-leader case. */
     aStable?: boolean
   }): ReadContext['publicClient'] {
-    let aLengthReads = 0
     return {
       async readContract(args: { functionName: string; args?: readonly unknown[] }) {
         const a = (args.args ?? []) as readonly unknown[]
@@ -629,12 +630,12 @@ describe('list attester re-selection after a raced revoke (review r3741157007)',
             }
           case 'length': {
             const who = (a[1] as string).toLowerCase()
-            if (who === A.toLowerCase()) {
-              aLengthReads += 1
-              if (opts?.aStable) return 1n
-              return aLengthReads === 1 ? 1n : 0n
-            }
-            return who === B.toLowerCase() ? 1n : 0n
+            // A holds an entry only in the `aStable` variant; otherwise it is
+            // empty (its entries were revoked). With the pre-filtering probe
+            // gone (r3741898817) every verb reads liveness itself, so the
+            // fixture models the STATE rather than a read-ordering trick.
+            if (who === A.toLowerCase()) return opts?.aStable ? 1n : 0n
+            return who === B.toLowerCase() ? 1n : 0n // B always holds one
           }
           case 'countOf': {
             const who = (a[1] as string).toLowerCase()
@@ -674,18 +675,24 @@ describe('list attester re-selection after a raced revoke (review r3741157007)',
     expect(await listHas(ctx2, LIST_UID, uid(0x888), { lens: lens([A, B]) })).toBe(false)
   })
 
-  it('a RESUMED page re-selects when the leader evaporated — never a false end (r3741418197)', async () => {
-    // The caller resumes with a persisted cursor; A's remaining entries were
-    // revoked in between. An empty resumed page must disambiguate via a live
-    // length read and fall through to B (restarting at 0 — the old cursor
-    // indexed the evaporated listing), not report a false end.
+  it('an UNBOUND cursor indexes the SELECTED listing, skipping empty candidates (r3741418197)', async () => {
+    // A legacy/hand-written numeric cursor carries no attester, so it can only
+    // mean "offset into the selection" — the first candidate that actually has
+    // entries. A is empty, so the walk reaches B and applies the offset THERE
+    // (B holds one entry at index 0, so offset 5 is past its end). The
+    // evaporated-LEADER case is expressible only with a bound cursor — see the
+    // sibling test (r3741506928).
     const ctx = ctxOf(racedClient())
     const page = await listEntries((() => ctx) as never, LIST_UID, {
       lens: lens([A, B]),
       cursor: '5',
     }).byPage()
-    expect(page.items).toHaveLength(1)
-    expect(page.items[0]?.attester).toBe(B)
+    expect(page.items).toHaveLength(0)
+    // …and from offset 0 the same walk reaches B's entry.
+    const first = await listEntries((() => ctx) as never, LIST_UID, {
+      lens: lens([A, B]),
+    }).byPage()
+    expect(first.items[0]?.attester).toBe(B)
   })
 
   it('a BOUND cursor whose attester evaporated restarts the ranked walk at 0 — never a foreign offset (r3741506928)', async () => {
