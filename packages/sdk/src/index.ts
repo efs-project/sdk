@@ -854,6 +854,9 @@ export function createEfsV1Client(config: EfsClientConfig): EfsClient {
       walletClient: wallet as unknown as EdgeSubmitContext['walletClient'],
       publicClient: publicClient as unknown as EdgeSubmitContext['publicClient'],
       easAddress: dep.contracts.eas,
+      // The layered boundary's placement gates (stamped PIN plans) read the
+      // indexer for the active-mirror readability proof.
+      indexerAddress: dep.contracts.indexer,
       chainId: dep.chainId,
       attester,
       // Same fail-closed wrong-chain guard as `fs.write`, run before any standalone-verb

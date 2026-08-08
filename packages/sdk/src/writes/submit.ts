@@ -69,7 +69,7 @@
  */
 
 import type { Address, Hex, Log, TransactionReceipt } from 'viem'
-import { parseEventLogs } from 'viem'
+import { decodeAbiParameters, parseEventLogs } from 'viem'
 import {
   getReferencingBySchemaAndAttesterAbi,
   getReferencingBySchemaAndAttesterCountAbi,
@@ -401,8 +401,12 @@ export class WriteSendUnknownError extends EfsError {
  * mirrors/properties on the placement attester), so the check is mandatory. */
 async function assertHardlinkSelfAuthored(plan: FileWriteGraph, ctx: SubmitContext): Promise<void> {
   if (!plan.hardlink) return
+  // The target rides on the plan stamp (covers stamped edge plans, whose PIN
+  // ref differs); the placement-PIN lookup is the legacy fallback.
   const pin = plan.attestations.find((a) => a.ref === REF.PLACEMENT_PIN)
-  const dataUID = pin !== undefined && typeof pin.refUID === 'string' ? pin.refUID : undefined
+  const dataUID =
+    plan.hardlinkDataUID ??
+    (pin !== undefined && typeof pin.refUID === 'string' ? pin.refUID : undefined)
   if (dataUID === undefined) {
     // FAIL CLOSED (r3741235140): a builder-made hardlink plan always carries a
     // concrete PIN refUID — a symbolic/missing target means a hand-built plan
@@ -553,13 +557,62 @@ async function assertConcreteAnchorIsAnchor(
     abi: getAttestationAbi,
     functionName: 'getAttestation',
     args: [target],
-  })) as { schema?: Hex } | undefined
+  })) as { schema?: Hex; refUID?: Hex; data?: Hex } | undefined
   const schema = att?.schema
   if (schema === undefined || schema.toLowerCase() !== expected.toLowerCase()) {
     throw new EfsError(
       `EFS write: the reused file-ANCHOR ${target} is not an ANCHOR attestation (schema ${schema ?? 'unknown'}, expected ${expected}) — path resolution discovers placements through ANCHOR nodes only, so this placement would confirm but never be found.`,
       { code: 'InvalidArgument' },
     )
+  }
+  // SLOT BINDING (r3741335345): being an ANCHOR is not enough — a valid ANCHOR
+  // from a DIFFERENT slot (another file, a generic folder) would skip the
+  // requested anchor's mint and silently overwrite a different path. When the
+  // builder stamped the requested slot, verify the reused anchor's refUID
+  // (parent) and encoded (name, forSchema) name EXACTLY that slot. Plans whose
+  // anchor is caller-chosen by design (the standalone placement-PIN plan) carry
+  // no slot stamps and skip this.
+  const expectedParent = plan.existingAnchorParentUID
+  const expectedName = plan.existingAnchorName
+  if (expectedParent !== undefined || expectedName !== undefined) {
+    const refUID = att?.refUID
+    if (
+      expectedParent !== undefined &&
+      (refUID === undefined || refUID.toLowerCase() !== expectedParent.toLowerCase())
+    ) {
+      throw new EfsError(
+        `EFS write: the reused file-ANCHOR ${target} hangs under parent ${refUID ?? 'unknown'}, not the requested parent ${expectedParent} — placing here would overwrite a DIFFERENT path while leaving the requested one unchanged.`,
+        { code: 'InvalidArgument' },
+      )
+    }
+    let name: string | undefined
+    let forSchema: Hex | undefined
+    try {
+      const [n, f] = decodeAbiParameters(
+        [{ type: 'string' }, { type: 'bytes32' }],
+        att?.data as Hex,
+      ) as [string, Hex]
+      name = n
+      forSchema = f
+    } catch {
+      throw new EfsError(
+        `EFS write: the reused file-ANCHOR ${target}'s payload does not decode as (name, forSchema) — it does not name a file slot.`,
+        { code: 'InvalidArgument' },
+      )
+    }
+    if (expectedName !== undefined && name !== expectedName) {
+      throw new EfsError(
+        `EFS write: the reused file-ANCHOR ${target} is named '${name}', not the requested '${expectedName}' — placing here would overwrite a DIFFERENT file.`,
+        { code: 'InvalidArgument' },
+      )
+    }
+    const expectedBucket = plan.dataSchemaUID
+    if (expectedBucket !== undefined && forSchema.toLowerCase() !== expectedBucket.toLowerCase()) {
+      throw new EfsError(
+        `EFS write: the reused file-ANCHOR ${target} lives in bucket ${forSchema}, not the DATA file bucket ${expectedBucket} — it is a folder/typed anchor, not this file's slot.`,
+        { code: 'InvalidArgument' },
+      )
+    }
   }
 }
 

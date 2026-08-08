@@ -135,6 +135,10 @@ interface MockChainOptions {
   hardlinkMirrorCount?: bigint
   /** Override the schema the mock reports for EXISTING_ANCHOR (default ANCHOR). */
   anchorSchema?: Hex
+  /** Override EXISTING_ANCHOR's slot parent (default PARENT). */
+  anchorParent?: Hex
+  /** Override EXISTING_ANCHOR's slot name (default 'readme.md'). */
+  anchorName?: string
   /** Layer (1-based call index) at which `writeContract` throws a CODED refusal. */
   revertOnCall?: number
   /** Layer at which `writeContract` fails with a CODE-LESS transport error. */
@@ -236,7 +240,15 @@ function makeMockChain(opts: MockChainOptions = {}) {
         // reused concrete file-ANCHOR.
         const [queried] = (args.args ?? []) as [Hex]
         if (queried === EXISTING_ANCHOR) {
-          return { uid: queried, schema: opts.anchorSchema ?? SCHEMAS.anchor }
+          return {
+            uid: queried,
+            schema: opts.anchorSchema ?? SCHEMAS.anchor,
+            refUID: opts.anchorParent ?? PARENT, // the slot's parent
+            data: encodeAbiParameters(
+              [{ type: 'string' }, { type: 'bytes32' }],
+              [opts.anchorName ?? 'readme.md', SCHEMAS.data],
+            ),
+          }
         }
         return {
           attester: opts.hardlinkAuthor ?? ACCOUNT,
@@ -558,6 +570,24 @@ describe('submitWriteTier1 — hardlink plan', () => {
     const { ctx, sent } = makeMockChain()
     await submitWriteTier1(plan, ctx)
     expect(sent.length).toBeGreaterThan(0) // the overwrite write went through
+  })
+
+  it('REFUSES a reused anchor from a DIFFERENT slot — wrong parent (r3741335345)', async () => {
+    const plan = buildFileWriteGraph({ ...bytesInput, existingFileAnchorUID: EXISTING_ANCHOR })
+    const { ctx, sent } = makeMockChain({ anchorParent: uid(0x999) })
+    const err = await submitWriteTier1(plan, ctx).catch((e) => e)
+    expect((err as { code?: string }).code).toBe('InvalidArgument')
+    expect(String((err as Error).message)).toMatch(/DIFFERENT path/)
+    expect(sent).toHaveLength(0)
+  })
+
+  it('REFUSES a reused anchor with a DIFFERENT name', async () => {
+    const plan = buildFileWriteGraph({ ...bytesInput, existingFileAnchorUID: EXISTING_ANCHOR })
+    const { ctx, sent } = makeMockChain({ anchorName: 'other.md' })
+    const err = await submitWriteTier1(plan, ctx).catch((e) => e)
+    expect((err as { code?: string }).code).toBe('InvalidArgument')
+    expect(String((err as Error).message)).toMatch(/DIFFERENT file/)
+    expect(sent).toHaveLength(0)
   })
 
   it('FAILS CLOSED when the context cannot run the authorship read', async () => {

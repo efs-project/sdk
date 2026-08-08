@@ -321,6 +321,17 @@ export interface FileWriteGraph {
   readonly anchorSchemaUID?: Hex
   /** See {@link FileWriteGraph.anchorSchemaUID}. */
   readonly existingAnchorUID?: Hex
+  /** SLOT-BINDING stamps for the reused anchor (r3741335345): the submitter
+   * verifies the reused ANCHOR actually names the REQUESTED `(parent, name,
+   * DATA)` slot — a valid ANCHOR from a DIFFERENT slot would silently
+   * overwrite another path. Absent on plans whose anchor is caller-chosen by
+   * design (the standalone placement-PIN plan). */
+  readonly existingAnchorParentUID?: Hex
+  /** See {@link FileWriteGraph.existingAnchorParentUID}. */
+  readonly existingAnchorName?: string
+  /** The hardlink target DATA UID, stamped so the submitter's gates need no
+   * placement-PIN ref lookup (and so STAMPED edge plans can be gated). */
+  readonly hardlinkDataUID?: Hex
   /** Every planned attestation, ordered by layer (L1 → L2 → L3). The submitter
    * groups by {@link PlannedAttestation.layer} into `multiAttest` batches. */
   readonly attestations: readonly PlannedAttestation[]
@@ -485,7 +496,14 @@ export function buildFileWriteGraph(input: FileWriteGraphInput): FileWriteGraph 
       dataSchemaUID: schemas.data,
       mirrorSchemaUID: schemas.mirror,
       anchorSchemaUID: schemas.anchor,
-      ...(existingFileAnchorUID !== undefined ? { existingAnchorUID: existingFileAnchorUID } : {}),
+      hardlinkDataUID: input.content.dataUID,
+      ...(existingFileAnchorUID !== undefined
+        ? {
+            existingAnchorUID: existingFileAnchorUID,
+            existingAnchorParentUID: input.parentAnchorUID,
+            existingAnchorName: input.fileName,
+          }
+        : {}),
       attestations: stableSortByLayer([
         ...folderAttestations,
         ...fileAnchorAtts,
@@ -641,7 +659,13 @@ export function buildFileWriteGraph(input: FileWriteGraphInput): FileWriteGraph 
     dataSchemaUID: schemas.data,
     mirrorSchemaUID: schemas.mirror,
     anchorSchemaUID: schemas.anchor,
-    ...(existingFileAnchorUID !== undefined ? { existingAnchorUID: existingFileAnchorUID } : {}),
+    ...(existingFileAnchorUID !== undefined
+      ? {
+          existingAnchorUID: existingFileAnchorUID,
+          existingAnchorParentUID: input.parentAnchorUID,
+          existingAnchorName: input.fileName,
+        }
+      : {}),
     attestations: ordered,
   }
 }

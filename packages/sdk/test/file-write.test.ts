@@ -171,9 +171,24 @@ function makeCtx(
         return anchors[`${parent}|${name}|${schema}`] ?? ZERO_UID
       }
       if (args.functionName === 'getAttestation') {
-        // The layered submitter's concrete-anchor gate (r3741288472): this
-        // harness's overwrite anchors are genuine ANCHORs by construction.
+        // The layered submitter's concrete-anchor gate (r3741288472/45): this
+        // harness's overwrite anchors are genuine ANCHORs; reconstruct the slot
+        // fields (parent, name, DATA bucket) from the `anchors` fixture keys.
         const [u] = args.args as [Hex]
+        for (const [key, anchorUID] of Object.entries(anchors)) {
+          if (anchorUID === u) {
+            const [parent, name] = key.split('|') as [Hex, string]
+            return {
+              uid: u,
+              schema: SCHEMAS.anchor,
+              refUID: parent,
+              data: encodeAbiParameters(
+                [{ type: 'string' }, { type: 'bytes32' }],
+                [name, SCHEMAS.data],
+              ),
+            }
+          }
+        }
         return { uid: u, schema: SCHEMAS.anchor }
       }
       if (args.functionName === 'getActiveTagWeight') {

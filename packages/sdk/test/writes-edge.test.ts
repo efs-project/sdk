@@ -23,7 +23,7 @@ import type { EfsDeployment, EfsSchemaUIDs } from '../src/chain/deployments.js'
 import { attestedEventAbi } from '../src/eas/abi.js'
 import { SchemaEncoder } from '../src/eas/schema-encoder.js'
 import { EFS_SCHEMA_FIELDS } from '../src/eas/schemas.js'
-import type { EdgeSubmitContext } from '../src/writes/edge-submit.js'
+import { type EdgeSubmitContext, submitEdgePlan } from '../src/writes/edge-submit.js'
 import {
   DEFAULT_TAG_WEIGHT,
   EDGE_REF,
@@ -237,6 +237,21 @@ function makeSubmitCtx(): {
     },
   }
   const publicClient = {
+    // The layered boundary's placement gates (STAMPED pin plans) read the EAS
+    // attestation + the indexer's mirror scan through the SUBMIT context's
+    // client. Defaults model a healthy self-authored DATA at a real ANCHOR;
+    // pins.place's own guarded inline gates fire FIRST, so negatives keep
+    // their tailored errors.
+    async readContract(args: { functionName: string; args?: readonly unknown[] }) {
+      if (args.functionName === 'getAttestation') {
+        const [queried] = (args.args ?? []) as [Hex]
+        if (queried === uid(0x800)) return { uid: queried, schema: SCHEMAS.anchor }
+        return { uid: queried, attester: ATTESTER, schema: SCHEMAS.data }
+      }
+      if (args.functionName === 'getReferencingBySchemaAndAttesterCount') return 1n
+      if (args.functionName === 'getReferencingBySchemaAndAttester') return [uid(0x3141)]
+      throw new Error(`submit-ctx mock: unexpected readContract ${args.functionName}`)
+    },
     async waitForTransactionReceipt({ hash }: { hash: Hex }) {
       const r = receipts.get(hash)
       if (!r) throw new Error(`no receipt for ${hash}`)
@@ -249,6 +264,7 @@ function makeSubmitCtx(): {
       walletClient: walletClient as unknown as EdgeSubmitContext['walletClient'],
       publicClient: publicClient as unknown as EdgeSubmitContext['publicClient'],
       easAddress: EAS,
+      indexerAddress: addr(0x1dc5),
       chainId: 11155111,
       attester: ATTESTER,
       account: ATTESTER,
@@ -945,6 +961,33 @@ describe('makePinsNs', () => {
     const err = await pins.place(ANCHOR, DATA).catch((e) => e)
     expect((err as { code?: string }).code).toBe('InvalidArgument')
     expect(String((err as Error).message)).toMatch(/not an ANCHOR attestation/)
+    expect(calls).toHaveLength(0)
+  })
+
+  it('the RAW builder+executor pair is gated too — a foreign target refuses at the boundary (r3741335344)', async () => {
+    // buildPlacementPinPlan + submitEdgePlan bypasses pins.place's inline
+    // gates; the plan's stamps make the layered boundary run them instead.
+    const { ctx, calls } = makeSubmitCtx()
+    const foreignCtx = {
+      ...ctx,
+      publicClient: {
+        ...ctx.publicClient,
+        async readContract(args: { functionName: string; args?: readonly unknown[] }) {
+          if (args.functionName === 'getAttestation') {
+            return { attester: addr(0xbeef), schema: SCHEMAS.data } // foreign author
+          }
+          return (
+            ctx.publicClient as unknown as {
+              readContract: (a: unknown) => Promise<unknown>
+            }
+          ).readContract(args)
+        },
+      },
+    } as typeof ctx
+    const plan = buildPlacementPinPlan(SCHEMAS, ANCHOR, DATA)
+    const err = await submitEdgePlan(plan, foreignCtx).catch((e) => e)
+    expect((err as { code?: string }).code).toBe('InvalidArgument')
+    expect(String((err as Error).message)).toMatch(/INVISIBLE under your lens/)
     expect(calls).toHaveLength(0)
   })
 

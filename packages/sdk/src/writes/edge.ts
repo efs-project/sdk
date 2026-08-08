@@ -278,7 +278,22 @@ export function buildPlacementPinPlan(
     refUID: dataUID, // refUID = the placed DATA/target (concrete)
     dataRefs: [], // no fresh siblings — the anchor is concrete, encoded in `data`
   }
-  return { profile: 'efs/v1', hardlink: false, attestations: [pin] }
+  // STAMPED as a hardlink placement (r3741335344): this exported builder pairs
+  // with the exported submitters, and the layered boundary's gates (authorship,
+  // DATA schema, active-mirror readability, ANCHOR definition) key off these
+  // stamps — without them the raw pair could place foreign/non-DATA targets at
+  // non-ANCHOR definitions. NO slot-binding stamps: the anchor is caller-chosen
+  // by design here (there is no requested (parent, name) slot to bind to).
+  return {
+    profile: 'efs/v1',
+    hardlink: true,
+    hardlinkDataUID: dataUID,
+    dataSchemaUID: schemas.data,
+    mirrorSchemaUID: schemas.mirror,
+    anchorSchemaUID: schemas.anchor,
+    existingAnchorUID: anchor,
+    attestations: [pin],
+  }
 }
 
 /**
