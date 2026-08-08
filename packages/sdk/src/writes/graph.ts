@@ -309,6 +309,10 @@ export interface FileWriteGraph {
    * without a schemas side-channel (r3741189815). A HARDLINK plan without the
    * stamp fails the gate CLOSED (hand-rolled plans must carry it). */
   readonly dataSchemaUID?: Hex
+  /** The deployment's MIRROR schema UID — the hardlink gate's READABILITY
+   * proof scans the submitter's active mirrors on the target DATA with it
+   * (r3741235144). Same fail-closed rule as `dataSchemaUID`. */
+  readonly mirrorSchemaUID?: Hex
   /** Every planned attestation, ordered by layer (L1 → L2 → L3). The submitter
    * groups by {@link PlannedAttestation.layer} into `multiAttest` batches. */
   readonly attestations: readonly PlannedAttestation[]
@@ -471,6 +475,7 @@ export function buildFileWriteGraph(input: FileWriteGraphInput): FileWriteGraph 
       profile: 'efs/v1',
       hardlink: true,
       dataSchemaUID: schemas.data,
+      mirrorSchemaUID: schemas.mirror,
       attestations: stableSortByLayer([
         ...folderAttestations,
         ...fileAnchorAtts,
@@ -620,7 +625,13 @@ export function buildFileWriteGraph(input: FileWriteGraphInput): FileWriteGraph 
   // way to present a clean per-layer grouping — the unit the submitter batches into
   // one `multiAttest` per layer. Stable, so within a layer the build order is kept.
   const ordered = stableSortByLayer(attestations)
-  return { profile: 'efs/v1', hardlink: false, dataSchemaUID: schemas.data, attestations: ordered }
+  return {
+    profile: 'efs/v1',
+    hardlink: false,
+    dataSchemaUID: schemas.data,
+    mirrorSchemaUID: schemas.mirror,
+    attestations: ordered,
+  }
 }
 
 /** Stable sort by layer (ascending). Array.prototype.sort is spec-stable. */

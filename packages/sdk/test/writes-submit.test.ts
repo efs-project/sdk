@@ -130,6 +130,8 @@ interface MockChainOptions {
   hardlinkAuthor?: Address
   /** Override the schema the mock EAS reports for the hardlink target. */
   hardlinkSchema?: Hex
+  /** Override the submitter's mirror count on the hardlink target (default 1n). */
+  hardlinkMirrorCount?: bigint
   /** Layer (1-based call index) at which `writeContract` throws a CODED refusal. */
   revertOnCall?: number
   /** Layer at which `writeContract` fails with a CODE-LESS transport error. */
@@ -232,6 +234,13 @@ function makeMockChain(opts: MockChainOptions = {}) {
           schema: opts.hardlinkSchema ?? SCHEMAS.data,
         }
       }
+      // The hardlink gate's readability proof (active-mirror scan).
+      if (args.functionName === 'getReferencingBySchemaAndAttesterCount') {
+        return opts.hardlinkMirrorCount ?? 1n
+      }
+      if (args.functionName === 'getReferencingBySchemaAndAttester') {
+        return (opts.hardlinkMirrorCount ?? 1n) > 0n ? [uid(0x3141)] : []
+      }
       throw new Error(`mock: unexpected readContract ${args.functionName}`)
     },
     async waitForTransactionReceipt({ hash }) {
@@ -249,7 +258,13 @@ function makeMockChain(opts: MockChainOptions = {}) {
     },
   }
 
-  const ctx: SubmitContext = { walletClient, publicClient, easAddress: EAS, account: ACCOUNT }
+  const ctx: SubmitContext = {
+    walletClient,
+    publicClient,
+    easAddress: EAS,
+    indexerAddress: '0x0000000000000000000000000000000000001dc5' as Address,
+    account: ACCOUNT,
+  }
   return {
     ctx,
     sent,
@@ -467,6 +482,47 @@ describe('submitWriteTier1 — hardlink plan', () => {
     const err = await submitWriteTier1(stripped, ctx).catch((e) => e)
     expect((err as { code?: string }).code).toBe('InvalidArgument')
     expect(String((err as Error).message)).toMatch(/dataSchemaUID stamp/)
+    expect(sent).toHaveLength(0)
+  })
+
+  it('FAILS CLOSED on a hand-built hardlink plan with a SYMBOLIC placement target (r3741235140)', async () => {
+    // A crafted plan could mint a non-DATA in an earlier layer, resolve the PIN
+    // to it symbolically, and skip every check — the old defensive return was
+    // fail-OPEN.
+    const crafted = { ...buildFileWriteGraph(bytesInput), hardlink: true }
+    const { ctx, sent } = makeMockChain()
+    const err = await submitWriteTier1(crafted, ctx).catch((e) => e)
+    expect((err as { code?: string }).code).toBe('InvalidArgument')
+    expect(String((err as Error).message)).toMatch(/CONCRETE placement-PIN refUID/)
+    expect(sent).toHaveLength(0)
+  })
+
+  it('REFUSES a self-authored DATA with NO active mirror — unreadable placement (r3741235144)', async () => {
+    // A bare DATA minted via the raw EAS verbs passes authorship + schema, but
+    // the hardlink builder emits no retrieval metadata — the placement would
+    // confirm and every read() would fail AllMirrorsFailed.
+    const plan = buildFileWriteGraph({
+      ...hardlinkBase,
+      content: { kind: 'hardlink', dataUID: EXISTING_DATA },
+    })
+    const { ctx, sent } = makeMockChain({ hardlinkMirrorCount: 0n })
+    const err = await submitWriteTier1(plan, ctx).catch((e) => e)
+    expect((err as { code?: string }).code).toBe('InvalidArgument')
+    expect(String((err as Error).message)).toMatch(/NO active mirror/)
+    expect(String((err as Error).message)).toMatch(/efs\.mirrors\.add/)
+    expect(sent).toHaveLength(0)
+  })
+
+  it('FAILS CLOSED on a hardlink submission without ctx.indexerAddress', async () => {
+    const plan = buildFileWriteGraph({
+      ...hardlinkBase,
+      content: { kind: 'hardlink', dataUID: EXISTING_DATA },
+    })
+    const { ctx, sent } = makeMockChain()
+    const bare = { ...ctx, indexerAddress: undefined } as SubmitContext
+    const err = await submitWriteTier1(plan, bare).catch((e) => e)
+    expect((err as { code?: string }).code).toBe('InvalidArgument')
+    expect(String((err as Error).message)).toMatch(/indexerAddress/)
     expect(sent).toHaveLength(0)
   })
 

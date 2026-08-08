@@ -70,6 +70,10 @@
 
 import type { Address, Hex, Log, TransactionReceipt } from 'viem'
 import { parseEventLogs } from 'viem'
+import {
+  getReferencingBySchemaAndAttesterAbi,
+  getReferencingBySchemaAndAttesterCountAbi,
+} from '../chain/abi/indexer.js'
 import { easAbi, getAttestationAbi } from '../eas/abi.js'
 import { buildMultiAttest } from '../eas/attest.js'
 import { SchemaEncoder } from '../eas/schema-encoder.js'
@@ -145,6 +149,11 @@ export interface SubmitContext {
   readonly publicClient: SubmitPublicClient
   /** The EAS contract address to attest against. */
   readonly easAddress: Address
+  /** The EFSIndexer address — REQUIRED to submit HARDLINK plans (the gate's
+   * readability proof scans the submitter's active mirrors on the target DATA
+   * through it; a hardlink submission without it fails CLOSED). Byte-write
+   * plans never touch it. */
+  readonly indexerAddress?: Address
   /**
    * The signing account. viem's `writeContract` requires an `account` unless the
    * wallet client was created with one bound; forwarded verbatim when set.
@@ -394,7 +403,16 @@ async function assertHardlinkSelfAuthored(plan: FileWriteGraph, ctx: SubmitConte
   if (!plan.hardlink) return
   const pin = plan.attestations.find((a) => a.ref === REF.PLACEMENT_PIN)
   const dataUID = pin !== undefined && typeof pin.refUID === 'string' ? pin.refUID : undefined
-  if (dataUID === undefined) return // a hardlink plan always carries a concrete PIN refUID
+  if (dataUID === undefined) {
+    // FAIL CLOSED (r3741235140): a builder-made hardlink plan always carries a
+    // concrete PIN refUID — a symbolic/missing target means a hand-built plan
+    // that could mint a non-DATA in an earlier layer and place it into the
+    // wrong schema slot with every check skipped.
+    throw new EfsError(
+      'EFS write: a HARDLINK plan must carry a CONCRETE placement-PIN refUID (the pre-existing DATA UID). A symbolic or missing target cannot be verified — rebuild the plan with buildFileWriteGraph.',
+      { code: 'InvalidArgument' },
+    )
+  }
   const ctxAccount =
     typeof ctx.account === 'string'
       ? (ctx.account as Address)
@@ -443,6 +461,60 @@ async function assertHardlinkSelfAuthored(plan: FileWriteGraph, ctx: SubmitConte
   if (schema === undefined || schema.toLowerCase() !== expected.toLowerCase()) {
     throw new EfsError(
       `EFS write: the hardlink target ${dataUID} is not a DATA attestation (schema ${schema ?? 'unknown'}, expected ${expected}). The placement PIN would index under the target's actual schema while file resolution reads the DATA slot — a confirmed receipt for a file no reader can find. (Solidity parity: EFSLib.NotDataUID.)`,
+      { code: 'InvalidArgument' },
+    )
+  }
+  // READABILITY proof (r3741235144): authorship + schema are not enough — a
+  // self-authored bare DATA (e.g. minted via the raw EAS verbs) hardlinks
+  // "successfully" and then EVERY read fails AllMirrorsFailed, because the
+  // hardlink builder deliberately emits no retrieval metadata (the self-dedup
+  // contract presumes it exists). Require at least one ACTIVE mirror authored
+  // by the submitter on the target before broadcasting. The scan walks the raw
+  // referencing count in filtered physical windows (the reads/mirror-scan.ts
+  // boundary), stopping at the first active row.
+  const mirrorSchema = plan.mirrorSchemaUID
+  if (mirrorSchema === undefined) {
+    throw new EfsError(
+      'EFS write: this HARDLINK plan carries no mirrorSchemaUID stamp — rebuild it with buildFileWriteGraph (the gate must verify the target has retrieval metadata).',
+      { code: 'InvalidArgument' },
+    )
+  }
+  if (ctx.indexerAddress === undefined) {
+    throw new EfsError(
+      'EFS write: a HARDLINK plan requires ctx.indexerAddress (the EFSIndexer) — the gate must verify the target has an active mirror before placement.',
+      { code: 'InvalidArgument' },
+    )
+  }
+  const rawCount = (await ctx.publicClient.readContract({
+    address: ctx.indexerAddress,
+    abi: getReferencingBySchemaAndAttesterCountAbi,
+    functionName: 'getReferencingBySchemaAndAttesterCount',
+    args: [dataUID, mirrorSchema, submitter],
+  })) as bigint
+  let hasActiveMirror = false
+  const MIRROR_SCAN_PAGE = 50
+  const total = Math.min(Number(rawCount), 500)
+  for (let start = 0; start < total && !hasActiveMirror; start += MIRROR_SCAN_PAGE) {
+    const page = (await ctx.publicClient.readContract({
+      address: ctx.indexerAddress,
+      abi: getReferencingBySchemaAndAttesterAbi,
+      functionName: 'getReferencingBySchemaAndAttester',
+      // (target, MIRROR, submitter, start, len, reverseOrder=false, showRevoked=false)
+      args: [
+        dataUID,
+        mirrorSchema,
+        submitter,
+        BigInt(start),
+        BigInt(MIRROR_SCAN_PAGE),
+        false,
+        false,
+      ],
+    })) as readonly Hex[]
+    hasActiveMirror = page.length > 0
+  }
+  if (!hasActiveMirror) {
+    throw new EfsError(
+      `EFS write: the hardlink target ${dataUID} has NO active mirror authored by ${submitter} — the placement would confirm but every read() fails AllMirrorsFailed (the hardlink builder emits no retrieval metadata; the self-dedup contract presumes yours already exists). Publish the bytes with fs.write first, or attest a mirror via efs.mirrors.add, then hardlink.`,
       { code: 'InvalidArgument' },
     )
   }

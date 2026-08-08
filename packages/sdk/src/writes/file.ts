@@ -516,6 +516,10 @@ export async function writeFileTier1(
     walletClient: ctx.walletClient,
     publicClient: ctx.publicClient,
     easAddress: deployment.contracts.eas,
+    // The hardlink gate's readability proof reads the indexer (fs.write never
+    // builds hardlink plans today, but the seam must not fail closed spuriously
+    // for a future caller).
+    indexerAddress: deployment.contracts.indexer,
     contentHash,
     chainId: deployment.chainId,
     attester,
