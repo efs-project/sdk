@@ -54,6 +54,7 @@ import {
   type SubmitWalletClient,
   WriteNotSentError,
   WriteRevertedError,
+  WriteSendUnknownError,
   WriteUidsUnknownError,
 } from './submit.js'
 import type { SubmitterContext } from './submitter.js'
@@ -532,6 +533,7 @@ export async function writeFileTier1(
       if (
         err instanceof WriteNotSentError ||
         err instanceof WriteRevertedError ||
+        err instanceof WriteSendUnknownError ||
         err instanceof WriteUidsUnknownError
       ) {
         err.storage = storage

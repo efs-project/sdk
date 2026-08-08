@@ -859,8 +859,10 @@ export type FileInfo = {
   // provenance — ALWAYS present, never projected away:
   /** The attester whose lens won placement. */
   resolvedBy: Address
-  /** Trust status of the winning placement/claim. */
-  verified: VerificationStatus | 'revoked' | 'unchecked'
+  /** Trust status of the winning placement/claim. (A REVOKED placement is not
+   * a state here — lens-scoped views are active-only, so it reads as absence:
+   * `exists: false`.) */
+  verified: VerificationStatus | 'unchecked'
   /** Provenance + freshness of the ANSWER (ADR-0015). Always present. */
   trust: TrustDescriptor
   /** Per-field source UIDs (placement PIN + reserved-key PROPERTYs). */

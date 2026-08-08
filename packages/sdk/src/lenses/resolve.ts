@@ -63,7 +63,11 @@ export function identity(ensOrAddress: string): Lens {
   return {
     __brand: 'Lens',
     resolve: async ({ publicClient }) => {
-      if (isAddress(ensOrAddress)) return finalize([ensOrAddress])
+      // `strict: false` — format validation, not EIP-55 enforcement: an
+      // address stays valid regardless of casing, and the default strict
+      // check would misroute a non-checksummed mixed-case address into ENS
+      // normalization/lookup (r3740924422). Same rule as `finalize()`.
+      if (isAddress(ensOrAddress, { strict: false })) return finalize([ensOrAddress])
       if (!publicClient) {
         throw new EfsError(`Resolving the ENS name "${ensOrAddress}" needs a publicClient.`)
       }

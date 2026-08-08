@@ -342,6 +342,56 @@ export class WriteNotSentError extends EfsError {
   }
 }
 
+/**
+ * Raised when a layer's `eth_sendTransaction` failed WITHOUT a response — the
+ * transport dropped (connection loss / timeout) after the request may already
+ * have reached the node — so whether the tx was broadcast is UNKNOWN: it may
+ * still mine, and there is NO hash to reconcile by. Distinct from
+ * {@link WriteNotSentError} (a refusal RESPONSE proves nothing was broadcast)
+ * and {@link WriteRevertedError} (a hash exists). A blind retry can duplicate
+ * the layer's attestations or revert on permanent duplicate anchors — check
+ * the signing account's pending txs/nonce (or the layer's `Attested` events)
+ * before retrying.
+ */
+export class WriteSendUnknownError extends EfsError {
+  /** See {@link WriteRevertedError.storage} — same attachment, same recovery. */
+  storage?: CompletedOnchainStorage
+  override name = 'WriteSendUnknownError'
+  /** The DAG layer whose send outcome is unknown. */
+  readonly layer: number
+  /** The refs in that layer — possibly minted, possibly not. */
+  readonly refs: readonly string[]
+  /** The `ref → UID` table from layers that landed BEFORE this one. */
+  readonly landed: RefMap
+  constructor(layer: number, refs: readonly string[], landed: RefMap, cause: unknown) {
+    const classified = classifyError(cause)
+    super(
+      `EFS write layer ${layer}: the send failed WITHOUT a response — the transport dropped, so whether the transaction was broadcast is UNKNOWN and it MAY still mine (${refs.length} attestation(s): ${refs.join(', ')}; no tx hash is available). Do NOT blindly retry — a broadcast layer would be duplicated (or revert on permanent duplicate anchors); check the signing account's pending transactions/nonce or the layer's Attested events first. ${landed.size} attestation(s) from earlier layers already landed.`,
+      { code: 'PartialBatchFailure', cause, details: classified.shortMessage },
+    )
+    this.layer = layer
+    this.refs = refs
+    this.landed = landed
+  }
+}
+
+/** Classified codes that PROVE the send was refused with a RESPONSE (a wallet/
+ * node answer or a decoded revert or our own pre-send guard) — the tx was never
+ * broadcast, so {@link WriteNotSentError}'s contract is safe to assert. Any
+ * other failure (no JSON-RPC/EIP-1193 code — i.e. transport-level loss) cannot
+ * prove non-broadcast → {@link WriteSendUnknownError}. */
+const DEFINITE_REFUSALS: ReadonlySet<string> = new Set([
+  'UserRejected',
+  'Unauthorized',
+  'UnsupportedMethod',
+  'Disconnected',
+  'ContractReverted',
+  'RpcError',
+  'WrongChain',
+  'InvalidArgument',
+  'WalletRequired',
+])
+
 // One PIN encoder, reused to re-encode `definition` once it's resolved. The PIN
 // schema is `bytes32 definition` (EFS_SCHEMA_FIELDS.pin).
 const pinEncoder = new SchemaEncoder(EFS_SCHEMA_FIELDS.pin)
@@ -582,13 +632,16 @@ export async function submitLayeredTier1(
       throw new WriteNotSentError(layer, flatRefs, new Map(resolved), ctx.signal.reason)
     }
 
-    // Send the layer's single multiAttest. The four failure modes are kept
+    // Send the layer's single multiAttest. The five failure modes are kept
     // DISTINCT so a caller can tell what (if anything) landed:
     //
-    //   (a) writeContract throws (or the pre-send chain guard fails AFTER an earlier layer
-    //       landed) → NO tx was broadcast: nothing landed in THIS layer →
-    //       WriteNotSentError (no txHash), carrying the landed-UID map for recovery
-    //       (whole-write retry safety depends on `landed`/`storage` — see its docs).
+    //   (a) writeContract fails WITH a refusal response — a wallet/node error code, a
+    //       decoded revert, or our pre-send chain guard → NO tx was broadcast: nothing
+    //       landed in THIS layer → WriteNotSentError (no txHash), carrying the
+    //       landed-UID map (whole-write retry safety depends on `landed`/`storage`).
+    //   (a′) writeContract fails WITHOUT a response (transport drop/timeout — no
+    //       JSON-RPC/EIP-1193 code anywhere in the chain) → broadcast state UNKNOWN,
+    //       no hash to reconcile by → WriteSendUnknownError (may still mine).
     //   (b) the receipt wait throws after a txHash exists → the tx may still mine
     //       later: outcome UNKNOWN, naive retry risks a duplicate →
     //       WriteRevertedError(mined:false) carrying the in-flight txHash.
@@ -626,8 +679,16 @@ export async function submitLayeredTier1(
         ...(ctx.chain !== undefined ? { chain: ctx.chain } : {}),
       })
     } catch (cause) {
-      // (a) No tx sent — safe to retry, no in-flight hash.
-      throw new WriteNotSentError(layer, flatRefs, new Map(resolved), cause)
+      // Split (a) from (a′) by whether the failure carries a RESPONSE
+      // (r3740924421): a classified refusal proves the node/wallet ANSWERED —
+      // nothing broadcast. A code-less transport failure proves nothing: the
+      // request may have reached the node and the tx may still mine, so the
+      // not-sent contract ("no tx exists, this layer is clean") must not be
+      // asserted.
+      if (DEFINITE_REFUSALS.has(classifyError(cause).code)) {
+        throw new WriteNotSentError(layer, flatRefs, new Map(resolved), cause)
+      }
+      throw new WriteSendUnknownError(layer, flatRefs, new Map(resolved), cause)
     }
 
     let receipt: TransactionReceipt

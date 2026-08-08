@@ -18,6 +18,7 @@ import {
   type SubmitWalletClient,
   WriteNotSentError,
   WriteRevertedError,
+  WriteSendUnknownError,
   WriteUidsUnknownError,
   submitWriteTier1,
 } from '../src/writes/submit.js'
@@ -114,8 +115,10 @@ interface MockChainOptions {
   /** Deterministic minted UID for the i-th attestation across the whole write
    * (global counter). Defaults to `0xD000 + i`. */
   mintUID?: (globalIndex: number) => Hex
-  /** Layer (1-based call index) at which `writeContract` should throw. */
+  /** Layer (1-based call index) at which `writeContract` throws a CODED refusal. */
   revertOnCall?: number
+  /** Layer at which `writeContract` fails with a CODE-LESS transport error. */
+  transportErrorOnCall?: number
   /** Layer (1-based call index) whose receipt reports `status: 'reverted'`. */
   receiptRevertOnCall?: number
   /** Layer (1-based call index) whose `waitForTransactionReceipt` THROWS (the tx was
@@ -144,7 +147,16 @@ function makeMockChain(opts: MockChainOptions = {}) {
       callIndex += 1
       const thisCall = callIndex
       if (opts.revertOnCall === thisCall) {
-        throw new Error(`mock revert at call ${thisCall} (execution reverted: NotRevocable)`)
+        // A REFUSAL RESPONSE: carries a JSON-RPC code, so the classifier can
+        // prove the node answered (→ WriteNotSentError, mode (a)). Code-less
+        // transport loss is the separate `transportErrorOnCall` (mode (a′)).
+        throw Object.assign(
+          new Error(`mock revert at call ${thisCall} (execution reverted: NotRevocable)`),
+          { code: -32000 },
+        )
+      }
+      if (opts.transportErrorOnCall === thisCall) {
+        throw new Error('fetch failed: socket hang up') // NO code anywhere — pure transport loss
       }
 
       // Flatten the schema-grouped requests in EAS emission order.
@@ -604,6 +616,22 @@ describe('submitWriteTier1 — partial-write boundary: three distinct failure mo
     // whole-write retry (fs.write does not resume — a retry re-mints layer 1).
     expect(String(we.message)).not.toMatch(/retry is safe/)
     expect(String(we.message)).toMatch(/ALREADY LANDED and fs.write does not resume/)
+  })
+
+  it('code-less transport loss at send → WriteSendUnknownError (may still mine), never "not sent" (r3740924421)', async () => {
+    // The RPC may have accepted the tx before the connection dropped — no
+    // response, no hash. WriteNotSentError's "nothing was broadcast" contract
+    // must not be asserted: a retry could duplicate the layer.
+    const plan = buildFileWriteGraph(bytesInput)
+    const { ctx } = makeMockChain({ transportErrorOnCall: 2 })
+    const err = await submitWriteTier1(plan, ctx).catch((e) => e)
+    expect(err).toBeInstanceOf(WriteSendUnknownError)
+    expect(err).not.toBeInstanceOf(WriteNotSentError)
+    const we = err as WriteSendUnknownError
+    expect(we.layer).toBe(2)
+    expect(we.landed.get('DATA')).toBe(uid(0xd000)) // prior layer preserved
+    expect(we.refs).toContain('fileAnchor')
+    expect(String(we.message)).toMatch(/UNKNOWN and it MAY still mine/)
   })
 
   it('receipt-wait throw after a hash → WriteRevertedError(mined:false) carrying the in-flight txHash', async () => {

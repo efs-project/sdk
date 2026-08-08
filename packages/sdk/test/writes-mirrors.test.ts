@@ -402,12 +402,79 @@ describe('makeMirrorsNs', () => {
     expect(revokeCall).toEqual({ schema: SCHEMAS.mirror, uid: mirrorUID })
   })
 
+  it('list pages by RAW count — a revoked hole never truncates the scan (r3740924418)', async () => {
+    // 60 raw slots; window [0,50) has 5 revoked entries filtered WITHIN it (45
+    // rows), window [50,60) serves 10. The old short-window break treated 45 <
+    // 50 as exhaustion and dropped the last 10 active mirrors.
+    const row = (i: number) => ({
+      uid: uid(0xa000 + i),
+      transportDefinition: IPFS_TRANSPORT,
+      uri: `ipfs://m${i}`,
+      attester: ATTESTER,
+      timestamp: 1n,
+    })
+    const reads: { fn: string; args: readonly unknown[] }[] = []
+    const mirrors = makeMirrorsNs({
+      getDeployment: () => deployment,
+      publicClient: makeReadClient((fn, args) => {
+        reads.push({ fn, args })
+        if (fn === 'getReferencingBySchemaAndAttesterCount') return 60n
+        if (fn === 'getDataMirrors') {
+          const start = args[2] as bigint
+          if (start === 0n) return Array.from({ length: 45 }, (_, i) => row(i))
+          if (start === 50n) return Array.from({ length: 10 }, (_, i) => row(50 + i))
+          throw new Error(`InvalidOffset: unexpected start ${start}`)
+        }
+        return uid(0)
+      }) as never,
+      submitContext: () => makeSubmitCtx().ctx,
+      attester: () => ATTESTER,
+      revoke: async () => uid(0),
+    })
+    const out = await mirrors.list(DATA)
+    expect(out).toHaveLength(55) // 45 + 10 — nothing behind the holes is lost
+    const starts = reads.filter((r) => r.fn === 'getDataMirrors').map((r) => r.args[2])
+    expect(starts).toEqual([0n, 50n]) // disjoint physical windows over the raw count
+  })
+
+  it('list stops AT the raw count — an exact page multiple sends no reverting extra read', async () => {
+    // 50 raw slots exactly: the old loop followed a full window with a second
+    // read at start=50, which the contract REVERTS (InvalidOffset).
+    const row = (i: number) => ({
+      uid: uid(0xa000 + i),
+      transportDefinition: IPFS_TRANSPORT,
+      uri: `ipfs://m${i}`,
+      attester: ATTESTER,
+      timestamp: 1n,
+    })
+    const reads: { fn: string; args: readonly unknown[] }[] = []
+    const mirrors = makeMirrorsNs({
+      getDeployment: () => deployment,
+      publicClient: makeReadClient((fn, args) => {
+        reads.push({ fn, args })
+        if (fn === 'getReferencingBySchemaAndAttesterCount') return 50n
+        if (fn === 'getDataMirrors') {
+          if ((args[2] as bigint) !== 0n) throw new Error('InvalidOffset')
+          return Array.from({ length: 50 }, (_, i) => row(i))
+        }
+        return uid(0)
+      }) as never,
+      submitContext: () => makeSubmitCtx().ctx,
+      attester: () => ATTESTER,
+      revoke: async () => uid(0),
+    })
+    const out = await mirrors.list(DATA)
+    expect(out).toHaveLength(50)
+    expect(reads.filter((r) => r.fn === 'getDataMirrors')).toHaveLength(1)
+  })
+
   it('list reads getDataMirrors lens-scoped and maps the rows', async () => {
     const reads: { fn: string; args: readonly unknown[] }[] = []
     const mirrors = makeMirrorsNs({
       getDeployment: () => deployment,
       publicClient: makeReadClient((fn, args) => {
         reads.push({ fn, args })
+        if (fn === 'getReferencingBySchemaAndAttesterCount') return 1n
         if (fn === 'getDataMirrors') {
           // first window returns one row, second (start>=50) returns empty → stops
           if ((args[2] as bigint) === 0n) {
@@ -450,6 +517,7 @@ describe('makeMirrorsNs', () => {
     const mirrors = makeMirrorsNs({
       getDeployment: () => deployment,
       publicClient: makeReadClient((fn, args) => {
+        if (fn === 'getReferencingBySchemaAndAttesterCount') return 1n
         if (fn === 'getDataMirrors') {
           if ((args[2] as bigint) !== 0n) return []
           const who = args[1] as Address

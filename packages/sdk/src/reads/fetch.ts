@@ -25,7 +25,6 @@
  */
 
 import type { Address, Hex } from 'viem'
-import { fileViewAbi } from '../chain/abi/fileView.js'
 import { classifyError } from '../errors.js'
 import {
   ContentHashMismatch,
@@ -53,15 +52,7 @@ import type {
 import { attestationFor } from './attestations.js'
 import { LIVE_TRUST, type ReadContext, read as readContract } from './context.js'
 import { readReservedProperty, resolvePlacement } from './file.js'
-
-/** A row returned by `getDataMirrors` (lens-scoped). */
-type MirrorItem = {
-  uid: Hex
-  transportDefinition: Hex
-  uri: string
-  attester: Address
-  timestamp: bigint
-}
+import { scanActiveMirrors } from './mirror-scan.js'
 
 /** Parse a `size` PROPERTY value (decimal byte count) to a safe number, or `undefined`
  * when absent/malformed/too-large-to-cap-safely (then no size cap is applied). */
@@ -71,36 +62,20 @@ function parseSize(value: string | undefined): number | undefined {
   return Number.isSafeInteger(n) ? n : undefined
 }
 
-/** How many mirrors to read per `getDataMirrors` window. */
-const MIRROR_PAGE = 50
-/** Hard cap on mirror rows scanned (matches the router's 500-row ceiling). */
-const MAX_MIRRORS = 500
-
 /**
  * Read the active mirror URIs for a DATA UID, scoped to the winning lens via the
  * lens-scoped view. `getDataMirrors(dataUID, attester, …)` returns ONLY the named
  * attester's mirrors (already revoked-excluded), so no post-filtering by attester
- * is needed — the scope is enforced on-chain.
+ * is needed — the scope is enforced on-chain. Paged over the RAW referencing
+ * count (see reads/mirror-scan.ts): revoked holes never truncate the scan.
  */
 async function lensMirrorUris(
   ctx: ReadContext,
   dataUID: Hex,
   resolvedBy: Address,
 ): Promise<string[]> {
-  const uris: string[] = []
-  for (let start = 0; start < MAX_MIRRORS; start += MIRROR_PAGE) {
-    const rows = await readContract<readonly MirrorItem[]>(ctx.publicClient, {
-      address: ctx.deployment.contracts.fileView,
-      abi: fileViewAbi,
-      functionName: 'getDataMirrors',
-      args: [dataUID, resolvedBy, BigInt(start), BigInt(MIRROR_PAGE)],
-    })
-    for (const m of rows) {
-      if (m.uri.length > 0) uris.push(m.uri)
-    }
-    if (rows.length < MIRROR_PAGE) break // last (short) window
-  }
-  return uris
+  const rows = await scanActiveMirrors(ctx.publicClient, ctx.deployment, dataUID, resolvedBy)
+  return rows.filter((m) => m.uri.length > 0).map((m) => m.uri)
 }
 
 /**

@@ -30,21 +30,15 @@
  */
 
 import type { Address, Hex } from 'viem'
-import { fileViewAbi } from '../chain/abi/fileView.js'
 import type { EfsDeployment } from '../chain/deployments.js'
 import { EfsError } from '../errors.js'
 import { read } from '../reads/context.js'
 import type { ReadPublicClient } from '../reads/context.js'
+import { scanActiveMirrors } from '../reads/mirror-scan.js'
 import { type ResolvePublicClient, resolvePathToAnchor } from '../reads/resolve.js'
 import type { WriteReceipt } from '../types.js'
 import { type EdgeSubmitContext, submitEdgePlan } from './edge-submit.js'
 import { buildMirrorPlan, validateMirrorUri } from './edge.js'
-
-/** How many mirror rows to read per `getDataMirrors` window (matches the fetch
- * engine's page size). */
-const MIRROR_PAGE = 50n
-/** Hard cap on mirror rows scanned in a `list` (matches the router's 500-row ceiling). */
-const MAX_MIRRORS = 500n
 
 /** Options for {@link MirrorsNs.add}. */
 export interface MirrorAddOptions {
@@ -198,15 +192,6 @@ export interface MirrorsNsDeps {
   readonly revoke: (schema: Hex, uid: Hex) => Promise<Hex>
 }
 
-/** One row as returned by `getDataMirrors` (lens-scoped). */
-type MirrorItemRaw = {
-  uid: Hex
-  transportDefinition: Hex
-  uri: string
-  attester: Address
-  timestamp: bigint
-}
-
 /** Construct the `efs.mirrors.*` namespace bound to a client's deps. */
 export function makeMirrorsNs(deps: MirrorsNsDeps): MirrorsNs {
   const lensList = (lens: MirrorListOptions['lens']): readonly Address[] => {
@@ -261,25 +246,17 @@ export function makeMirrorsNs(deps: MirrorsNsDeps): MirrorsNs {
       // 500-row cap. The on-chain read is already revoked-excluded + attester-scoped.
       const perAttester = await Promise.all(
         attesters.map(async (attester) => {
-          const out: MirrorRecord[] = []
-          for (let start = 0n; start < MAX_MIRRORS; start += MIRROR_PAGE) {
-            const rows = await read<readonly MirrorItemRaw[]>(pc, {
-              address: dep.contracts.fileView,
-              abi: fileViewAbi,
-              functionName: 'getDataMirrors',
-              args: [dataUID, attester, start, MIRROR_PAGE],
-            })
-            for (const m of rows) {
-              out.push({
-                uid: m.uid,
-                transportDefinition: m.transportDefinition,
-                uri: m.uri,
-                attester: m.attester,
-              })
-            }
-            if (BigInt(rows.length) < MIRROR_PAGE) break // last (short) window
-          }
-          return out
+          // Paged over the RAW referencing count (reads/mirror-scan.ts):
+          // the view filters revoked entries WITHIN each physical window, so
+          // a short window is NOT exhaustion — a revoked slot must never hide
+          // the active mirrors behind it (r3740924418).
+          const rows = await scanActiveMirrors(pc, dep, dataUID, attester)
+          return rows.map((m) => ({
+            uid: m.uid,
+            transportDefinition: m.transportDefinition,
+            uri: m.uri,
+            attester: m.attester,
+          }))
         }),
       )
       return perAttester.flat()

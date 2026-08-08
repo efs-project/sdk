@@ -380,6 +380,14 @@ describe('lenses', () => {
     expect(await identity(addr(7)).resolve({})).toEqual([addr(7)])
   })
 
+  it('identity accepts a NON-CHECKSUMMED mixed-case address as a literal (r3740924422)', async () => {
+    // Addresses are valid regardless of casing; the default STRICT isAddress
+    // would reject this casing (bad EIP-55) and misroute it into an ENS lookup
+    // (throwing "needs a publicClient" here). Same non-strict rule as finalize.
+    const mixed = `0x${'aB'.repeat(20)}` as Address
+    expect(await identity(mixed).resolve({})).toEqual([mixed])
+  })
+
   it('throws (never truncates) above MAX_LENSES', () => {
     const many = Array.from({ length: 21 }, (_, i) => addr(i + 1))
     expect(() => lens(many)).toThrow(MaxLensesExceeded)

@@ -220,7 +220,8 @@ export type EfsFsRead = {
   /** The file's content. Accepts a PATH or a {@link DataRef} (folds in the old
    * `fetch(ref)`). Returns an {@link EfsFile} with `bytes` + pure `.text()`/`.json()`
    * + trust-relative `verification` + `hashAuthor`. Throws `FileNotFoundError` when a
-   * PATH resolves to nothing, `Revoked` when the winning record is revoked. Generic
+   * PATH resolves to nothing — including a REVOKED placement (lens-scoped views are
+   * active-only, so revocation reads as absence). Generic
    * over `expand`: `expand:['attestations']` makes `.attestations` non-optional. */
   read<const E extends readonly ExpandToken[] = []>(
     pathOrRef: string | DataRef,

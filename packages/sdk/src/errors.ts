@@ -43,9 +43,6 @@ export type EfsErrorCode =
   /** A `lists.remove` was attempted on an append-only list (entries can never be
    * revoked). Rejected up front — no chain round-trip. */
   | 'ListAppendOnly'
-  /** The winning attestation is revoked — distinct from absent (sdk-read-surface
-   * error matrix). A byte read throws this; metadata surfaces `verified:'revoked'`. */
-  | 'Revoked'
   /** Fetched bytes do not match the attester's claimed `contentHash`. Thrown by the
    * fail-closed value sugar (`readText`/`readBytes`/`readJson`); the `EfsFile` path
    * surfaces it as `verification:'mismatch'`. */
@@ -424,23 +421,12 @@ export class ListAppendOnly extends EfsError {
   }
 }
 
-/** The winning attestation backing a read is revoked. Distinct from absent
- * ({@link FileNotFoundError}): the placement existed and resolved, but the trusted
- * attester revoked the record, so the bytes are no longer vouched-for. A byte read
- * (`read`/`readText`/…) throws this; `locate`/`info` surface `verified:'revoked'`. */
-export class Revoked extends EfsError {
-  override name = 'Revoked'
-  readonly path?: string
-  constructor(path?: string) {
-    super(
-      path !== undefined
-        ? `EFS read: the attestation backing '${path}' under the resolving lens is revoked.`
-        : 'EFS read: the attestation backing this reference is revoked.',
-      { code: 'Revoked' },
-    )
-    if (path !== undefined) this.path = path
-  }
-}
+// NOTE (r3740924425): there is deliberately NO `Revoked` error / distinct
+// revoked read-state on the v1 surface. Lens-scoped views are ACTIVE-only
+// (`showRevoked=false` end to end), so a revoked placement never resolves — it
+// reads as ABSENCE (`FileNotFoundError` / `exists: false`). A previous
+// `Revoked` class + `verified: 'revoked'` promise was unreachable by
+// construction and was removed rather than left as a false advertisement.
 
 /** Fetched bytes did not match the attester's claimed `contentHash`. Thrown by the
  * fail-closed value sugar (`readText`/`readBytes`/`readJson`) — the bare-value path

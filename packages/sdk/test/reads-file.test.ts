@@ -250,7 +250,16 @@ function makeCtx(opts: {
           return pinTargets[`${keyAnchor}|${attester.toLowerCase()}`] ?? ZERO
         }
         case 'getReferencingBySchemaAndAttesterCount': {
-          const [source, , attester] = args.args as [Hex, Hex, Address]
+          const [source, schema, attester] = args.args as [Hex, Hex, Address]
+          // MIRROR schema → the mirror scanner's RAW pagination bound
+          // (mirror-scan.ts; this mock's raw count equals its served rows).
+          if (schema === SCHEMAS.mirror) {
+            return BigInt(
+              mirrors.filter((m) => m.attester.toLowerCase() === (attester as string).toLowerCase())
+                .length,
+            )
+          }
+          // REDIRECT schema → the symlink-walk scan bound.
           const r = redirects[`${source}|${(attester as string).toLowerCase()}`]
           return r ? 1n : 0n
         }

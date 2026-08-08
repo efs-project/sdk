@@ -234,6 +234,10 @@ function makeCtx(opts: {
             data: blob ?? ('0x' as Hex),
           }
         }
+        case 'getReferencingBySchemaAndAttesterCount': {
+          const [, , attester] = args.args as [Hex, Hex, Address]
+          return BigInt((mirrors[(attester as string).toLowerCase()] ?? []).length)
+        }
         case 'getDataMirrors': {
           const [, attester] = args.args as [Hex, Address]
           const uris = mirrors[(attester as string).toLowerCase()] ?? []
