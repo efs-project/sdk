@@ -676,9 +676,12 @@ contract EFSReaderTest is Test {
             EFSReader.followKind(EFSReader.REDIRECT_KIND_SAME_AS), "sameAs never (canonicalization)"
         );
         assertFalse(
-            EFSReader.followKind(EFSReader.REDIRECT_KIND_SUPERSEDED_BY), "supersededBy never (history)"
+            EFSReader.followKind(EFSReader.REDIRECT_KIND_SUPERSEDED_BY),
+            "supersededBy never (history)"
         );
-        assertTrue(EFSReader.followKind(EFSReader.REDIRECT_KIND_SYMLINK), "symlink is the ONLY follow");
+        assertTrue(
+            EFSReader.followKind(EFSReader.REDIRECT_KIND_SYMLINK), "symlink is the ONLY follow"
+        );
         assertFalse(
             EFSReader.followKind(EFSReader.REDIRECT_KIND_RELATED_VERSION), "relatedVersion never"
         );
