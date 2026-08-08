@@ -421,6 +421,26 @@ export const getAnchorsBySchemaAbi = [
 ] as const
 
 /**
+ * `EFSIndexer.getChildCountBySchema(bytes32 parentAnchor, bytes32 schema) -> uint256`
+ * (EFSIndexer.sol:605-607). The RAW length of `_childrenBySchema[parent][schema]` —
+ * the only correct pagination bound for `getAnchorsBySchema`, which slices that
+ * array with the same filter-within-window/`InvalidOffset` boundary documented in
+ * reads/mirror-scan.ts (an exact page-multiple count must stop WITHOUT probing).
+ */
+export const getChildCountBySchemaAbi = [
+  {
+    type: 'function',
+    name: 'getChildCountBySchema',
+    stateMutability: 'view',
+    inputs: [
+      { name: 'parentAnchor', type: 'bytes32' },
+      { name: 'schema', type: 'bytes32' },
+    ],
+    outputs: [{ name: '', type: 'uint256' }],
+  },
+] as const
+
+/**
  * `EFSIndexer.getAnchorsBySchemaAndAddressList(bytes32 parentUID, bytes32 anchorSchema,
  * address[] attesters, uint256 startCursor, uint256 pageSize, bool reverseOrder,
  * bool showRevoked) -> (bytes32[] results, uint256 nextCursor)` (EFSIndexer.sol
@@ -473,6 +493,7 @@ export const indexerAbi = [
   ...getChildrenCountAbi,
   ...getChildrenByAddressListAbi,
   ...getAnchorsBySchemaAbi,
+  ...getChildCountBySchemaAbi,
   ...getAnchorsBySchemaAndAddressListAbi,
   ...indexAbi,
   ...indexBatchAbi,

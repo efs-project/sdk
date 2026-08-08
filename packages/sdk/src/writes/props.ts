@@ -182,9 +182,20 @@ export function makePropsNs(deps: PropsNsDeps): PropsNs {
       // promises EVERY property, so a DATA with >256 keys must not be truncated. Anchors
       // are non-revocable (EFSIndexer.sol:376), so a full page always implies more.
       const PAGE = 256n
+      // RAW pagination bound (r3741115239 — the same InvalidOffset boundary as
+      // reads/mirror-scan.ts): getAnchorsBySchema slices the raw array and a
+      // `start` at/past its end REVERTS, so an exact page-multiple count must
+      // stop WITHOUT the extra probe the old full-page-implies-more loop sent
+      // (a DATA with exactly 256 keys failed the whole list). Read the raw
+      // count first and walk disjoint windows over it.
+      const rawCount = await read<bigint>(pc, {
+        address: dep.contracts.indexer,
+        abi: indexerAbi,
+        functionName: 'getChildCountBySchema',
+        args: [dataUID, dep.schemas.property],
+      })
       const anchorUIDs: Hex[] = []
-      let start = 0n
-      for (;;) {
+      for (let start = 0n; start < rawCount; start += PAGE) {
         const page = await read<readonly Hex[]>(pc, {
           address: dep.contracts.indexer,
           abi: indexerAbi,
@@ -192,8 +203,6 @@ export function makePropsNs(deps: PropsNsDeps): PropsNs {
           args: [dataUID, dep.schemas.property, start, PAGE, false, false],
         })
         anchorUIDs.push(...page)
-        if (BigInt(page.length) < PAGE) break
-        start += PAGE
       }
 
       // Decode each anchor's `name` (the property key), then read its active value

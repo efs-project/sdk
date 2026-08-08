@@ -70,6 +70,12 @@ library EFSLib {
     ///         verified. Re-publish foreign content with {writeFile} instead (attesting your
     ///         own DATA + mirrors + properties), or hardlink only your own DATA.
     error ForeignDataUID(bytes32 dataUID, address author);
+
+    /// @notice Placement targets must be DATA attestations. The PIN is indexed under the
+    ///         TARGET's actual schema, while file resolution reads the `schemas.data` slot —
+    ///         a PIN at a self-authored ANCHOR/PROPERTY/other UID would attest fine and emit
+    ///         {EFSWriter.EFSFileWritten}, yet be INVISIBLE to every SDK reader.
+    error NotDataUID(bytes32 uid, bytes32 schema);
     /// @dev `recipient` is always the zero address for EFS write attestations.
     address internal constant ZERO_RECIPIENT = address(0);
     /// @dev `expirationTime` is always 0 — EFS reads filter on revocation/index state, never on
@@ -325,6 +331,9 @@ library EFSLib {
         // the new placement automatically). See {ForeignDataUID}.
         Attestation memory att = eas.getAttestation(dataUID);
         if (att.attester != address(this)) revert ForeignDataUID(dataUID, att.attester);
+        // The target must BE a DATA — a self-authored non-DATA UID pins into the wrong
+        // schema slot and the placement is invisible to readers (see {NotDataUID}).
+        if (att.schema != schemas.data) revert NotDataUID(dataUID, att.schema);
         fileAnchorUID = existingFileAnchorUID != EMPTY_UID
             ? existingFileAnchorUID
             : _attestAnchor(eas, schemas.anchor, fileName, schemas.data, parentAnchorUID);
@@ -492,6 +501,7 @@ library EFSLib {
         // PROPERTYs under the PLACING attester, not the DATA's author).
         Attestation memory att = eas.getAttestation(dataUID);
         if (att.attester != address(this)) revert ForeignDataUID(dataUID, att.attester);
+        if (att.schema != schemas.data) revert NotDataUID(dataUID, att.schema);
         pinUID = _attestPin(eas, schemas.pin, anchor, dataUID);
     }
 

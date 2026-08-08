@@ -139,6 +139,7 @@ contract EFSWritesTest is Test {
         // place()'s self-authorship gate reads the DATA's attester — the shared
         // fixture DATA is "authored by" the consumer (the inlined attester).
         eas.seedAuthor(DATA_UID, address(consumer));
+        eas.seedSchema(DATA_UID, schemas.data);
     }
 
     function _uid(uint256 i) internal pure returns (bytes32) {
@@ -366,6 +367,18 @@ contract EFSWritesTest is Test {
             abi.encodeWithSelector(EFSLib.ForeignDataUID.selector, foreignData, address(0xBEEF))
         );
         consumer.place(schemas, keccak256("SOME_ANCHOR"), foreignData);
+    }
+
+    /// @notice place() also rejects a SELF-authored non-DATA target (r3741115243).
+    function test_Place_RevertsOnNonDataUID() public {
+        bytes32 propUID = keccak256("SELF_AUTHORED_PROPERTY");
+        eas.seedAuthor(propUID, address(consumer));
+        eas.seedSchema(propUID, schemas.property);
+        vm.prank(ALICE);
+        vm.expectRevert(
+            abi.encodeWithSelector(EFSLib.NotDataUID.selector, propUID, schemas.property)
+        );
+        consumer.place(schemas, keccak256("SOME_ANCHOR"), propUID);
     }
 
     // ── setRedirect (REDIRECT edge, ADR-0050) ────────────────────────────────────────────────

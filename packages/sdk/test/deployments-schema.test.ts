@@ -300,6 +300,23 @@ describe('resolveDeployment schema-UID canonicalization (review r3740902115)', (
     expect(dep.schemas.pin).toBe(deployment.schemas.pin)
   })
 
+  it('canonicalizes transports map UIDs too (they gate paid storage — r3741115241)', () => {
+    const custom = {
+      ...deployment,
+      transports: { web3: '0x01', ipfs: `0x${'AB'.repeat(32)}` },
+    } as unknown as EfsDeployment
+    const dep = resolveDeployment(CHAIN_ID, { [CHAIN_ID]: custom })
+    expect(dep.transports?.web3).toBe(`0x${'0'.repeat(62)}01`)
+    expect(dep.transports?.ipfs).toBe(`0x${'ab'.repeat(32)}`)
+    const bad = {
+      ...deployment,
+      transports: { web3: '0xZZ' },
+    } as unknown as EfsDeployment
+    expect(() => resolveDeployment(CHAIN_ID, { [CHAIN_ID]: bad })).toThrow(
+      /transports\.web3 .* not a bytes32 hex UID/,
+    )
+  })
+
   it('rejects a UID the SDK cannot consume (non-hex / too wide) with a typed error', () => {
     const bad = {
       ...deployment,

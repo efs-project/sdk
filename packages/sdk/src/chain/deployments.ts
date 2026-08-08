@@ -227,7 +227,7 @@ export const deployments: DeploymentsMap = {
 function canonicalUid(value: string, label: string): Hex {
   if (!/^0x[0-9a-fA-F]{1,64}$/.test(value)) {
     throw new EfsError(
-      `EFS deployment: schemas.${label} ("${String(value)}") is not a bytes32 hex UID the SDK can consume — expected 0x-prefixed hex, at most 32 bytes (canonical form: 0x + exactly 64 lowercase hex chars).`,
+      `EFS deployment: ${label} ("${String(value)}") is not a bytes32 hex UID the SDK can consume — expected 0x-prefixed hex, at most 32 bytes (canonical form: 0x + exactly 64 lowercase hex chars).`,
       { code: 'InvalidArgument' },
     )
   }
@@ -246,9 +246,22 @@ function canonicalizeDeployment(dep: EfsDeployment): EfsDeployment {
   const memo = canonicalMemo.get(dep)
   if (memo !== undefined) return memo
   const schemas = Object.fromEntries(
-    Object.entries(dep.schemas).map(([k, v]) => [k, canonicalUid(v as string, k)]),
+    Object.entries(dep.schemas).map(([k, v]) => [k, canonicalUid(v as string, `schemas.${k}`)]),
   ) as EfsDeployment['schemas']
-  const out = { ...dep, schemas }
+  // `transports` values are bytes32 anchor UIDs with the SAME strict-equality /
+  // ABI-encode consumers (the MIRROR transportDefinition rides into permanent
+  // attestations, and on the auto-store path it gates PAID storage deploys —
+  // r3741115241): canonicalize them identically.
+  const transports =
+    dep.transports !== undefined
+      ? (Object.fromEntries(
+          Object.entries(dep.transports).map(([k, v]) => [
+            k,
+            canonicalUid(v as string, `transports.${k}`),
+          ]),
+        ) as EfsDeployment['transports'])
+      : undefined
+  const out = { ...dep, schemas, ...(transports !== undefined ? { transports } : {}) }
   canonicalMemo.set(dep, out)
   return out
 }

@@ -148,17 +148,23 @@ contract MockEAS is IEAS {
         revert("unused");
     }
 
-    /// @dev Seeded author registry so EFSLib's placeExisting self-authorship gate can
-    ///      read a DATA's attester. Everything else on the struct stays zeroed.
+    /// @dev Seeded author + schema registry so EFSLib's placement gates
+    ///      (self-authorship + DATA-schema) can read a UID's attestation.
     mapping(bytes32 => address) public seededAuthor;
+    mapping(bytes32 => bytes32) public seededSchema;
 
     function seedAuthor(bytes32 uid, address author) external {
         seededAuthor[uid] = author;
     }
 
+    function seedSchema(bytes32 uid, bytes32 schema) external {
+        seededSchema[uid] = schema;
+    }
+
     function getAttestation(bytes32 uid) external view returns (Attestation memory a) {
         a.uid = uid;
         a.attester = seededAuthor[uid];
+        a.schema = seededSchema[uid];
     }
 
     function isAttestationValid(bytes32) external pure returns (bool) {
@@ -396,6 +402,7 @@ contract EFSWriterTest is Test {
     function test_PlaceExisting_SinglePinHardlink() public {
         bytes32 existingData = keccak256("PRE_EXISTING_DATA");
         eas.seedAuthor(existingData, address(consumer)); // self-authored — the gate passes
+        eas.seedSchema(existingData, schemas.data);
 
         vm.prank(ALICE);
         (bytes32 fileAnchorUID, bytes32 pinUID) =
@@ -435,6 +442,7 @@ contract EFSWriterTest is Test {
         bytes32 existingData = keccak256("PRE_EXISTING_DATA_2");
         bytes32 existingAnchor = keccak256("ALREADY_RESOLVED_FILE_ANCHOR");
         eas.seedAuthor(existingData, address(consumer));
+        eas.seedSchema(existingData, schemas.data);
 
         vm.prank(ALICE);
         (bytes32 fileAnchorUID, bytes32 pinUID) =
@@ -461,6 +469,7 @@ contract EFSWriterTest is Test {
     function test_PlaceExistingAt_ZeroAnchorMintsLikeNewPath() public {
         bytes32 existingData = keccak256("PRE_EXISTING_DATA_3");
         eas.seedAuthor(existingData, address(consumer));
+        eas.seedSchema(existingData, schemas.data);
         vm.prank(ALICE);
         consumer.placeExistingAt(schemas, existingData, PARENT, "fresh.txt", bytes32(0));
         assertEq(eas.callCount(), 2, "new path = anchor + pin (2 attestations)");
@@ -485,6 +494,20 @@ contract EFSWriterTest is Test {
             abi.encodeWithSelector(EFSLib.ForeignDataUID.selector, unknownData, address(0))
         );
         consumer.placeExisting(schemas, unknownData, PARENT, "unknown.txt");
+    }
+
+    /// @notice A SELF-authored non-DATA UID is rejected too (r3741115243): the PIN would
+    ///         index under the target's actual schema while file resolution reads the
+    ///         DATA slot — an EFSFileWritten placement no SDK reader could see.
+    function test_PlaceExisting_RevertsOnNonDataUID() public {
+        bytes32 anchorUID = keccak256("SELF_AUTHORED_ANCHOR");
+        eas.seedAuthor(anchorUID, address(consumer));
+        eas.seedSchema(anchorUID, schemas.anchor); // wrong schema: ANCHOR, not DATA
+        vm.prank(ALICE);
+        vm.expectRevert(
+            abi.encodeWithSelector(EFSLib.NotDataUID.selector, anchorUID, schemas.anchor)
+        );
+        consumer.placeExisting(schemas, anchorUID, PARENT, "not-data.txt");
     }
 
     /// @notice The library inlines, so EAS records the CALLER (the consumer) as attester, never

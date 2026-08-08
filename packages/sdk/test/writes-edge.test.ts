@@ -675,6 +675,8 @@ describe('makePropsNs', () => {
         // tuple). The address-list variant must NOT be used (it would scope to the
         // binding attester and drop reused anchors).
         if (fn === 'getAnchorsBySchemaAndAddressList') throw new Error('used address-list variant')
+        if (fn === 'getChildCountBySchema') return 1n
+        if (fn === 'getChildCountBySchema') return 1n
         if (fn === 'getAnchorsBySchema') return [KEY_ANCHOR]
         if (fn === 'resolveAnchor') return args[1] === KEY ? KEY_ANCHOR : uid(0)
         if (fn === 'getActivePinTarget') return args[0] === KEY_ANCHOR ? PROP_UID : uid(0)
@@ -707,6 +709,8 @@ describe('makePropsNs', () => {
         if (fn === 'getAnchorsBySchemaAndAddressList') throw new Error('used address-list variant')
         // Canonical set under (DATA, PROPERTY) — returned regardless of which attester
         // (ALICE) minted the anchor.
+        if (fn === 'getChildCountBySchema') return 1n
+        if (fn === 'getChildCountBySchema') return 1n
         if (fn === 'getAnchorsBySchema') return [KEY_ANCHOR]
         // The value read (BOB's binding) goes through this same pinned client in production.
         if (fn === 'resolveAnchor') return args[1] === KEY ? KEY_ANCHOR : uid(0)
@@ -740,10 +744,13 @@ describe('makePropsNs', () => {
     const props = makePropsNs({
       getDeployment: () => deployment,
       publicClient: makeReadClient((fn, args) => {
+        // RAW count 257: a full first page + a 1-item second (the pager walks
+        // the raw count, never probing past it — r3741115239).
+        if (fn === 'getChildCountBySchema') return 257n
         if (fn === 'getAnchorsBySchema') {
           pageCalls += 1
           const start = args[2] as bigint
-          return start === 0n ? page1 : []
+          return start === 0n ? page1 : [uid(0x2fff)]
         }
         // Value read (one pinned client): only the KEY anchor resolves to a bound value.
         if (fn === 'resolveAnchor') return args[1] === KEY ? KEY_ANCHOR : uid(0)
@@ -761,7 +768,40 @@ describe('makePropsNs', () => {
       attester: () => ATTESTER,
     })
     const out = await props.list(DATA)
-    expect(pageCalls).toBe(2) // advanced past the full first page to a short second page
+    expect(pageCalls).toBe(2) // advanced past the full first page into the raw remainder
+    expect(out).toEqual([{ key: KEY, value: VALUE, propertyUID: PROP_UID }])
+  })
+
+  it('list stops AT the raw count — an exact page multiple sends no reverting extra probe (r3741115239)', async () => {
+    // Exactly 256 property anchors: the old full-page-implies-more loop probed
+    // start=256, which the slice helper REVERTS (InvalidOffset) — the whole
+    // list failed instead of returning the properties.
+    let pageCalls = 0
+    const page1 = Array.from({ length: 256 }, (_, i) => (i === 0 ? KEY_ANCHOR : uid(0x3000 + i)))
+    const props = makePropsNs({
+      getDeployment: () => deployment,
+      publicClient: makeReadClient((fn, args) => {
+        if (fn === 'getChildCountBySchema') return 256n
+        if (fn === 'getAnchorsBySchema') {
+          pageCalls += 1
+          if ((args[2] as bigint) !== 0n) throw new Error('InvalidOffset')
+          return page1
+        }
+        if (fn === 'resolveAnchor') return args[1] === KEY ? KEY_ANCHOR : uid(0)
+        if (fn === 'getActivePinTarget') return args[0] === KEY_ANCHOR ? PROP_UID : uid(0)
+        if (fn === 'getAttestation') {
+          if (args[0] === KEY_ANCHOR) return { data: anchorEnc.encodeData([KEY, SCHEMAS.property]) }
+          if (args[0] === PROP_UID) return { data: propEnc.encodeData([VALUE]) }
+          return { data: anchorEnc.encodeData([`k${String(args[0])}`, SCHEMAS.property]) }
+        }
+        return uid(0)
+      }) as never,
+      readContext,
+      submitContext: () => makeSubmitCtx().ctx,
+      attester: () => ATTESTER,
+    })
+    const out = await props.list(DATA)
+    expect(pageCalls).toBe(1) // one full window, no probe past the raw end
     expect(out).toEqual([{ key: KEY, value: VALUE, propertyUID: PROP_UID }])
   })
 
@@ -771,6 +811,7 @@ describe('makePropsNs', () => {
     // deps.publicClient directly nor a re-resolving deps.readContext(). Prove it by making
     // both fallbacks throw and serving every read from the guarded client.
     const full = makeReadClient((fn, args) => {
+      if (fn === 'getChildCountBySchema') return 1n
       if (fn === 'getAnchorsBySchema') return [KEY_ANCHOR]
       if (fn === 'resolveAnchor') return args[1] === KEY ? KEY_ANCHOR : uid(0)
       if (fn === 'getActivePinTarget') return args[0] === KEY_ANCHOR ? PROP_UID : uid(0)
@@ -967,6 +1008,8 @@ describe('makePropsNs — canonical key encoding (specs/02)', () => {
     const withValues = makePropsNs({
       getDeployment: () => deployment,
       publicClient: makeReadClient((fn, args) => {
+        if (fn === 'getChildCountBySchema') return 1n
+        if (fn === 'getChildCountBySchema') return 1n
         if (fn === 'getAnchorsBySchema') return [KEY_ANCHOR]
         if (fn === 'getAttestation' && args[0] === KEY_ANCHOR) {
           return { data: anchorEnc.encodeData([CANONICAL_KEY, SCHEMAS.property]) }

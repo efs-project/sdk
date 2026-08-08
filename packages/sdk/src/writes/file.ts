@@ -74,6 +74,23 @@ function schemeOf(uri: string): string {
  *
  * @throws {EfsError} `MissingTransport` when none of the three sources has one.
  */
+/** Validate + canonicalize a transport UID BEFORE it can gate irreversible work
+ * (r3741115241): on the default no-mirror path the resolved transport rides into
+ * `resolveMirrors`' PAID SSTORE2 deploys, and a template-compatible-but-malformed
+ * value (`'0x01'`) would only explode later at the MIRROR ABI-encode in
+ * `buildFileWriteGraph` — irreversible storage, no receipt. Deployment
+ * `transports` are canonicalized at `resolveDeployment`; this also covers a raw
+ * caller `opts.transportDefinition`. */
+function asTransportUid(value: string, scheme: string): Hex {
+  if (!/^0x[0-9a-fA-F]{1,64}$/.test(value)) {
+    throw new EfsError(
+      `EFS write: the transportDefinition for scheme '${scheme}' ("${String(value)}") is not a bytes32 hex UID — pass the /transports/<scheme> anchor UID (0x + 64 hex chars).`,
+      { code: 'InvalidArgument' },
+    )
+  }
+  return `0x${value.slice(2).toLowerCase().padStart(64, '0')}` as Hex
+}
+
 async function transportDefinitionFor(
   scheme: string,
   deployment: EfsDeployment,
@@ -84,7 +101,7 @@ async function transportDefinitionFor(
   // mirror/transport.ts's resolveArweave and the standalone mirrors.add path).
   const key = scheme === 'ar' ? 'arweave' : scheme
   const mapped = opts?.transportDefinition ?? deployment.transports?.[key]
-  if (mapped !== undefined) return mapped
+  if (mapped !== undefined) return asTransportUid(mapped, key)
 
   // Reject a schemeless URI (`schemeOf` returned '') BEFORE the on-chain fallback:
   // without a scheme the path walk below would resolve `/transports/` — the transport
