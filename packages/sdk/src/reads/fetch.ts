@@ -221,10 +221,13 @@ export async function fetchRef(
     // Use the ATTESTED contentType (or omit) — never the untrusted transport header.
     return makeEfsFile(result.bytes, verification, attestedContentType, resolvedBy)
   } catch (err) {
-    // A caller CANCELLATION is not a mirror failure — the raw AbortError (with
-    // the caller's own reason) propagates unclassified, matching the abort
-    // convention everywhere else in the SDK, so UIs can distinguish "user
-    // cancelled" from "mirrors are down".
+    // A caller CANCELLATION is not a mirror failure — it propagates
+    // unclassified, matching the abort convention everywhere else in the SDK,
+    // so UIs can distinguish "user cancelled" from "mirrors are down". The
+    // signal check comes FIRST: `controller.abort(customReason)` may carry a
+    // string/object reason with no `name`, which a name check alone would
+    // misroute into the classifier. throwIfAborted rethrows the exact reason.
+    opts?.signal?.throwIfAborted()
     if ((err as Error | undefined)?.name === 'AbortError') throw err
     throw classifyError(err)
   }

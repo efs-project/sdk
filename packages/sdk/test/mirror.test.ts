@@ -817,3 +817,45 @@ describe('abort propagates between GATEWAY attempts (review r3740650224)', () =>
     expect(err).not.toBeInstanceOf(AllMirrorsFailedError)
   })
 })
+
+describe('cap enforcement + timer bounds + custom abort reasons (reviews r3740666173/77/79)', () => {
+  it('a non-streamable body FAILS the attempt (the cap cannot be enforced) and failover proceeds', async () => {
+    const bytes = new TextEncoder().encode('streamed wins')
+    const hash = hashContent(bytes)
+    const dataUri = `data:application/octet-stream;base64,${Buffer.from(bytes).toString('base64')}`
+    const fetchImpl = (async () => {
+      // A response with arrayBuffer but NO body stream — buffering it would
+      // allocate the whole (attacker-sized) payload before any cap check.
+      return {
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        headers: new Headers(),
+        body: null,
+        arrayBuffer: async () => new ArrayBuffer(4),
+      } as unknown as Response
+    }) as typeof fetch
+    const { fetchVerified } = await import('../src/mirror/fetch.js')
+    const out = await fetchVerified(['https://mock.example/x', dataUri], hash, { fetchImpl })
+    expect(out.mirrorUsed).toBe(dataUri)
+    expect(out.attempts[0]?.reason).toMatch(/not streamable/i)
+  })
+
+  it('rejects timeoutMs above the platform timer ceiling (would truncate to ~1ms)', async () => {
+    const { fetchVerified, MAX_TIMEOUT_MS } = await import('../src/mirror/fetch.js')
+    await expect(
+      fetchVerified(['https://x.example/a'], undefined, { timeoutMs: MAX_TIMEOUT_MS + 1 }),
+    ).rejects.toThrow(RangeError)
+    expect(MAX_TIMEOUT_MS).toBe(2_147_483_647)
+  })
+
+  it('a CUSTOM abort reason (non-Error) propagates verbatim, never classified as an outage', async () => {
+    const ac = new AbortController()
+    ac.abort('user pressed cancel') // a string reason — no name property
+    const { fetchVerified } = await import('../src/mirror/fetch.js')
+    const err = await fetchVerified(['https://a.example/x'], undefined, {
+      signal: ac.signal,
+    }).catch((e) => e)
+    expect(err).toBe('user pressed cancel')
+  })
+})

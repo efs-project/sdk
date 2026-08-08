@@ -33,6 +33,10 @@ import {
 
 /** Default per-attempt timeout (ms). */
 export const DEFAULT_TIMEOUT_MS = 10_000
+/** The platform timer ceiling (2^31 − 1 ms ≈ 24.8 days): `setTimeout` with a
+ * larger delay TRUNCATES to ~1 ms (Node emits TimeoutOverflowWarning), which
+ * would abort every attempt immediately — so it is the validation bound. */
+export const MAX_TIMEOUT_MS = 2_147_483_647
 /** Default hard size cap (bytes) ~50 MB. */
 export const DEFAULT_MAX_BYTES = 50 * 1024 * 1024
 
@@ -144,13 +148,15 @@ async function readCapped(
 
   const body = res.body
   if (!body) {
-    // No stream (e.g. some mock environments) - fall back to arrayBuffer, still
-    // enforcing the cap after the fact.
-    const buf = new Uint8Array(await res.arrayBuffer())
-    if (buf.byteLength > maxBytes) {
-      throw new Error(`body size ${buf.byteLength} exceeds cap ${maxBytes}`)
-    }
-    return buf
+    // No readable stream ⇒ the cap CANNOT be enforced during the read: an
+    // `arrayBuffer()` fallback would buffer the ENTIRE (attacker-sized) body
+    // before any check ran — Content-Length is attacker-controlled and may be
+    // absent or understated, so a post-hoc check does not bound the
+    // allocation. Fail the attempt (failover proceeds); every real fetch
+    // (undici, browsers) exposes a stream — bodyless responses are
+    // mock/polyfill territory, and a mock that wants this path must provide a
+    // `body` stream like the real platform does.
+    throw new Error('response body is not streamable — the size cap cannot be enforced')
   }
 
   const reader = body.getReader()
@@ -361,9 +367,12 @@ export async function fetchVerified(
   // Same class (proactive sweep): a NaN timeout makes `setTimeout` fire
   // IMMEDIATELY (treated as 0), aborting every attempt before its first byte —
   // a confusing all-mirrors-failed instead of a config error.
-  if (opts.timeoutMs !== undefined && (!Number.isFinite(opts.timeoutMs) || opts.timeoutMs <= 0)) {
+  if (
+    opts.timeoutMs !== undefined &&
+    (!Number.isFinite(opts.timeoutMs) || opts.timeoutMs <= 0 || opts.timeoutMs > MAX_TIMEOUT_MS)
+  ) {
     throw new RangeError(
-      `fetchVerified: \`timeoutMs\` must be a finite positive number (got ${opts.timeoutMs}). Omit it for the ${DEFAULT_TIMEOUT_MS} ms default.`,
+      `fetchVerified: \`timeoutMs\` must be a positive number ≤ ${MAX_TIMEOUT_MS} (got ${opts.timeoutMs}) — platform timers truncate larger values to ~1 ms, which would abort every attempt immediately. Omit it for the ${DEFAULT_TIMEOUT_MS} ms default.`,
     )
   }
   const attempts: AttemptError[] = []
