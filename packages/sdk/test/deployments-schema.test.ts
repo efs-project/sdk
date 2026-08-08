@@ -277,3 +277,41 @@ describe('built-in registry — community devnet (26001993)', () => {
     expect(err?.message).toMatch(/devnet/)
   })
 })
+
+describe('resolveDeployment schema-UID canonicalization (review r3740902115)', () => {
+  it('rewrites uppercase and leading-zero-shortened UIDs to 0x + 64 lowercase hex', () => {
+    const custom = {
+      ...deployment,
+      schemas: {
+        ...deployment.schemas,
+        // Value-equal variants a custom record may be written in — verification
+        // tolerates them (sameUid), so resolution must CANONICALIZE them or the
+        // strict-equality readers (symlink walk) and bytes32 ABI encoding break.
+        anchor: `0x${'AB'.repeat(32)}`,
+        data: '0x01',
+      },
+    } as unknown as EfsDeployment
+    const dep = resolveDeployment(CHAIN_ID, { [CHAIN_ID]: custom })
+    expect(dep.schemas.anchor).toBe(`0x${'ab'.repeat(32)}`)
+    expect(dep.schemas.data).toBe(`0x${'0'.repeat(62)}01`)
+    // The source record is never mutated (it may be the shared registry object).
+    expect(custom.schemas.anchor).toBe(`0x${'AB'.repeat(32)}`)
+    // Untouched canonical entries pass through identical.
+    expect(dep.schemas.pin).toBe(deployment.schemas.pin)
+  })
+
+  it('rejects a UID the SDK cannot consume (non-hex / too wide) with a typed error', () => {
+    const bad = {
+      ...deployment,
+      schemas: { ...deployment.schemas, tag: '0xZZ' },
+    } as unknown as EfsDeployment
+    expect(() => resolveDeployment(CHAIN_ID, { [CHAIN_ID]: bad })).toThrow(
+      /schemas\.tag .* not a bytes32 hex UID/,
+    )
+    const wide = {
+      ...deployment,
+      schemas: { ...deployment.schemas, tag: `0x${'a'.repeat(65)}` },
+    } as unknown as EfsDeployment
+    expect(() => resolveDeployment(CHAIN_ID, { [CHAIN_ID]: wide })).toThrow(/not a bytes32 hex UID/)
+  })
+})

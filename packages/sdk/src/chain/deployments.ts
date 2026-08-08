@@ -216,7 +216,47 @@ export const deployments: DeploymentsMap = {
   [SEPOLIA.chainId]: SEPOLIA,
 }
 
-/** Resolve the deployment for a chain, preferring a caller override. */
+/** Canonicalize one bytes32 UID to the form the WHOLE SDK consumes: `0x` + 64
+ * LOWERCASE hex. Accepts the value-equal variants a registry entry may be
+ * written in (uppercase, leading-zero-shortened `0x01`) — the same tolerance
+ * `sameUid` extends at verification — but REWRITES them, because tolerance at
+ * the compare alone is not enough: reads do strict string equality against
+ * EAS-returned UIDs (e.g. the symlink walk would report a valid redirect
+ * target as dangling), and a shortened value cannot be ABI-encoded as
+ * `bytes32`. Rejects anything else with a typed, actionable error. */
+function canonicalUid(value: string, label: string): Hex {
+  if (!/^0x[0-9a-fA-F]{1,64}$/.test(value)) {
+    throw new EfsError(
+      `EFS deployment: schemas.${label} ("${String(value)}") is not a bytes32 hex UID the SDK can consume — expected 0x-prefixed hex, at most 32 bytes (canonical form: 0x + exactly 64 lowercase hex chars).`,
+      { code: 'InvalidArgument' },
+    )
+  }
+  return `0x${value.slice(2).toLowerCase().padStart(64, '0')}` as Hex
+}
+
+/** Per-record memo for {@link canonicalizeDeployment} — `resolveDeployment` is
+ * on the lazy-getter hot path (every `efs.raw.*` access re-resolves), so the
+ * nine-string rewrite runs once per distinct record object. */
+const canonicalMemo = new WeakMap<EfsDeployment, EfsDeployment>()
+
+/** A COPY of the record with every schema UID canonicalized (the source —
+ * often the shared registry object or the caller's override — is never
+ * mutated). */
+function canonicalizeDeployment(dep: EfsDeployment): EfsDeployment {
+  const memo = canonicalMemo.get(dep)
+  if (memo !== undefined) return memo
+  const schemas = Object.fromEntries(
+    Object.entries(dep.schemas).map(([k, v]) => [k, canonicalUid(v as string, k)]),
+  ) as EfsDeployment['schemas']
+  const out = { ...dep, schemas }
+  canonicalMemo.set(dep, out)
+  return out
+}
+
+/** Resolve the deployment for a chain, preferring a caller override. The
+ * returned record's schema UIDs are CANONICALIZED (0x + 64 lowercase hex) —
+ * see {@link canonicalUid}: verification is value-tolerant of how an override
+ * writes a UID, so the rest of the SDK must never see the non-canonical form. */
 export function resolveDeployment(chainId: number, override?: DeploymentsMap): EfsDeployment {
   const map = override ?? deployments
   const found = map[chainId]
@@ -229,7 +269,7 @@ export function resolveDeployment(chainId: number, override?: DeploymentsMap): E
     }
     throw new DeploymentNotFound(chainId)
   }
-  return found
+  return canonicalizeDeployment(found)
 }
 
 /**

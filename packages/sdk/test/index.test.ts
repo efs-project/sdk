@@ -403,6 +403,17 @@ describe('lenses', () => {
     }
     await expect(resolveLens(overCap, {})).rejects.toThrow(MaxLensesExceeded)
   })
+
+  it('rejects a malformed address at the lens boundary (r3740902117)', async () => {
+    // Address is only a template type — a bad literal or custom-lens output
+    // must die HERE with a typed error, not later as a generic ABI/RPC failure.
+    expect(() => lens('0x1234' as Address)).toThrow(/not a valid 20-byte address/)
+    const bad: Lens = {
+      __brand: 'Lens',
+      resolve: async () => ['0xnothex' as Address],
+    }
+    await expect(resolveLens(bad, {})).rejects.toThrow(/not a valid 20-byte address/)
+  })
 })
 
 // ── efs.index repair verb — end-to-end over a mock EIP-1193 provider ────────────

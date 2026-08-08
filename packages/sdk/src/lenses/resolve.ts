@@ -27,6 +27,17 @@ function finalize(addresses: readonly Address[]): readonly Address[] {
   const seen = new Set<string>()
   const out: Address[] = []
   for (const a of addresses) {
+    // `Address` is only a TEMPLATE type — a malformed literal ('0x1234') or a
+    // custom lens's bad output would otherwise surface deep in a read as a
+    // generic ABI/RPC failure. This is the common boundary for every lens
+    // source: reject here, typed. (`strict: false` — format validation, not
+    // checksum enforcement; lens comparisons are case-insensitive.)
+    if (!isAddress(a, { strict: false })) {
+      throw new EfsError(
+        `EFS lens: "${String(a)}" is not a valid 20-byte address — lens attester sets are addresses.`,
+        { code: 'InvalidArgument' },
+      )
+    }
     const key = a.toLowerCase()
     if (!seen.has(key)) {
       seen.add(key)
