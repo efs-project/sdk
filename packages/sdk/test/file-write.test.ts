@@ -45,6 +45,9 @@ const ROOT = uid(0x1)
 const DOCS_ANCHOR = uid(0x10)
 const TRANSPORT_IPFS = uid(0x2f) // /transports/ipfs anchor UID
 const TRANSPORT_ONCHAIN = uid(0x2c) // /transports/onchain anchor UID (web3:// scheme)
+/** The `/transports` root — the boundary gate walks each transportDefinition's
+ * parent chain up to it (MirrorResolver's InvalidTransport predicate). */
+const TRANSPORTS_ROOT = uid(0x2b)
 /** Deterministic addresses the mocked deploys return (chunk, then manager). */
 const CHUNK_ADDR = addr(0x5c01)
 const MANAGER_ADDR = addr(0x11a0)
@@ -146,6 +149,10 @@ function makeCtx(
   } = {},
 ): { ctx: FileWriteContext; sent: SentLayer[]; deploys: SentDeploy[] } {
   const edges = opts.edges ?? { [`${ROOT}|docs`]: DOCS_ANCHOR }
+  // The /transports subtree root this harness serves: the fixture's own edge
+  // when it models one (the on-chain transport-resolution tests), else the
+  // default. Transport anchors hang directly under it for the gate's walk.
+  const transportsRoot = edges[`${ROOT}|transports`] ?? TRANSPORTS_ROOT
   const anchors = opts.anchors ?? {}
   const tagged = new Set<string>(opts.taggedAncestors ?? [])
   const sent: SentLayer[] = []
@@ -162,6 +169,9 @@ function makeCtx(
       if (args.functionName === 'rootAnchorUID') return ROOT
       if (args.functionName === 'resolvePath') {
         const [parent, name] = args.args as [Hex, string]
+        // The transports subtree is always present (the deployments the SDK
+        // targets bootstrap it) — the transport gate resolves it by path.
+        if (parent === ROOT && name === 'transports') return transportsRoot
         return edges[`${parent}|${name}`] ?? ZERO_UID
       }
       if (args.functionName === 'resolveAnchor') {
@@ -175,6 +185,21 @@ function makeCtx(
         // harness's overwrite anchors are genuine ANCHORs; reconstruct the slot
         // fields (parent, name, DATA bucket) from the `anchors` fixture keys.
         const [u] = args.args as [Hex]
+        // Transport anchors live under /transports (the gate's ancestry walk).
+        if (u === TRANSPORT_IPFS || u === TRANSPORT_ONCHAIN || u === transportsRoot) {
+          return {
+            uid: u,
+            schema: SCHEMAS.anchor,
+            refUID: u === transportsRoot ? ROOT : transportsRoot,
+            data: encodeAbiParameters(
+              [{ type: 'string' }, { type: 'bytes32' }],
+              [
+                u === TRANSPORT_IPFS ? 'ipfs' : u === TRANSPORT_ONCHAIN ? 'onchain' : 'transports',
+                ZERO_UID,
+              ],
+            ),
+          }
+        }
         for (const [key, anchorUID] of Object.entries(anchors)) {
           if (anchorUID === u) {
             const [parent, name] = key.split('|') as [Hex, string]
@@ -189,7 +214,19 @@ function makeCtx(
             }
           }
         }
-        return { uid: u, schema: SCHEMAS.anchor }
+        // Fallback: any other queried anchor in this harness is a transport
+        // definition (custom overrides, ar://, the on-chain-resolved web3 one)
+        // — model it as a direct child of /transports so the gate's ancestry
+        // walk succeeds, matching the real bootstrapped subtree.
+        return {
+          uid: u,
+          schema: SCHEMAS.anchor,
+          refUID: transportsRoot,
+          data: encodeAbiParameters(
+            [{ type: 'string' }, { type: 'bytes32' }],
+            ['transport', ZERO_UID],
+          ),
+        }
       }
       if (args.functionName === 'getActiveTagWeight') {
         // (attester, target, definition, targetSchema) — the active visibility-TAG

@@ -347,6 +347,11 @@ export interface FileWriteGraph {
    * layered boundary re-runs the direct-DATA readability proof (the author
    * must hold an active mirror on a DATA target — r3741562776). */
   readonly symlinkTargetUID?: Hex
+  /** The DISTINCT `/transports/<scheme>` anchor UIDs the plan's MIRRORs
+   * reference, stamped so the boundary can verify each IS an ANCHOR under
+   * `/transports/` before layer 1 broadcasts — MirrorResolver only rejects at
+   * the MIRROR layer, by which point the DATA layer has mined (r3741671356). */
+  readonly mirrorTransportUIDs?: readonly Hex[]
   /** Every planned attestation, ordered by layer (L1 → L2 → L3). The submitter
    * groups by {@link PlannedAttestation.layer} into `multiAttest` batches. */
   readonly attestations: readonly PlannedAttestation[]
@@ -566,6 +571,15 @@ export function buildFileWriteGraph(input: FileWriteGraphInput): FileWriteGraph 
   // mirrors.add run before their submits.
   for (const m of input.mirrors) {
     validateMirrorUri(m.uri, 'EFS write plan')
+    // SHAPE check on the transport anchor (r3741671356) — all a PURE builder
+    // can prove; the submission boundary verifies it IS an ANCHOR under
+    // `/transports/` (the MirrorResolver predicate) before layer 1 broadcasts.
+    if (!/^0x[0-9a-fA-F]{64}$/.test(m.transportDefinition) || m.transportDefinition === ZERO_UID) {
+      throw new EfsError(
+        `EFS write plan: mirror transportDefinition ("${String(m.transportDefinition)}") is not a nonzero bytes32 anchor UID — MirrorResolver rejects it (InvalidTransport) at the MIRROR layer, after the DATA layer has already mined.`,
+        { code: 'InvalidArgument' },
+      )
+    }
   }
   // METADATA CORRESPONDENCE (r3741586938): the reserved triplets persist into
   // PERMANENT value-interned records, and the ContentHash brand checks FORMAT
@@ -745,6 +759,7 @@ export function buildFileWriteGraph(input: FileWriteGraphInput): FileWriteGraph 
     dataSchemaUID: schemas.data,
     mirrorSchemaUID: schemas.mirror,
     anchorSchemaUID: schemas.anchor,
+    mirrorTransportUIDs: [...new Set(input.mirrors.map((m) => m.transportDefinition))],
     ...(existingFileAnchorUID !== undefined
       ? {
           existingAnchorUID: existingFileAnchorUID,

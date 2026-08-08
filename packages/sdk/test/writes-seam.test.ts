@@ -272,6 +272,7 @@ describe('Tier1Submitter receipt', () => {
     redirect: uid(0x102),
   }
   const EAS = addr(0xea51)
+  const INDEXER_ADDR = addr(0x1dc5)
   const ATTESTER = addr(0xacc01)
 
   function attestedLog(schema: Hex, mintedUID: Hex, logIndex: number): Log {
@@ -321,7 +322,22 @@ describe('Tier1Submitter receipt', () => {
         return txHash
       },
     }
+    const TRANSPORTS_ROOT = uid(0x2b)
     const publicClient = {
+      // The boundary gates' reads: /transports resolves to a fixed root and
+      // every transport anchor in this harness hangs directly under it.
+      async readContract(a: { functionName: string }) {
+        if (a.functionName === 'rootAnchorUID') return uid(0x1)
+        if (a.functionName === 'resolvePath') return TRANSPORTS_ROOT
+        if (a.functionName === 'getAttestation') {
+          return {
+            schema: SCHEMAS.anchor,
+            refUID: TRANSPORTS_ROOT,
+            data: encodeAbiParameters([{ type: 'string' }, { type: 'bytes32' }], ['ipfs', uid(0)]),
+          }
+        }
+        throw new Error(`seam mock: unexpected ${a.functionName}`)
+      },
       async waitForTransactionReceipt({ hash }: { hash: Hex }) {
         const r = receipts.get(hash)
         if (!r) throw new Error(`no receipt for ${hash}`)
@@ -332,6 +348,7 @@ describe('Tier1Submitter receipt', () => {
       walletClient: walletClient as unknown as SubmitterContext['walletClient'],
       publicClient: publicClient as unknown as SubmitterContext['publicClient'],
       easAddress: EAS,
+      indexerAddress: INDEXER_ADDR,
       contentHash: hashContent(new Uint8Array([1, 2, 3])),
       chainId: 11155111,
       attester: ATTESTER,

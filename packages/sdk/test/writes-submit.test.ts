@@ -44,6 +44,8 @@ const SCHEMAS: EfsSchemaUIDs = {
 const EAS: Address = '0x000000000000000000000000000000000000eA51'
 const PARENT = uid(0x100)
 const TRANSPORT = uid(0x200)
+const ROOT_ANCHOR = uid(0x1) // the transport gate's root lookup
+const TRANSPORTS_ROOT = uid(0x2b) // /transports — every TRANSPORT hangs under it
 const CONTENT_HASH = hashContent(new Uint8Array([1, 2, 3])) // must MATCH the bytes
 const EXISTING_DATA = uid(0x400)
 const EXISTING_ANCHOR = uid(0xea00)
@@ -236,10 +238,25 @@ function makeMockChain(opts: MockChainOptions = {}) {
     // mock reports the submitting ACCOUNT as the DATA author (self-authored);
     // `hardlinkAuthor` overrides it to simulate a foreign DATA.
     async readContract(args: { functionName: string; args?: readonly unknown[] }) {
+      // The transport gate's ancestry lookup: /transports resolves to a fixed
+      // root and every transport anchor in this harness hangs directly under it.
+      if (args.functionName === 'rootAnchorUID') return ROOT_ANCHOR
+      if (args.functionName === 'resolvePath') return TRANSPORTS_ROOT
       if (args.functionName === 'getAttestation') {
         // Per-UID dispatch: the gates read BOTH the hardlink target and any
         // reused concrete file-ANCHOR.
         const [queried] = (args.args ?? []) as [Hex]
+        if (queried === TRANSPORT) {
+          return {
+            uid: queried,
+            schema: SCHEMAS.anchor,
+            refUID: TRANSPORTS_ROOT,
+            data: encodeAbiParameters(
+              [{ type: 'string' }, { type: 'bytes32' }],
+              ['ipfs', ZERO_UID],
+            ),
+          }
+        }
         if (queried === EXISTING_ANCHOR) {
           return {
             uid: queried,
@@ -624,6 +641,53 @@ describe('submitWriteTier1 — hardlink plan', () => {
     expect(sent).toHaveLength(0)
   })
 
+  it('REFUSES a non-ANCHOR mirror transportDefinition BEFORE layer 1 (r3741671356)', async () => {
+    // MirrorResolver only rejects at the layer-2 MIRROR — by then DATA +
+    // file-ANCHOR have mined (a paid partial graph).
+    const plan = buildFileWriteGraph(bytesInput)
+    const { ctx, sent } = makeMockChain()
+    const bad = {
+      ...ctx,
+      publicClient: {
+        ...ctx.publicClient,
+        async readContract(a: { functionName: string }) {
+          if (a.functionName === 'getAttestation') return { schema: SCHEMAS.data } // not an ANCHOR
+          return (
+            ctx.publicClient as unknown as { readContract: (x: unknown) => Promise<unknown> }
+          ).readContract(a)
+        },
+      },
+    } as SubmitContext
+    const err = await submitWriteTier1(plan, bad).catch((e) => e)
+    expect((err as { code?: string }).code).toBe('InvalidArgument')
+    expect(String((err as Error).message)).toMatch(/is not an ANCHOR attestation/)
+    expect(sent).toHaveLength(0)
+  })
+
+  it('REFUSES a transport anchor outside /transports/', async () => {
+    const plan = buildFileWriteGraph(bytesInput)
+    const { ctx, sent } = makeMockChain()
+    const orphan = {
+      ...ctx,
+      publicClient: {
+        ...ctx.publicClient,
+        async readContract(a: { functionName: string }) {
+          // A real ANCHOR whose parent chain never reaches /transports.
+          if (a.functionName === 'getAttestation') {
+            return { schema: SCHEMAS.anchor, refUID: ZERO_UID }
+          }
+          return (
+            ctx.publicClient as unknown as { readContract: (x: unknown) => Promise<unknown> }
+          ).readContract(a)
+        },
+      },
+    } as SubmitContext
+    const err = await submitWriteTier1(plan, orphan).catch((e) => e)
+    expect((err as { code?: string }).code).toBe('InvalidArgument')
+    expect(String((err as Error).message)).toMatch(/not a descendant of \/transports\//)
+    expect(sent).toHaveLength(0)
+  })
+
   it('FAILS CLOSED when the context cannot run the authorship read', async () => {
     const plan = buildFileWriteGraph({
       ...hardlinkBase,
@@ -715,7 +779,9 @@ describe('submitWriteTier1 — per-layer wrong-chain guard', () => {
     // check (3) fails closed — the dependent layer never broadcasts to the new chain.
     const assertChain = async () => {
       checks += 1
-      if (checks >= 3) throw Object.assign(new Error('wrong chain'), { code: 'WrongChain' })
+      // +1 vs. the old counts: the PRE-GATE assertion (r3741637985) fires first
+      // on any gate-stamped plan (this one carries mirrorTransportUIDs).
+      if (checks >= 4) throw Object.assign(new Error('wrong chain'), { code: 'WrongChain' })
     }
     const err = await submitWriteTier1(plan, { ...ctx, assertChain }).catch((e) => e)
     // The pre-send wrong-chain drift is a NO-TX failure for layer 2: it folds into
@@ -727,7 +793,7 @@ describe('submitWriteTier1 — per-layer wrong-chain guard', () => {
     expect(we.code).toBe('PartialBatchFailure')
     expect(we.landed.get('DATA')).toBe(uid(0xd000)) // layer 1 already landed, preserved for recovery
     expect((we.cause as { code?: string })?.code).toBe('WrongChain')
-    expect(checks).toBe(3)
+    expect(checks).toBe(4)
     expect(sent).toHaveLength(1) // only layer 1 broadcast; the dependent layer 2 did NOT
   })
 
@@ -741,7 +807,7 @@ describe('submitWriteTier1 — per-layer wrong-chain guard', () => {
     // so recovery can re-bind and check the hash.
     const assertChain = async () => {
       checks += 1
-      if (checks >= 2) throw Object.assign(new Error('wrong chain'), { code: 'WrongChain' })
+      if (checks >= 3) throw Object.assign(new Error('wrong chain'), { code: 'WrongChain' })
     }
     const err = await submitWriteTier1(plan, { ...ctx, assertChain }).catch((e) => e)
     expect(err).toBeInstanceOf(WriteRevertedError)
@@ -762,7 +828,7 @@ describe('submitWriteTier1 — per-layer wrong-chain guard', () => {
       },
     })
     expect(sent).toHaveLength(3)
-    expect(checks).toBe(6) // before the send + before the receipt wait, per layer
+    expect(checks).toBe(7) // 1 pre-gate + (send + receipt wait) per layer
   })
 })
 

@@ -544,6 +544,21 @@ describe('byte-plan builder preflight (reviews r3741586928 / r3741586938)', () =
     ).toThrowError(/URI|8192|length/i)
   })
 
+  it('REJECTS a malformed transportDefinition (shape) at build time', () => {
+    expect(() =>
+      buildFileWriteGraph({
+        ...good,
+        mirrors: [{ uri: 'ipfs://Qm', transportDefinition: '0x01' as never }],
+      }),
+    ).toThrowError(/not a nonzero bytes32 anchor UID/)
+    expect(() =>
+      buildFileWriteGraph({
+        ...good,
+        mirrors: [{ uri: 'ipfs://Qm', transportDefinition: uid(0) }],
+      }),
+    ).toThrowError(/not a nonzero bytes32 anchor UID/)
+  })
+
   it('REJECTS a STALE contentHash — permanent metadata must describe the bytes', () => {
     expect(() =>
       buildFileWriteGraph({

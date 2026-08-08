@@ -73,6 +73,8 @@ import { decodeAbiParameters, parseEventLogs } from 'viem'
 import {
   getReferencingBySchemaAndAttesterAbi,
   getReferencingBySchemaAndAttesterCountAbi,
+  resolvePathAbi,
+  rootAnchorUidAbi,
 } from '../chain/abi/indexer.js'
 import { easAbi, getAttestationAbi } from '../eas/abi.js'
 import { buildMultiAttest } from '../eas/attest.js'
@@ -693,6 +695,87 @@ async function assertSymlinkTargetReadable(
   }
 }
 
+/** MirrorResolver's transport predicate, run BEFORE layer 1 (r3741671356):
+ * each `transportDefinition` must be an ANCHOR attestation that descends from
+ * the `/transports/` anchor (MirrorResolver.onAttest: `InvalidTransport`
+ * otherwise). Without this the DATA + file-ANCHOR layer mines and only the
+ * layer-2 MIRROR reverts — a paid partial graph. Walks parents via each
+ * ANCHOR's `refUID` (an anchor's refUID IS its parent, the same edge
+ * `EFSIndexer.getParent` reports) with the contract's depth bound; usually one
+ * read per distinct transport (the common `/transports/<scheme>` sits directly
+ * under the root). Fails CLOSED when the context cannot read. */
+async function assertMirrorTransportsValid(
+  plan: FileWriteGraph,
+  ctx: SubmitContext,
+): Promise<void> {
+  const defs = plan.mirrorTransportUIDs
+  if (defs === undefined || defs.length === 0) return
+  const expectedAnchorSchema = plan.anchorSchemaUID
+  if (expectedAnchorSchema === undefined) {
+    throw new EfsError(
+      'EFS write: this plan carries mirrors but no anchorSchemaUID stamp — rebuild it with buildFileWriteGraph (the gate must verify each transport anchor).',
+      { code: 'InvalidArgument' },
+    )
+  }
+  if (ctx.publicClient.readContract === undefined || ctx.indexerAddress === undefined) {
+    throw new EfsError(
+      'EFS write: verifying mirror transports needs a publicClient with readContract and ctx.indexerAddress — MirrorResolver rejects a bad transport only AFTER the DATA layer mines.',
+      { code: 'InvalidArgument' },
+    )
+  }
+  const read = ctx.publicClient.readContract
+  const attestationOf = (uid: Hex) =>
+    read({
+      address: ctx.easAddress,
+      abi: getAttestationAbi,
+      functionName: 'getAttestation',
+      args: [uid],
+    }) as Promise<{ schema?: Hex; refUID?: Hex } | undefined>
+  // The `/transports` root, resolved once (the same lookup the fs.write path's
+  // transport resolver performs).
+  const rootAnchor = (await read({
+    address: ctx.indexerAddress,
+    abi: rootAnchorUidAbi,
+    functionName: 'rootAnchorUID',
+    args: [],
+  })) as Hex
+  const transportsRoot = (await read({
+    address: ctx.indexerAddress,
+    abi: resolvePathAbi,
+    functionName: 'resolvePath',
+    args: [rootAnchor, 'transports'],
+  })) as Hex
+  const MAX_TRANSPORT_DEPTH = 8 // MirrorResolver.MAX_TRANSPORT_DEPTH
+  for (const def of defs) {
+    const att = await attestationOf(def)
+    if (
+      att?.schema === undefined ||
+      att.schema.toLowerCase() !== expectedAnchorSchema.toLowerCase()
+    ) {
+      throw new EfsError(
+        `EFS write: mirror transportDefinition ${def} is not an ANCHOR attestation (schema ${att?.schema ?? 'unknown'}) — MirrorResolver rejects it (InvalidTransport) after the DATA layer has mined.`,
+        { code: 'InvalidArgument' },
+      )
+    }
+    let parent = att.refUID
+    let ok = false
+    for (let depth = 0; depth < MAX_TRANSPORT_DEPTH; depth++) {
+      if (parent === undefined || parent === ZERO_UID) break
+      if (parent.toLowerCase() === transportsRoot.toLowerCase()) {
+        ok = true
+        break
+      }
+      parent = (await attestationOf(parent))?.refUID
+    }
+    if (!ok) {
+      throw new EfsError(
+        `EFS write: mirror transportDefinition ${def} is not a descendant of /transports/ — MirrorResolver rejects it (InvalidTransport) after the DATA layer has mined. Use the deployment's transports map or the /transports/<scheme> anchor.`,
+        { code: 'InvalidArgument' },
+      )
+    }
+  }
+}
+
 // One PIN encoder, reused to re-encode `definition` once it's resolved. The PIN
 // schema is `bytes32 definition` (EFS_SCHEMA_FIELDS.pin).
 const pinEncoder = new SchemaEncoder(EFS_SCHEMA_FIELDS.pin)
@@ -923,13 +1006,15 @@ export async function submitLayeredTier1(
   if (
     plan.hardlink ||
     plan.existingAnchorUID !== undefined ||
-    plan.symlinkTargetUID !== undefined
+    plan.symlinkTargetUID !== undefined ||
+    (plan.mirrorTransportUIDs?.length ?? 0) > 0
   ) {
     await ctx.assertChain?.()
   }
   await assertHardlinkSelfAuthored(plan, ctx)
   await assertConcreteAnchorIsAnchor(plan, ctx)
   await assertSymlinkTargetReadable(plan, ctx)
+  await assertMirrorTransportsValid(plan, ctx)
   const resolved = new Map<string, Hex>()
   const layerTxHashes: Hex[] = []
   const layers: LayerResult[] = []
