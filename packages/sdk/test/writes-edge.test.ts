@@ -245,7 +245,16 @@ function makeSubmitCtx(): {
     async readContract(args: { functionName: string; args?: readonly unknown[] }) {
       if (args.functionName === 'getAttestation') {
         const [queried] = (args.args ?? []) as [Hex]
-        if (queried === uid(0x800)) return { uid: queried, schema: SCHEMAS.anchor }
+        if (queried === uid(0x800)) {
+          return {
+            uid: queried,
+            schema: SCHEMAS.anchor,
+            data: encodeAbiParameters(
+              [{ type: 'string' }, { type: 'bytes32' }],
+              ['x.txt', SCHEMAS.data],
+            ),
+          }
+        }
         return { uid: queried, attester: ATTESTER, schema: SCHEMAS.data }
       }
       if (args.functionName === 'getReferencingBySchemaAndAttesterCount') return 1n
@@ -866,13 +875,21 @@ describe('makePinsNs', () => {
     attester?: Address
     schema?: Hex
     anchorSchema?: Hex
+    anchorBucket?: Hex
     mirrors?: bigint
   }) =>
     makeReadClient((fn, args) => {
       if (fn === 'getAttestation') {
         // Dispatch on the queried UID: the gate reads BOTH sides of the PIN.
         if (args[0] === ANCHOR) {
-          return { attester: ATTESTER, schema: over?.anchorSchema ?? SCHEMAS.anchor }
+          return {
+            attester: ATTESTER,
+            schema: over?.anchorSchema ?? SCHEMAS.anchor,
+            data: encodeAbiParameters(
+              [{ type: 'string' }, { type: 'bytes32' }],
+              ['x.txt', over?.anchorBucket ?? SCHEMAS.data],
+            ),
+          }
         }
         return { attester: over?.attester ?? ATTESTER, schema: over?.schema ?? SCHEMAS.data }
       }
@@ -988,6 +1005,23 @@ describe('makePinsNs', () => {
     const err = await submitEdgePlan(plan, foreignCtx).catch((e) => e)
     expect((err as { code?: string }).code).toBe('InvalidArgument')
     expect(String((err as Error).message)).toMatch(/INVISIBLE under your lens/)
+    expect(calls).toHaveLength(0)
+  })
+
+  it('place REFUSES an ANCHOR outside the DATA file bucket (r3741358639)', async () => {
+    // A generic-folder/PROPERTY-key anchor IS an ANCHOR but file resolution
+    // only discovers DATA-bucket terminals.
+    const { ctx, calls } = makeSubmitCtx()
+    const pins = makePinsNs({
+      getDeployment: () => deployment,
+      publicClient: gateClient({ anchorBucket: uid(0) }) as never, // generic bucket
+      submitContext: () => ctx,
+      attester: () => ATTESTER,
+      revoke: async () => uid(0),
+    })
+    const err = await pins.place(ANCHOR, DATA).catch((e) => e)
+    expect((err as { code?: string }).code).toBe('InvalidArgument')
+    expect(String((err as Error).message)).toMatch(/not the DATA file bucket/)
     expect(calls).toHaveLength(0)
   })
 

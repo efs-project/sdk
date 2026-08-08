@@ -251,6 +251,7 @@ contract EFSWritesTest is Test {
     function test_Place_BindsDataAtAnchor() public {
         bytes32 anchor = keccak256("FILE_ANCHOR");
         eas.seedSchema(anchor, schemas.anchor);
+        eas.seedAnchorSlot(anchor, keccak256("P"), "f.txt", schemas.data);
         vm.prank(ALICE);
         bytes32 pinUID =
             consumer.place(IEFSIndexerWrite(address(indexer)), schemas, anchor, DATA_UID);
@@ -335,6 +336,7 @@ contract EFSWritesTest is Test {
     function test_Place_EmitsEFSFileWritten() public {
         bytes32 anchor = keccak256("FILE_ANCHOR_E");
         eas.seedSchema(anchor, schemas.anchor); // the definition-side gate
+        eas.seedAnchorSlot(anchor, keccak256("P"), "f.txt", schemas.data); // DATA bucket
         vm.expectEmit(true, true, false, true, address(consumer));
         emit EFSWriter.EFSFileWritten(anchor, DATA_UID, _uid(0));
         vm.prank(ALICE);
@@ -366,11 +368,26 @@ contract EFSWritesTest is Test {
         // no seedActiveMirrors — zero mirrors
         bytes32 a = keccak256("A");
         eas.seedSchema(a, schemas.anchor); // pass the definition gate; fail on mirrors
+        eas.seedAnchorSlot(a, keccak256("P"), "f.txt", schemas.data);
         vm.prank(ALICE);
         vm.expectRevert(
             abi.encodeWithSelector(EFSLib.NoActiveMirror.selector, bareData, address(consumer))
         );
         consumer.place(IEFSIndexerWrite(address(indexer)), schemas, a, bareData);
+    }
+
+    /// @notice place() rejects an ANCHOR outside the DATA file bucket (r3741358639's
+    ///         Solidity twin): a generic-folder/PROPERTY-key anchor is undiscoverable
+    ///         by file resolution even though it IS an ANCHOR.
+    function test_Place_RevertsOnNonFileBucketAnchor() public {
+        bytes32 folderAnchor = keccak256("A_GENERIC_FOLDER");
+        eas.seedSchema(folderAnchor, schemas.anchor);
+        eas.seedAnchorSlot(folderAnchor, keccak256("P"), "docs", bytes32(0)); // generic bucket
+        vm.prank(ALICE);
+        vm.expectRevert(
+            abi.encodeWithSelector(EFSLib.NotFileBucketAnchor.selector, folderAnchor, bytes32(0))
+        );
+        consumer.place(IEFSIndexerWrite(address(indexer)), schemas, folderAnchor, DATA_UID);
     }
 
     /// @notice place() rejects a NON-ANCHOR definition (r3741271349): path resolution

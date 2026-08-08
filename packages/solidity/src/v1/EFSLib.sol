@@ -112,6 +112,41 @@ library EFSLib {
     ///         can ever find.
     error NotAnchorUID(bytes32 uid, bytes32 schema);
 
+    /// @notice A reused file-ANCHOR names a DIFFERENT slot than the requested
+    ///         `(parentAnchorUID, fileName, DATA)` — its parent, decoded name, or
+    ///         `forSchema` bucket mismatches. Placing there would overwrite another
+    ///         path (or a folder/typed anchor) while the requested path stays
+    ///         unchanged, with the tx and {EFSWriter.EFSFileWritten} still confirming.
+    error AnchorSlotMismatch(bytes32 anchorUID);
+
+    /// @notice A placement ANCHOR lives outside the DATA file bucket (`forSchema !=
+    ///         schemas.data`). File resolution finds terminals via
+    ///         `resolveAnchor(parent, name, DATA)`, so a generic-folder or
+    ///         PROPERTY-key anchor (right schema, wrong bucket) yields a confirmed
+    ///         but undiscoverable placement.
+    error NotFileBucketAnchor(bytes32 anchorUID, bytes32 forSchema);
+
+    /// @dev The reused-anchor SLOT-BINDING gate shared by {writeFile} and the 6-arg
+    ///      {placeExisting}: beyond being an ANCHOR, the reused UID must name EXACTLY
+    ///      the requested `(parent, fileName, DATA)` slot.
+    function _requireAnchorNamesSlot(
+        Attestation memory anchorAtt,
+        bytes32 anchorUID,
+        SchemaUIDs memory schemas,
+        bytes32 parentAnchorUID,
+        string memory fileName
+    ) private pure {
+        if (anchorAtt.schema != schemas.anchor) {
+            revert NotAnchorUID(anchorUID, anchorAtt.schema);
+        }
+        if (anchorAtt.refUID != parentAnchorUID) revert AnchorSlotMismatch(anchorUID);
+        (string memory aName, bytes32 aFor) = abi.decode(anchorAtt.data, (string, bytes32));
+        if (aFor != schemas.data) revert AnchorSlotMismatch(anchorUID);
+        if (keccak256(bytes(aName)) != keccak256(bytes(fileName))) {
+            revert AnchorSlotMismatch(anchorUID);
+        }
+    }
+
     /// @dev The placement helpers' READABILITY proof: require >=1 ACTIVE mirror authored by
     ///      `address(this)` on `dataUID`. Walks the RAW referencing count in filtered
     ///      physical windows (a window may be short WITHOUT being the end — revoked entries
@@ -256,10 +291,16 @@ library EFSLib {
         // confirm (and emit EFSFileWritten) while path resolution — which only
         // reaches ANCHOR definitions — can never discover the placement.
         if (w.existingFileAnchorUID != EMPTY_UID) {
-            Attestation memory anchorAtt = eas.getAttestation(w.existingFileAnchorUID);
-            if (anchorAtt.schema != w.schemas.anchor) {
-                revert NotAnchorUID(w.existingFileAnchorUID, anchorAtt.schema);
-            }
+            // SLOT BINDING (r3741358641): being an ANCHOR is not enough — a valid
+            // anchor from a DIFFERENT slot would place the new DATA at another path
+            // while the caller believes (parentAnchorUID, fileName) was written.
+            _requireAnchorNamesSlot(
+                eas.getAttestation(w.existingFileAnchorUID),
+                w.existingFileAnchorUID,
+                w.schemas,
+                w.parentAnchorUID,
+                w.fileName
+            );
         }
 
         // ── L1: DATA — the content-identity hub ──────────────────────────────────────────────
@@ -411,10 +452,14 @@ library EFSLib {
         // reaches ANCHOR nodes, so a PROPERTY/DATA/nonexistent reused UID would
         // confirm a placement (and emit EFSFileWritten) no reader can find.
         if (existingFileAnchorUID != EMPTY_UID) {
-            Attestation memory anchorAtt = eas.getAttestation(existingFileAnchorUID);
-            if (anchorAtt.schema != schemas.anchor) {
-                revert NotAnchorUID(existingFileAnchorUID, anchorAtt.schema);
-            }
+            // SLOT BINDING (r3741358641) — same rule as {writeFile}'s reuse gate.
+            _requireAnchorNamesSlot(
+                eas.getAttestation(existingFileAnchorUID),
+                existingFileAnchorUID,
+                schemas,
+                parentAnchorUID,
+                fileName
+            );
         }
         _requireActiveMirror(indexer, schemas, dataUID);
         fileAnchorUID = existingFileAnchorUID != EMPTY_UID
@@ -592,6 +637,11 @@ library EFSLib {
         // placement is undiscoverable (see {NotAnchorUID}).
         Attestation memory anchorAtt = eas.getAttestation(anchor);
         if (anchorAtt.schema != schemas.anchor) revert NotAnchorUID(anchor, anchorAtt.schema);
+        // No requested (parent, name) slot here — the anchor is caller-chosen —
+        // but it must still live in the DATA FILE BUCKET (r3741358639's Solidity
+        // twin): file resolution can only discover DATA-bucket terminals.
+        (, bytes32 anchorFor) = abi.decode(anchorAtt.data, (string, bytes32));
+        if (anchorFor != schemas.data) revert NotFileBucketAnchor(anchor, anchorFor);
         _requireActiveMirror(indexer, schemas, dataUID);
         pinUID = _attestPin(eas, schemas.pin, anchor, dataUID);
     }

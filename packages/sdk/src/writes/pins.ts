@@ -18,6 +18,7 @@
  */
 
 import type { Address, Hex } from 'viem'
+import { decodeAbiParameters } from 'viem'
 import { edgeResolverAbi } from '../chain/abi/edgeResolver.js'
 import {
   getReferencingBySchemaAndAttesterAbi,
@@ -88,7 +89,7 @@ export function makePinsNs(deps: PinsNsDeps): PinsNs {
           functionName: 'getAttestation',
           args: [dataUID],
         }),
-        read<{ schema: Hex }>(pc, {
+        read<{ schema: Hex; data: Hex }>(pc, {
           address: dep.contracts.eas,
           abi: getAttestationAbi,
           functionName: 'getAttestation',
@@ -115,6 +116,29 @@ export function makePinsNs(deps: PinsNsDeps): PinsNs {
       if (anchorAtt.schema.toLowerCase() !== dep.schemas.anchor.toLowerCase()) {
         throw new EfsError(
           `efs.graph.pins.place: the definition ${anchor} is not an ANCHOR attestation (schema ${anchorAtt.schema}) — path resolution discovers placements through ANCHOR nodes only, so this PIN would confirm but never be found.`,
+          { code: 'InvalidArgument' },
+        )
+      }
+      // The anchor must live in the DATA FILE BUCKET (r3741358639): file
+      // resolution finds terminals via `resolveAnchor(parent, name, DATA)`, so
+      // a generic-folder or PROPERTY-key ANCHOR (right schema, wrong bucket)
+      // yields an undiscoverable placement.
+      let anchorBucket: Hex
+      try {
+        const decoded = decodeAbiParameters(
+          [{ type: 'string' }, { type: 'bytes32' }],
+          anchorAtt.data,
+        ) as [string, Hex]
+        anchorBucket = decoded[1]
+      } catch {
+        throw new EfsError(
+          `efs.graph.pins.place: the definition ${anchor}'s payload does not decode as (name, forSchema) — it does not name a file slot.`,
+          { code: 'InvalidArgument' },
+        )
+      }
+      if (anchorBucket.toLowerCase() !== dep.schemas.data.toLowerCase()) {
+        throw new EfsError(
+          `efs.graph.pins.place: the definition ${anchor} lives in bucket ${anchorBucket}, not the DATA file bucket — file resolution can never discover this placement (folder/typed anchors are not file slots).`,
           { code: 'InvalidArgument' },
         )
       }

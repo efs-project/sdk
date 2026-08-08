@@ -152,6 +152,8 @@ contract MockEAS is IEAS {
     ///      (self-authorship + DATA-schema) can read a UID's attestation.
     mapping(bytes32 => address) public seededAuthor;
     mapping(bytes32 => bytes32) public seededSchema;
+    mapping(bytes32 => bytes32) public seededRefUID;
+    mapping(bytes32 => bytes) public seededData;
 
     function seedAuthor(bytes32 uid, address author) external {
         seededAuthor[uid] = author;
@@ -161,10 +163,21 @@ contract MockEAS is IEAS {
         seededSchema[uid] = schema;
     }
 
+    /// @dev Seed an ANCHOR's slot-defining fields (parent + encoded (name, forSchema))
+    ///      for the placement gates' slot-binding/bucket checks.
+    function seedAnchorSlot(bytes32 uid, bytes32 parent, string memory name, bytes32 forSchema)
+        external
+    {
+        seededRefUID[uid] = parent;
+        seededData[uid] = abi.encode(name, forSchema);
+    }
+
     function getAttestation(bytes32 uid) external view returns (Attestation memory a) {
         a.uid = uid;
         a.attester = seededAuthor[uid];
         a.schema = seededSchema[uid];
+        a.refUID = seededRefUID[uid];
+        a.data = seededData[uid];
     }
 
     function isAttestationValid(bytes32) external pure returns (bool) {
@@ -365,6 +378,7 @@ contract EFSWriterTest is Test {
         EFSLib.FileWrite memory w = _minimalWrite();
         bytes32 existing = keccak256("existing_file_anchor");
         eas.seedSchema(existing, schemas.anchor); // the reused-anchor gate (r3741308922)
+        eas.seedAnchorSlot(existing, PARENT, "hello.txt", schemas.data); // slot binding
         w.existingFileAnchorUID = existing;
 
         vm.prank(ALICE);
@@ -509,6 +523,7 @@ contract EFSWriterTest is Test {
         eas.seedAuthor(existingData, address(consumer));
         eas.seedSchema(existingData, schemas.data);
         eas.seedSchema(existingAnchor, schemas.anchor); // the reused-anchor gate
+        eas.seedAnchorSlot(existingAnchor, PARENT, "linked.txt", schemas.data); // slot binding
         indexer.seedActiveMirrors(existingData, 1);
 
         vm.prank(ALICE);
@@ -535,6 +550,20 @@ contract EFSWriterTest is Test {
 
         // No ANCHOR-schema attestation: the permanent file-ANCHOR was NOT re-minted.
         assertTrue(pin.schema != schemas.anchor, "no fresh file-ANCHOR minted on relink");
+    }
+
+    /// @notice writeFile refuses a reused anchor from a DIFFERENT slot (r3741358641):
+    ///         a valid ANCHOR under another parent would overwrite another path while
+    ///         the caller believes (parentAnchorUID, fileName) was written.
+    function test_WriteFile_RevertsOnWrongSlotReuse() public {
+        EFSLib.FileWrite memory w = _minimalWrite();
+        bytes32 foreignSlot = keccak256("ANCHOR_OF_ANOTHER_PATH");
+        eas.seedSchema(foreignSlot, schemas.anchor);
+        eas.seedAnchorSlot(foreignSlot, keccak256("OTHER_PARENT"), "hello.txt", schemas.data);
+        w.existingFileAnchorUID = foreignSlot;
+        vm.prank(ALICE);
+        vm.expectRevert(abi.encodeWithSelector(EFSLib.AnchorSlotMismatch.selector, foreignSlot));
+        consumer.writeFile(w);
     }
 
     /// @notice writeFile refuses a reused existingFileAnchorUID that is NOT an ANCHOR
@@ -613,6 +642,28 @@ contract EFSWriterTest is Test {
         );
         consumer.placeExistingAt(
             IEFSIndexerWrite(address(indexer)), schemas, existingData, PARENT, "x.txt", notAnchor
+        );
+    }
+
+    /// @notice placeExisting refuses a reused anchor whose NAME differs from the
+    ///         requested fileName (r3741358641) — same slot-binding gate as writeFile.
+    function test_PlaceExistingAt_RevertsOnWrongNameReuse() public {
+        bytes32 existingData = keccak256("PRE_EXISTING_DATA_5");
+        eas.seedAuthor(existingData, address(consumer));
+        eas.seedSchema(existingData, schemas.data);
+        indexer.seedActiveMirrors(existingData, 1);
+        bytes32 otherFile = keccak256("ANCHOR_OF_OTHER_FILE");
+        eas.seedSchema(otherFile, schemas.anchor);
+        eas.seedAnchorSlot(otherFile, PARENT, "other.txt", schemas.data);
+        vm.prank(ALICE);
+        vm.expectRevert(abi.encodeWithSelector(EFSLib.AnchorSlotMismatch.selector, otherFile));
+        consumer.placeExistingAt(
+            IEFSIndexerWrite(address(indexer)),
+            schemas,
+            existingData,
+            PARENT,
+            "linked.txt",
+            otherFile
         );
     }
 
