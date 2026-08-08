@@ -364,6 +364,7 @@ contract EFSWriterTest is Test {
     function test_WriteFile_ReusesExistingFileAnchor() public {
         EFSLib.FileWrite memory w = _minimalWrite();
         bytes32 existing = keccak256("existing_file_anchor");
+        eas.seedSchema(existing, schemas.anchor); // the reused-anchor gate (r3741308922)
         w.existingFileAnchorUID = existing;
 
         vm.prank(ALICE);
@@ -534,6 +535,22 @@ contract EFSWriterTest is Test {
 
         // No ANCHOR-schema attestation: the permanent file-ANCHOR was NOT re-minted.
         assertTrue(pin.schema != schemas.anchor, "no fresh file-ANCHOR minted on relink");
+    }
+
+    /// @notice writeFile refuses a reused existingFileAnchorUID that is NOT an ANCHOR
+    ///         (r3741308922): the full-write funnel checks BEFORE minting the DATA
+    ///         graph, so no attestation lands for an undiscoverable placement.
+    function test_WriteFile_RevertsOnNonAnchorReuse() public {
+        EFSLib.FileWrite memory w = _minimalWrite();
+        bytes32 notAnchor = keccak256("A_DATA_AS_ANCHOR");
+        eas.seedSchema(notAnchor, schemas.data);
+        w.existingFileAnchorUID = notAnchor;
+        vm.prank(ALICE);
+        vm.expectRevert(
+            abi.encodeWithSelector(EFSLib.NotAnchorUID.selector, notAnchor, schemas.data)
+        );
+        consumer.writeFile(w);
+        assertEq(eas.callCount(), 0, "nothing minted before the gate");
     }
 
     /// @notice The 6-arg form with a zero `existingFileAnchorUID` behaves like the 4-arg form:

@@ -250,6 +250,18 @@ library EFSLib {
         internal
         returns (bytes32 dataUID, bytes32 fileAnchorUID, bytes32 placementPinUID)
     {
+        // A REUSED file-ANCHOR must actually BE an ANCHOR (r3741308922) — the same
+        // definition gate as {place}/{placeExisting}, checked BEFORE the DATA graph
+        // mints: a PROPERTY/DATA/nonexistent reused UID would let the whole write
+        // confirm (and emit EFSFileWritten) while path resolution — which only
+        // reaches ANCHOR definitions — can never discover the placement.
+        if (w.existingFileAnchorUID != EMPTY_UID) {
+            Attestation memory anchorAtt = eas.getAttestation(w.existingFileAnchorUID);
+            if (anchorAtt.schema != w.schemas.anchor) {
+                revert NotAnchorUID(w.existingFileAnchorUID, anchorAtt.schema);
+            }
+        }
+
         // ── L1: DATA — the content-identity hub ──────────────────────────────────────────────
         // EFSIndexer.onAttest DATA branch: refUID must be EMPTY_UID, non-revocable,
         // expirationTime 0, and EMPTY data (EFSIndexer.sol:472-475). The empty schema encodes to
