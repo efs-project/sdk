@@ -17,6 +17,7 @@ import {
   MAX_SINGLE_CHUNK_BYTES,
   MultiChunkUnsupported,
   OnchainDeployUnconfirmed,
+  OnchainSendUnknown,
   type OnchainStoreContext,
   OnchainStoreIncomplete,
   buildSstore2InitCode,
@@ -276,6 +277,33 @@ describe('storeOnchain', () => {
     expect(checks).toBe(3) // chunk deploy + chunk wait passed; manager deploy guard threw
     expect(calls.filter((c) => c.kind === 'chunk')).toHaveLength(1) // chunk did deploy
     expect(calls.filter((c) => c.kind === 'manager')).toHaveLength(0) // manager never sent
+  })
+})
+
+describe('chunk send outcome (review r3740994134)', () => {
+  it('a CODE-LESS transport loss on the CHUNK send is an UNKNOWN broadcast, never a plain failure', async () => {
+    // The RPC may have accepted the deploy before the connection dropped — a
+    // classified "ordinary" error would invite a fs.write retry that pays for
+    // a duplicate chunk while the original mines.
+    const { ctx, calls } = makeCtx()
+    ;(ctx.walletClient as { sendTransaction: unknown }).sendTransaction = async () => {
+      throw new Error('fetch failed: socket hang up') // no code — pure transport loss
+    }
+    const err = await storeOnchain(new Uint8Array([1, 2, 3]), ctx).catch((e) => e)
+    expect(err).toBeInstanceOf(OnchainSendUnknown)
+    expect((err as OnchainSendUnknown).what).toBe('SSTORE2 chunk')
+    expect(String((err as Error).message)).toMatch(/UNKNOWN and it may STILL MINE/)
+    expect(calls).toHaveLength(0) // nothing provably landed
+  })
+
+  it('a coded refusal on the CHUNK send stays the classified error (clean retry)', async () => {
+    const { ctx } = makeCtx()
+    ;(ctx.walletClient as { sendTransaction: unknown }).sendTransaction = async () => {
+      throw Object.assign(new Error('User rejected the request.'), { code: 4001 })
+    }
+    const err = await storeOnchain(new Uint8Array([1, 2, 3]), ctx).catch((e) => e)
+    expect(err).not.toBeInstanceOf(OnchainSendUnknown)
+    expect((err as { code?: string }).code).toBe('UserRejected')
   })
 })
 

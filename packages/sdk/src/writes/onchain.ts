@@ -231,6 +231,8 @@ function bytesToHex(bytes: Uint8Array): string {
  * @throws {EfsError} a classified wallet/RPC failure (`UserRejected`/`RpcError`/…), or
  *   if a deploy receipt carries no `contractAddress` (a deploy that didn't create a
  *   contract — a wrong receipt or a non-deploy tx).
+ * @throws {OnchainSendUnknown} the CHUNK deploy's send failed without a response —
+ *   broadcast state unknown, no hash; it may still mine (never retry blind).
  */
 export async function storeOnchain(
   bytes: Uint8Array,
@@ -255,9 +257,19 @@ export async function storeOnchain(
   // networks since the caller's fs.write preflight (parent reads happen in between).
   await ctx.assertChain?.()
   const initCode = buildSstore2InitCode(bytes)
-  const chunkTx = await classified(() =>
-    ctx.walletClient.sendTransaction({ data: initCode, ...fwd }),
-  )
+  let chunkTx: Hex
+  try {
+    chunkTx = await classified(() => ctx.walletClient.sendTransaction({ data: initCode, ...fwd }))
+  } catch (cause) {
+    // Refusal-vs-transport split, same rule as the manager leg below and the
+    // layered submitter (r3740994134): a refusal RESPONSE proves nothing was
+    // broadcast — the classified error propagates and a retry is clean. A
+    // code-less transport failure proves nothing: the chunk deploy may have
+    // been accepted and still mine (billing gas) with no hash to reconcile
+    // by — a blind fs.write retry would pay for a DUPLICATE chunk.
+    if (isDefiniteSendRefusal(cause)) throw cause
+    throw new OnchainSendUnknown('SSTORE2 chunk', cause)
+  }
   const chunkAddress = await requireContractAddress(ctx, chunkTx, 'SSTORE2 chunk')
 
   // 2. Deploy the chunk manager wrapping the chunk address (single-element array).
@@ -421,6 +433,29 @@ export class OnchainStoreIncomplete extends EfsError {
     this.chunkTx = chunkTx
     this.managerBroadcastUnknown = unknownSend
     if (managerTx !== undefined) this.managerTx = managerTx
+  }
+}
+
+/** A storage deploy's SEND failed WITHOUT a response — the transport dropped
+ * after the request may already have reached the node, so whether the deploy
+ * was broadcast is UNKNOWN: it may still mine and bill gas, and there is NO
+ * hash to reconcile by. Distinct from {@link OnchainDeployUnconfirmed} (a hash
+ * exists, only the receipt is unknown) and from a classified refusal (a
+ * RESPONSE proves nothing was sent — that propagates as the classified error).
+ * Check the signing account's pending transactions/nonce before retrying — a
+ * blind fs.write retry can pay for a DUPLICATE deploy. */
+export class OnchainSendUnknown extends EfsError {
+  override name = 'OnchainSendUnknown'
+  /** Which deploy this was (`SSTORE2 chunk` today; the manager leg carries its
+   * uncertainty on `OnchainStoreIncomplete.managerBroadcastUnknown` instead,
+   * because the landed chunk state must ride along there). */
+  readonly what: string
+  constructor(what: string, cause: unknown) {
+    super(
+      `EFS write: the on-chain ${what} deploy's send failed WITHOUT a response — whether it was broadcast is UNKNOWN and it may STILL MINE and bill gas (no tx hash is available). Check the signing account's pending transactions/nonce before retrying: a blind fs.write retry can pay for a DUPLICATE ${what}.`,
+      { code: 'PartialBatchFailure', cause },
+    )
+    this.what = what
   }
 }
 
