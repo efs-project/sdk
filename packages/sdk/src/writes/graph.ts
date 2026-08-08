@@ -384,22 +384,45 @@ export function buildFileWriteGraph(input: FileWriteGraphInput): FileWriteGraph 
     const existingFileAnchorUID = input.existingFileAnchorUID
     const fileAnchorAtts =
       existingFileAnchorUID === undefined ? [buildFileAnchor(input, m + 1)] : []
+    // Overview marker (ADR-0011) applies to HARDLINK plans too (r3741021024): a
+    // hardlinked README must carry the `system` TAG in a layer STRICTLY BEFORE
+    // its placement PIN — the early return previously dropped the marker,
+    // leaving the Overview visible in safety-filtered directory listings. Same
+    // shape as the normal path: TAG targets the file's own anchor (symbolic on
+    // a fresh mint, concrete on relink) and `ov` shifts the PIN + TAGs.
+    const overviewTag: PlannedAttestation[] =
+      input.overviewSystemTagDef !== undefined
+        ? [
+            {
+              ref: REF.OVERVIEW_SYSTEM_TAG,
+              layer: m + 2,
+              kind: 'TAG',
+              schema: schemas.tag,
+              data: tagEncoder.encodeData([input.overviewSystemTagDef, VISIBILITY_TAG_WEIGHT]),
+              revocable: true, // EdgeResolver.sol — TAG must be revocable
+              refUID: existingFileAnchorUID ?? { ref: REF.FILE_ANCHOR },
+              dataRefs: [],
+            },
+          ]
+        : []
     const placementPin = buildPlacementPin(
       schemas,
       input.content.dataUID,
-      m + 2,
+      m + 2 + ov,
       existingFileAnchorUID,
     )
     // Visibility TAGs still apply: placing an existing file at a new path must make
-    // the uploader's ancestor folders show in their lens. The hardlink graph's PINs
-    // live at m + 2 (no reserved-key triplets), so TAGs follow at m + 3.
-    const visibilityTags = buildVisibilityTags(input, m + 3)
+    // the uploader's ancestor folders show in their lens. The hardlink graph's PIN
+    // lives at m + 2 (+`ov` when the Overview TAG occupies that layer first), so
+    // TAGs follow one layer later.
+    const visibilityTags = buildVisibilityTags(input, m + 3 + ov)
     return {
       profile: 'efs/v1',
       hardlink: true,
       attestations: stableSortByLayer([
         ...folderAttestations,
         ...fileAnchorAtts,
+        ...overviewTag,
         placementPin,
         ...visibilityTags,
       ]),

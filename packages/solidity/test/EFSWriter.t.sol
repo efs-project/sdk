@@ -132,8 +132,17 @@ contract MockEAS is IEAS {
         revert("unused");
     }
 
-    function getAttestation(bytes32) external pure returns (Attestation memory) {
-        revert("unused");
+    /// @dev Seeded author registry so EFSLib's placeExisting self-authorship gate can
+    ///      read a DATA's attester. Everything else on the struct stays zeroed.
+    mapping(bytes32 => address) public seededAuthor;
+
+    function seedAuthor(bytes32 uid, address author) external {
+        seededAuthor[uid] = author;
+    }
+
+    function getAttestation(bytes32 uid) external view returns (Attestation memory a) {
+        a.uid = uid;
+        a.attester = seededAuthor[uid];
     }
 
     function isAttestationValid(bytes32) external pure returns (bool) {
@@ -370,6 +379,7 @@ contract EFSWriterTest is Test {
     /// @notice Hardlink path: file-ANCHOR + single placement PIN pointing at a PRE-EXISTING DATA.
     function test_PlaceExisting_SinglePinHardlink() public {
         bytes32 existingData = keccak256("PRE_EXISTING_DATA");
+        eas.seedAuthor(existingData, address(consumer)); // self-authored — the gate passes
 
         vm.prank(ALICE);
         (bytes32 fileAnchorUID, bytes32 pinUID) =
@@ -408,6 +418,7 @@ contract EFSWriterTest is Test {
     function test_PlaceExistingAt_ReusesAnchorOnRelink() public {
         bytes32 existingData = keccak256("PRE_EXISTING_DATA_2");
         bytes32 existingAnchor = keccak256("ALREADY_RESOLVED_FILE_ANCHOR");
+        eas.seedAuthor(existingData, address(consumer));
 
         vm.prank(ALICE);
         (bytes32 fileAnchorUID, bytes32 pinUID) =
@@ -433,10 +444,31 @@ contract EFSWriterTest is Test {
     ///         it MINTS a fresh file-ANCHOR (place at a NEW path).
     function test_PlaceExistingAt_ZeroAnchorMintsLikeNewPath() public {
         bytes32 existingData = keccak256("PRE_EXISTING_DATA_3");
+        eas.seedAuthor(existingData, address(consumer));
         vm.prank(ALICE);
         consumer.placeExistingAt(schemas, existingData, PARENT, "fresh.txt", bytes32(0));
         assertEq(eas.callCount(), 2, "new path = anchor + pin (2 attestations)");
         assertEq(eas.callAt(0).schema, schemas.anchor, "minted a fresh file-ANCHOR");
+    }
+
+    /// @notice FOREIGN-authored DATA is rejected (r3741021021): lens-scoped reads key
+    ///         mirrors/properties on the placement attester, so a foreign hardlink would
+    ///         resolve to a UID with no retrieval metadata — an unreadable advertised file.
+    function test_PlaceExisting_RevertsOnForeignData() public {
+        bytes32 foreignData = keccak256("FOREIGN_DATA");
+        eas.seedAuthor(foreignData, address(0xBEEF)); // authored by someone else
+        vm.prank(ALICE);
+        vm.expectRevert(
+            abi.encodeWithSelector(EFSLib.ForeignDataUID.selector, foreignData, address(0xBEEF))
+        );
+        consumer.placeExisting(schemas, foreignData, PARENT, "foreign.txt");
+        // An UNKNOWN UID (empty attestation, attester 0) is foreign too.
+        bytes32 unknownData = keccak256("NEVER_ATTESTED");
+        vm.prank(ALICE);
+        vm.expectRevert(
+            abi.encodeWithSelector(EFSLib.ForeignDataUID.selector, unknownData, address(0))
+        );
+        consumer.placeExisting(schemas, unknownData, PARENT, "unknown.txt");
     }
 
     /// @notice The library inlines, so EAS records the CALLER (the consumer) as attester, never

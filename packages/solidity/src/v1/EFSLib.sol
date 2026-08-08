@@ -6,6 +6,7 @@ import {
     AttestationRequest,
     AttestationRequestData
 } from "@ethereum-attestation-service/eas-contracts/contracts/IEAS.sol";
+import {Attestation} from "@ethereum-attestation-service/eas-contracts/contracts/Common.sol";
 
 /// @title EFSLib
 /// @notice Internal library for **writing** the Ethereum File System (EFS) from *your own*
@@ -45,6 +46,15 @@ library EFSLib {
     /// @dev EAS empty/uninitialized UID — a `refUID` of "none". Mirrors
     ///      `eas-contracts/Common.sol`'s `EMPTY_UID`.
     bytes32 internal constant EMPTY_UID = bytes32(0);
+
+    /// @notice {placeExisting} requires the DATA to be authored by the CALLING contract.
+    /// @dev    Lens-scoped reads key a file's retrieval metadata (MIRRORs, `contentHash`/
+    ///         `contentType` PROPERTYs) on the PLACEMENT attester (`resolvedBy`): a hardlink
+    ///         to a foreign-authored DATA would resolve to a UID with NONE of that metadata
+    ///         visible under the placer's lens — an advertised file that cannot be read or
+    ///         verified. Re-publish foreign content with {writeFile} instead (attesting your
+    ///         own DATA + mirrors + properties), or hardlink only your own DATA.
+    error ForeignDataUID(bytes32 dataUID, address author);
     /// @dev `recipient` is always the zero address for EFS write attestations.
     address internal constant ZERO_RECIPIENT = address(0);
     /// @dev `expirationTime` is always 0 — EFS reads filter on revocation/index state, never on
@@ -283,6 +293,9 @@ library EFSLib {
     ///         via `EFSReader.resolveAnchor(parentAnchorUID, fileName, schemas.data)` (⇒ {EMPTY_UID}
     ///         when the path is new).
     /// @param  existingFileAnchorUID The pre-resolved file-ANCHOR to reuse, or {EMPTY_UID} to mint.
+    /// @dev    Reverts {ForeignDataUID} unless `dataUID` was authored by the calling contract —
+    ///         the shortcut reuses the author's existing MIRROR/PROPERTY metadata, which only
+    ///         resolves under the placer's lens when placer == author.
     function placeExisting(
         IEAS eas,
         SchemaUIDs memory schemas,
@@ -291,6 +304,12 @@ library EFSLib {
         string memory fileName,
         bytes32 existingFileAnchorUID
     ) internal returns (bytes32 fileAnchorUID, bytes32 placementPinUID) {
+        // Self-authorship gate: the hardlink shortcut reuses the DATA's EXISTING
+        // retrieval metadata, which lens-scoped reads resolve per-attester — so it
+        // only works when the placer IS the author (the metadata then applies to
+        // the new placement automatically). See {ForeignDataUID}.
+        Attestation memory att = eas.getAttestation(dataUID);
+        if (att.attester != address(this)) revert ForeignDataUID(dataUID, att.attester);
         fileAnchorUID = existingFileAnchorUID != EMPTY_UID
             ? existingFileAnchorUID
             : _attestAnchor(eas, schemas.anchor, fileName, schemas.data, parentAnchorUID);

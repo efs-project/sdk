@@ -92,6 +92,23 @@ describe('buildFileWriteGraph — Overview `system` TAG before placement (ADR-00
     expect(tag.revocable).toBe(true)
   })
 
+  it('applies the marker to HARDLINK plans too — TAG strictly before the PIN (r3741021024)', () => {
+    // The hardlink early-return previously dropped `overviewSystemTagDef`
+    // entirely, placing the README untagged (visible in filtered listings).
+    const { hardlink, attestations } = buildFileWriteGraph({
+      ...baseInput,
+      content: { kind: 'hardlink' as const, dataUID: uid(0xda7a) },
+      overviewSystemTagDef: SYSTEM_DEF,
+    })
+    expect(hardlink).toBe(true)
+    const tag = find(attestations, REF.OVERVIEW_SYSTEM_TAG)
+    const pin = find(attestations, REF.PLACEMENT_PIN)
+    expect(tag.refUID).toEqual({ ref: REF.FILE_ANCHOR }) // the file's own anchor
+    expect(tag.layer).toBeLessThan(pin.layer) // strictly earlier multiAttest
+    expect(tag.layer).toBe(2)
+    expect(pin.layer).toBe(3)
+  })
+
   it('shifts the marker + PIN layers when ancestors are also created (mkdir -p)', () => {
     const { attestations } = buildFileWriteGraph({
       ...baseInput,
