@@ -32,7 +32,7 @@
 
 import type { Hex } from 'viem'
 import type { EfsDeployment } from '../chain/deployments.js'
-import { EfsError, IndexingIncomplete } from '../errors.js'
+import { EfsError, IndexingIncomplete, RevokeUnconfirmed } from '../errors.js'
 import { type ReadContext, resolveAttesters } from '../reads/context.js'
 import {
   canonicalizeSameAs,
@@ -125,7 +125,9 @@ export interface RedirectsNs {
    * revocation mirror with `EFSIndexer.indexRevocation(uid)` (sequenced AFTER
    * the revoke mines — the contract requires it; two txs/prompts total).
    * @throws {IndexingIncomplete} when the revoke landed but the mirror tx did
-   *   not — the redirect keeps being SERVED until `efs.index(uid)` repairs it. */
+   *   not — the redirect keeps being SERVED until `efs.index(uid)` repairs it.
+   * @throws {RevokeUnconfirmed} when the broadcast revoke's receipt could not
+   *   be confirmed (unknown outcome — may still mine; carries `revokeTx`). */
   remove(redirectUID: Hex, opts?: RedirectRemoveOptions): Promise<RedirectRemoveReceipt>
   /** The SELECTED active redirect FROM `from` under the lens (first-attester-wins,
    * lowest-UID tie-break — specs/09 §5/§8), or `undefined` when no lens member
@@ -243,7 +245,17 @@ export function makeRedirectsNs(deps: RedirectsNsDeps): RedirectsNs {
       // every clause (and the repair would report 'already-indexed', closing
       // the loop on the lie). Only an indexing-leg failure AFTER a successful
       // revoke wait is the recoverable partial state.
-      await deps.waitForReceipt(revokeTx) // throws raw on revert/unknown — NOT IndexingIncomplete
+      try {
+        await deps.waitForReceipt(revokeTx)
+      } catch (err) {
+        // A CONFIRMED reverted revoke is a definite failure — the redirect is
+        // still active; it propagates raw (ContractReverted). Anything else
+        // (RPC loss, provider drift during the wait) is an UNKNOWN outcome:
+        // the revoke may still mine, and a blind resend would REVERT in EAS
+        // (AlreadyRevoked) once it does. Preserve the in-flight hash.
+        if ((err as { code?: string } | undefined)?.code === 'ContractReverted') throw err
+        throw new RevokeUnconfirmed(redirectUID, revokeTx, err)
+      }
       try {
         const indexRevocationTx = await deps.indexerCall('indexRevocation', redirectUID)
         return { revokeTx, indexRevocationTx }

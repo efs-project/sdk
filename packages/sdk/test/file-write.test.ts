@@ -1033,3 +1033,26 @@ describe('writeFileTier1 — error paths', () => {
     expect(deploys).toHaveLength(0)
   })
 })
+
+describe('storage survives FIRST-layer preflight failures (review r3740688505)', () => {
+  it('an abort between the landed deploys and the first EAS layer wraps with .storage', async () => {
+    const { ctx, deploys } = makeCtx()
+    const controller = new AbortController()
+    // Fire the abort as the MANAGER deploy returns — storage fully landed,
+    // the first EAS layer not yet sent. The submitter's preflight abort
+    // previously escaped RAW with no storage attached.
+    const origDeploy = ctx.walletClient.deployContract.bind(ctx.walletClient)
+    ;(ctx.walletClient as { deployContract: unknown }).deployContract = async (a: unknown) => {
+      const h = await (origDeploy as (x: unknown) => Promise<unknown>)(a)
+      controller.abort()
+      return h
+    }
+    const err = await writeFileTier1('/docs/readme.md', CONTENT, ctx, {
+      signal: controller.signal,
+    }).catch((e) => e)
+    expect(deploys).toHaveLength(2) // storage landed and is paid for
+    const w = err as { storage?: { web3Uri?: string }; cause?: unknown }
+    expect(w.storage?.web3Uri).toMatch(/^web3:\/\/0x/)
+    expect(String((w.cause as Error)?.name ?? w.cause)).toMatch(/Abort/i)
+  })
+})

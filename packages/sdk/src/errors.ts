@@ -251,6 +251,30 @@ export class PartialBatchFailure extends EfsError {
  * idempotent, so `efs.index(uid)` (from ANY funded account) completes it.
  * Carries the landed handle so nothing is lost.
  */
+/** A REDIRECT revoke tx was BROADCAST but its receipt could not be confirmed
+ * (RPC loss / provider drift during the wait) — the outcome is UNKNOWN: the
+ * revoke may still mine, and a blind resend would REVERT in EAS
+ * (AlreadyRevoked) once it does. Distinct from a CONFIRMED reverted receipt
+ * (which propagates as `ContractReverted` — the redirect is definitely still
+ * active) and from {@link IndexingIncomplete} (revoke confirmed, indexing leg
+ * missing). Carries the in-flight hash; once the tx's fate is known, a mined
+ * revoke still needs `efs.index(uid)` for the indexer's revocation mirror. */
+export class RevokeUnconfirmed extends EfsError {
+  override name = 'RevokeUnconfirmed'
+  /** The REDIRECT attestation being revoked. */
+  readonly uid: string
+  /** The broadcast revoke transaction whose receipt is unconfirmed. */
+  readonly revokeTx: string
+  constructor(uid: string, revokeTx: string, cause: unknown) {
+    super(
+      `EFS redirects: the revoke tx ${revokeTx} for ${uid} was broadcast but its receipt could not be confirmed — it may STILL MINE. Check its fate before retrying (a resend REVERTS once it mines: AlreadyRevoked); after it mines, run efs.index(${uid}) to sync the indexer's revocation mirror.`,
+      { code: 'PartialBatchFailure', cause },
+    )
+    this.uid = uid
+    this.revokeTx = revokeTx
+  }
+}
+
 export class IndexingIncomplete extends EfsError {
   override name = 'IndexingIncomplete'
   /** Which indexing leg failed. */

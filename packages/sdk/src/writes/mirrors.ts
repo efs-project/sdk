@@ -231,8 +231,13 @@ export function makeMirrorsNs(deps: MirrorsNsDeps): MirrorsNs {
       // submit runs per layer, run before the read.
       await ctx.assertChain?.()
       const dep = deps.getDeployment()
+      // The transport lookup FEEDS the plan — run it through the chain-guarded
+      // client pinned to the deployment (pre+post-checked), not the raw one:
+      // the one-time preflight above cannot cover a provider that drifts for
+      // this read and back before submit's own per-layer guard.
       const transportDefinition = await resolveMirrorTransport(
-        deps.publicClient as unknown as ResolvePublicClient,
+        (deps.guardReadClient?.(dep.chainId) ??
+          deps.publicClient) as unknown as ResolvePublicClient,
         dep,
         opts.uri,
         opts.transport,

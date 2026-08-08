@@ -527,11 +527,26 @@ export async function writeFileTier1(
   try {
     return await submitter.submit(plan, submitterCtx)
   } catch (err) {
-    if (
-      storage !== undefined &&
-      (err instanceof WriteNotSentError || err instanceof WriteRevertedError)
-    ) {
-      err.storage = storage
+    if (storage !== undefined) {
+      if (err instanceof WriteNotSentError || err instanceof WriteRevertedError) {
+        err.storage = storage
+      } else {
+        // A FIRST-layer preflight failure (abort / WrongChain before any EAS
+        // layer) escapes the submitter RAW because its landed-ref map is empty
+        // — but the storage deploys already landed and are paid for. Once
+        // ANYTHING landed, the post-landed-wraps rule applies: surface it as a
+        // no-attestations-sent partial write carrying the reusable storage
+        // (retry with `storage.web3Uri` as an explicit mirror), with the
+        // original failure as `cause`.
+        const wrapped = new WriteNotSentError(
+          1,
+          plan.attestations.map((a) => a.ref),
+          new Map(),
+          err,
+        )
+        wrapped.storage = storage
+        throw wrapped
+      }
     }
     throw err
   }

@@ -1071,9 +1071,13 @@ export function createEfsV1Client(config: EfsClientConfig): EfsClient {
         const dep = getDeployment()
         // Fail closed if the wallet OR the public client is on a different chain.
         await assertWriteChain(wallet, publicClient, dep.chainId)
+        // ONE guarded planning client for the whole overview write — the ctx
+        // reads AND the /tags/system lookup below (a raw-client lookup there
+        // could accept a chain-B UID into the chain-A plan mid-drift).
+        const guardedPlanning = chainGuardedPublicClient(publicClient, () => dep.chainId)
         const baseCtx = {
           // Same guarded planning client as fs.write — see the write ctx note.
-          publicClient: chainGuardedPublicClient(publicClient, () => dep.chainId),
+          publicClient: guardedPlanning,
           walletClient: wallet,
           deployment: dep,
           account: wallet.account,
@@ -1089,7 +1093,7 @@ export function createEfsV1Client(config: EfsClientConfig): EfsClient {
           ...baseCtx,
           resolveAnchorPath: (path: string) =>
             resolvePathToAnchor(
-              publicClient as unknown as Parameters<typeof resolvePathToAnchor>[0],
+              guardedPlanning as unknown as Parameters<typeof resolvePathToAnchor>[0],
               dep.contracts.indexer,
               path,
             ),

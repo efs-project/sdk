@@ -893,9 +893,22 @@ export const SAFETY_EXCLUDES: readonly string[] = ['system', 'nsfw']
  * payloads surface as the `too-large` variant rather than being materialized. */
 export const MAX_RENDER_BYTES = 256 * 1024
 
-/** Options for an Overview read (extends read options; reserved for future
- * knobs following the `PreviewOptions` precedent). */
-export type OverviewOptions = ReadOptions
+/** Options for an Overview read: the read knobs PLUS the fetch controls the
+ * overview's mirror read actually honors (it fetches arbitrary mirror bytes) —
+ * cancellation, gateway/fetch injection, host policy, transport restriction.
+ * `maxBytes` is deliberately NOT included: the render ceiling is fixed. */
+export type OverviewOptions = ReadOptions &
+  Pick<
+    FetchOptions,
+    | 'signal'
+    | 'transports'
+    | 'ipfsGateways'
+    | 'arweaveGateways'
+    | 'allowPrivateHosts'
+    | 'allowHosts'
+    | 'allowInsecureHttp'
+    | 'fetchImpl'
+  >
 
 /**
  * Result of `fs.overview()` — a discriminated union so "absent" is distinct from

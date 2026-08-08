@@ -26,7 +26,7 @@ import type { EfsDeployment, EfsSchemaUIDs } from '../src/chain/deployments.js'
 import { attestedEventAbi } from '../src/eas/abi.js'
 import { SchemaEncoder } from '../src/eas/schema-encoder.js'
 import { EFS_SCHEMA_FIELDS } from '../src/eas/schemas.js'
-import { IndexingIncomplete, RedirectScanTruncated } from '../src/errors.js'
+import { IndexingIncomplete, RedirectScanTruncated, RevokeUnconfirmed } from '../src/errors.js'
 import type { ReadContext } from '../src/reads/context.js'
 import {
   DEFAULT_REDIRECT_HOPS,
@@ -992,5 +992,37 @@ describe('resolveHopCap input validation (review r3740482352)', () => {
       })()
       expect(err?.code, String(bad)).toBe('InvalidArgument')
     }
+  })
+})
+
+describe('RevokeUnconfirmed (review r3740688515)', () => {
+  const nsWithWait = (failure: Error) =>
+    makeRedirectsNs({
+      getDeployment: () => deployment,
+      readContext: () => ctxWith(makeChain({})),
+      submitContext: () => makeSubmitCtx().ctx,
+      revoke: async () => uid(0xfee),
+      indexerCall: async () => uid(0x1dc),
+      waitForReceipt: async () => {
+        throw failure
+      },
+    })
+
+  it('an UNKNOWN revoke-wait failure carries the hash; a CONFIRMED revert stays raw', async () => {
+    // Unknown outcome (RPC loss): structured, with the in-flight revokeTx.
+    const rpcLoss = Object.assign(new Error('RPC gone'), { code: 'RpcError' })
+    const err = await nsWithWait(rpcLoss)
+      .remove(uid(0xabc))
+      .catch((e) => e)
+    expect(err).toBeInstanceOf(RevokeUnconfirmed)
+    expect((err as RevokeUnconfirmed).revokeTx).toBe(uid(0xfee))
+    expect((err as RevokeUnconfirmed).cause).toBe(rpcLoss)
+    // Confirmed reverted: definite failure — propagates raw (redirect still active).
+    const reverted = Object.assign(new Error('reverted'), { code: 'ContractReverted' })
+    const err2 = await nsWithWait(reverted)
+      .remove(uid(0xabc))
+      .catch((e) => e)
+    expect(err2).toBe(reverted)
+    expect(err2).not.toBeInstanceOf(RevokeUnconfirmed)
   })
 })

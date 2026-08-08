@@ -108,3 +108,15 @@ describe('expand-narrowing (type-level)', () => {
     expectTypeOf<EfsFile['text']>().toEqualTypeOf<() => string>()
   })
 })
+
+describe('OverviewOptions carries the fetch controls (review r3740688511)', () => {
+  it('signal/gateways/fetchImpl/host policy are typed; maxBytes is NOT (fixed render ceiling)', async () => {
+    const { expectTypeOf } = await import('vitest')
+    type O = import('../src/types.js').OverviewOptions
+    expectTypeOf<O>().toHaveProperty('signal')
+    expectTypeOf<O>().toHaveProperty('ipfsGateways')
+    expectTypeOf<O>().toHaveProperty('fetchImpl')
+    expectTypeOf<O>().toHaveProperty('allowInsecureHttp')
+    expectTypeOf<keyof O & 'maxBytes'>().toEqualTypeOf<never>()
+  })
+})
