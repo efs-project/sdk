@@ -5,7 +5,7 @@ import {Test} from "forge-std/Test.sol";
 import {IEAS} from "@ethereum-attestation-service/eas-contracts/contracts/IEAS.sol";
 import {EFSWriter} from "../src/v1/EFSWriter.sol";
 import {EFSLib, IEFSIndexerWrite} from "../src/v1/EFSLib.sol";
-import {MockEAS} from "./EFSWriter.t.sol";
+import {MockEAS, MockIndexer} from "./EFSWriter.t.sol";
 
 /// @dev Consumer exposing the new primitive wrappers, to assert the inline (attester = consumer)
 ///      pattern holds for tag/property/place/list writes exactly as it does for {writeFile}.
@@ -40,11 +40,13 @@ contract WritesConsumerMock is EFSWriter {
         return _efsSetPropertyAt(s, keyAnchorUID, v);
     }
 
-    function place(EFSLib.SchemaUIDs memory s, bytes32 anchor, bytes32 data)
-        external
-        returns (bytes32)
-    {
-        return _efsPlace(s, anchor, data);
+    function place(
+        IEFSIndexerWrite indexer,
+        EFSLib.SchemaUIDs memory s,
+        bytes32 anchor,
+        bytes32 data
+    ) external returns (bytes32) {
+        return _efsPlace(indexer, s, anchor, data);
     }
 
     function createList(
@@ -89,28 +91,6 @@ contract WritesConsumerMock is EFSWriter {
     }
 }
 
-/// @dev Records the ADR-0017 lifecycle legs so tests can assert the same-tx index calls.
-contract MockIndexer {
-    bytes32[] public indexedUIDs;
-    bytes32[] public revocationMirroredUIDs;
-
-    function index(bytes32 uid) external {
-        indexedUIDs.push(uid);
-    }
-
-    function indexRevocation(bytes32 uid) external {
-        revocationMirroredUIDs.push(uid);
-    }
-
-    function indexedCount() external view returns (uint256) {
-        return indexedUIDs.length;
-    }
-
-    function revocationMirroredCount() external view returns (uint256) {
-        return revocationMirroredUIDs.length;
-    }
-}
-
 contract EFSWritesTest is Test {
     MockEAS eas;
     MockIndexer indexer;
@@ -140,6 +120,7 @@ contract EFSWritesTest is Test {
         // fixture DATA is "authored by" the consumer (the inlined attester).
         eas.seedAuthor(DATA_UID, address(consumer));
         eas.seedSchema(DATA_UID, schemas.data);
+        indexer.seedActiveMirrors(DATA_UID, 1); // the readability proof passes by default
     }
 
     function _uid(uint256 i) internal pure returns (bytes32) {
@@ -270,7 +251,8 @@ contract EFSWritesTest is Test {
     function test_Place_BindsDataAtAnchor() public {
         bytes32 anchor = keccak256("FILE_ANCHOR");
         vm.prank(ALICE);
-        bytes32 pinUID = consumer.place(schemas, anchor, DATA_UID);
+        bytes32 pinUID =
+            consumer.place(IEFSIndexerWrite(address(indexer)), schemas, anchor, DATA_UID);
 
         assertEq(eas.callCount(), 1, "place = 1 attestation");
         MockEAS.Call memory c = eas.callAt(0);
@@ -354,7 +336,7 @@ contract EFSWritesTest is Test {
         vm.expectEmit(true, true, false, true, address(consumer));
         emit EFSWriter.EFSFileWritten(anchor, DATA_UID, _uid(0));
         vm.prank(ALICE);
-        consumer.place(schemas, anchor, DATA_UID);
+        consumer.place(IEFSIndexerWrite(address(indexer)), schemas, anchor, DATA_UID);
     }
 
     /// @notice FOREIGN-authored DATA is rejected by the standalone place() too (r3741086781):
@@ -366,7 +348,25 @@ contract EFSWritesTest is Test {
         vm.expectRevert(
             abi.encodeWithSelector(EFSLib.ForeignDataUID.selector, foreignData, address(0xBEEF))
         );
-        consumer.place(schemas, keccak256("SOME_ANCHOR"), foreignData);
+        consumer.place(
+            IEFSIndexerWrite(address(indexer)), schemas, keccak256("SOME_ANCHOR"), foreignData
+        );
+    }
+
+    /// @notice A SELF-authored DATA with NO active mirror is refused (r3741250936): the
+    ///         placement would confirm and every lens-scoped read would fail
+    ///         AllMirrorsFailed — ownership proves who minted it, not that the hardlink
+    ///         shortcut has metadata to reuse.
+    function test_Place_RevertsOnNoActiveMirror() public {
+        bytes32 bareData = keccak256("BARE_DATA_NO_MIRRORS");
+        eas.seedAuthor(bareData, address(consumer));
+        eas.seedSchema(bareData, schemas.data);
+        // no seedActiveMirrors — zero mirrors
+        vm.prank(ALICE);
+        vm.expectRevert(
+            abi.encodeWithSelector(EFSLib.NoActiveMirror.selector, bareData, address(consumer))
+        );
+        consumer.place(IEFSIndexerWrite(address(indexer)), schemas, keccak256("A"), bareData);
     }
 
     /// @notice place() also rejects a SELF-authored non-DATA target (r3741115243).
@@ -378,7 +378,9 @@ contract EFSWritesTest is Test {
         vm.expectRevert(
             abi.encodeWithSelector(EFSLib.NotDataUID.selector, propUID, schemas.property)
         );
-        consumer.place(schemas, keccak256("SOME_ANCHOR"), propUID);
+        consumer.place(
+            IEFSIndexerWrite(address(indexer)), schemas, keccak256("SOME_ANCHOR"), propUID
+        );
     }
 
     // ── setRedirect (REDIRECT edge, ADR-0050) ────────────────────────────────────────────────

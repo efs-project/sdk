@@ -57,13 +57,14 @@ abstract contract EFSWriter {
     /// @return fileAnchorUID   The created file-ANCHOR UID (DATA-typed file slot).
     /// @return placementPinUID The created placement-PIN UID.
     function _efsPlaceExisting(
+        IEFSIndexerWrite indexer,
         EFSLib.SchemaUIDs memory schemas,
         bytes32 dataUID,
         bytes32 parentAnchorUID,
         string memory fileName
     ) internal returns (bytes32 fileAnchorUID, bytes32 placementPinUID) {
         (fileAnchorUID, placementPinUID) = EFSLib.placeExisting(
-            EAS, schemas, dataUID, parentAnchorUID, fileName
+            EAS, indexer, schemas, dataUID, parentAnchorUID, fileName
         );
         emit EFSFileWritten(fileAnchorUID, dataUID, placementPinUID);
     }
@@ -79,6 +80,7 @@ abstract contract EFSWriter {
     ///         non-canonical anchor the read path never finds.
     /// @param  existingFileAnchorUID The pre-resolved file-ANCHOR to reuse, or zero to mint.
     function _efsPlaceExisting(
+        IEFSIndexerWrite indexer,
         EFSLib.SchemaUIDs memory schemas,
         bytes32 dataUID,
         bytes32 parentAnchorUID,
@@ -86,7 +88,7 @@ abstract contract EFSWriter {
         bytes32 existingFileAnchorUID
     ) internal returns (bytes32 fileAnchorUID, bytes32 placementPinUID) {
         (fileAnchorUID, placementPinUID) = EFSLib.placeExisting(
-            EAS, schemas, dataUID, parentAnchorUID, fileName, existingFileAnchorUID
+            EAS, indexer, schemas, dataUID, parentAnchorUID, fileName, existingFileAnchorUID
         );
         emit EFSFileWritten(fileAnchorUID, dataUID, placementPinUID);
     }
@@ -176,11 +178,13 @@ abstract contract EFSWriter {
     /// @param  anchor  The path anchor UID the placement names.
     /// @param  dataUID The DATA UID being placed.
     /// @return pinUID  The created placement-PIN UID.
-    function _efsPlace(EFSLib.SchemaUIDs memory schemas, bytes32 anchor, bytes32 dataUID)
-        internal
-        returns (bytes32 pinUID)
-    {
-        pinUID = EFSLib.place(EAS, schemas, anchor, dataUID);
+    function _efsPlace(
+        IEFSIndexerWrite indexer,
+        EFSLib.SchemaUIDs memory schemas,
+        bytes32 anchor,
+        bytes32 dataUID
+    ) internal returns (bytes32 pinUID) {
+        pinUID = EFSLib.place(EAS, indexer, schemas, anchor, dataUID);
         emit EFSFileWritten(anchor, dataUID, pinUID);
     }
 

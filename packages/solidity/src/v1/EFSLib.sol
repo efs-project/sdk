@@ -21,6 +21,26 @@ import {Attestation} from "@ethereum-attestation-service/eas-contracts/contracts
 interface IEFSIndexerWrite {
     function index(bytes32 uid) external;
     function indexRevocation(bytes32 uid) external;
+
+    /// @notice RAW (revoked-included) referencing count — the placement helpers' active-mirror
+    ///         proof reads it as the scan bound (see {EFSLib.NoActiveMirror}).
+    function getReferencingBySchemaAndAttesterCount(
+        bytes32 targetUID,
+        bytes32 schemaUID,
+        address attester
+    ) external view returns (uint256);
+
+    /// @notice One filtered physical window of referencing UIDs (`showRevoked=false` drops
+    ///         revoked entries WITHIN the window; a short window is NOT exhaustion).
+    function getReferencingBySchemaAndAttester(
+        bytes32 targetUID,
+        bytes32 schemaUID,
+        address attester,
+        uint256 start,
+        uint256 length,
+        bool reverseOrder,
+        bool showRevoked
+    ) external view returns (bytes32[] memory);
 }
 
 /// @title EFSLib
@@ -76,6 +96,37 @@ library EFSLib {
     ///         a PIN at a self-authored ANCHOR/PROPERTY/other UID would attest fine and emit
     ///         {EFSWriter.EFSFileWritten}, yet be INVISIBLE to every SDK reader.
     error NotDataUID(bytes32 uid, bytes32 schema);
+
+    /// @notice The placement target has NO active MIRROR authored by the placer. Ownership
+    ///         and schema prove only who minted WHAT — not that the hardlink shortcut has
+    ///         retrieval metadata to reuse: a bare DATA (attested directly against EAS) or
+    ///         one whose mirrors were all revoked places "successfully" and then every
+    ///         lens-scoped read fails (`AllMirrorsFailedError`). Attest a MIRROR first
+    ///         (or write the file via {writeFile}, which emits them inline).
+    error NoActiveMirror(bytes32 dataUID, address author);
+
+    /// @dev The placement helpers' READABILITY proof: require >=1 ACTIVE mirror authored by
+    ///      `address(this)` on `dataUID`. Walks the RAW referencing count in filtered
+    ///      physical windows (a window may be short WITHOUT being the end — revoked entries
+    ///      filter within it), stopping at the first active row; the healthy case costs one
+    ///      count read plus one window scan.
+    function _requireActiveMirror(
+        IEFSIndexerWrite indexer,
+        SchemaUIDs memory schemas,
+        bytes32 dataUID
+    ) private view {
+        uint256 raw = indexer.getReferencingBySchemaAndAttesterCount(
+            dataUID, schemas.mirror, address(this)
+        );
+        uint256 total = raw > 500 ? 500 : raw;
+        for (uint256 start = 0; start < total; start += 50) {
+            bytes32[] memory page = indexer.getReferencingBySchemaAndAttester(
+                dataUID, schemas.mirror, address(this), start, 50, false, false
+            );
+            if (page.length > 0) return;
+        }
+        revert NoActiveMirror(dataUID, address(this));
+    }
     /// @dev `recipient` is always the zero address for EFS write attestations.
     address internal constant ZERO_RECIPIENT = address(0);
     /// @dev `expirationTime` is always 0 — EFS reads filter on revocation/index state, never on
@@ -297,12 +348,13 @@ library EFSLib {
     ///         never finds. Mirrors {writeFile}'s `existingFileAnchorUID`.
     function placeExisting(
         IEAS eas,
+        IEFSIndexerWrite indexer,
         SchemaUIDs memory schemas,
         bytes32 dataUID,
         bytes32 parentAnchorUID,
         string memory fileName
     ) internal returns (bytes32 fileAnchorUID, bytes32 placementPinUID) {
-        return placeExisting(eas, schemas, dataUID, parentAnchorUID, fileName, EMPTY_UID);
+        return placeExisting(eas, indexer, schemas, dataUID, parentAnchorUID, fileName, EMPTY_UID);
     }
 
     /// @notice {placeExisting} that REUSES an already-resolved file-ANCHOR — the overwrite /
@@ -319,6 +371,7 @@ library EFSLib {
     ///         resolves under the placer's lens when placer == author.
     function placeExisting(
         IEAS eas,
+        IEFSIndexerWrite indexer,
         SchemaUIDs memory schemas,
         bytes32 dataUID,
         bytes32 parentAnchorUID,
@@ -334,6 +387,7 @@ library EFSLib {
         // The target must BE a DATA — a self-authored non-DATA UID pins into the wrong
         // schema slot and the placement is invisible to readers (see {NotDataUID}).
         if (att.schema != schemas.data) revert NotDataUID(dataUID, att.schema);
+        _requireActiveMirror(indexer, schemas, dataUID);
         fileAnchorUID = existingFileAnchorUID != EMPTY_UID
             ? existingFileAnchorUID
             : _attestAnchor(eas, schemas.anchor, fileName, schemas.data, parentAnchorUID);
@@ -491,10 +545,13 @@ library EFSLib {
     ///                 authored by the calling contract — reverts {ForeignDataUID} otherwise
     ///                 (same gate as {placeExisting}; see the error's natspec for why).
     /// @return pinUID  The created placement-PIN UID.
-    function place(IEAS eas, SchemaUIDs memory schemas, bytes32 anchor, bytes32 dataUID)
-        internal
-        returns (bytes32 pinUID)
-    {
+    function place(
+        IEAS eas,
+        IEFSIndexerWrite indexer,
+        SchemaUIDs memory schemas,
+        bytes32 anchor,
+        bytes32 dataUID
+    ) internal returns (bytes32 pinUID) {
         // Same self-authorship gate as {placeExisting} (r3741086781): this is the
         // public hardlink/move primitive, and a placement of FOREIGN-authored DATA
         // yields a visible-but-unreadable file (lens-scoped reads resolve MIRRORs/
@@ -502,6 +559,7 @@ library EFSLib {
         Attestation memory att = eas.getAttestation(dataUID);
         if (att.attester != address(this)) revert ForeignDataUID(dataUID, att.attester);
         if (att.schema != schemas.data) revert NotDataUID(dataUID, att.schema);
+        _requireActiveMirror(indexer, schemas, dataUID);
         pinUID = _attestPin(eas, schemas.pin, anchor, dataUID);
     }
 

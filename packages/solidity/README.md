@@ -67,11 +67,16 @@ contract MyApp is EFSWriter {
     }
 
     /// Place an existing DATA at a path anchor (the hardlink / "pin" primitive).
-    /// The DATA must be YOUR OWN (authored by this contract) — placing foreign DATA
-    /// reverts `ForeignDataUID`: lens-scoped reads resolve mirrors/properties under
-    /// the placing attester, so a foreign placement would be visible but unreadable.
-    function place(bytes32 anchor, bytes32 dataUID) external returns (bytes32 pinUID) {
-        pinUID = _efsPlace(schemas, anchor, dataUID); // your contract is the attester
+    /// The DATA must be YOUR OWN (authored by this contract, `ForeignDataUID`
+    /// otherwise), a real DATA (`NotDataUID`), and carry at least one of your
+    /// active MIRRORs (`NoActiveMirror`) — lens-scoped reads resolve retrieval
+    /// metadata under the placing attester, so anything else places a file
+    /// that is visible but unreadable.
+    function place(IEFSIndexerWrite indexer, bytes32 anchor, bytes32 dataUID)
+        external
+        returns (bytes32 pinUID)
+    {
+        pinUID = _efsPlace(indexer, schemas, anchor, dataUID); // your contract is the attester
     }
 }
 ```

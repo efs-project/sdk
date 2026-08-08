@@ -19,7 +19,7 @@ import {
     ISchemaRegistry
 } from "@ethereum-attestation-service/eas-contracts/contracts/ISchemaRegistry.sol";
 import {EFSWriter} from "../src/v1/EFSWriter.sol";
-import {EFSLib} from "../src/v1/EFSLib.sol";
+import {EFSLib, IEFSIndexerWrite} from "../src/v1/EFSLib.sol";
 
 /// @dev A spy `IEAS` that records every `attest` call (schema + full request data + the
 ///      msg.sender it saw) and returns a deterministic, unique UID per call. Only `attest` is
@@ -186,6 +186,62 @@ contract MockEAS is IEAS {
 
 /// @dev A minimal consumer that inherits the writer base, used to assert the inline pattern
 ///      (the consumer — not the lib — must be the attester EAS records).
+/// @dev Records the ADR-0017 lifecycle legs so tests can assert the same-tx index calls.
+contract MockIndexer {
+    bytes32[] public indexedUIDs;
+    bytes32[] public revocationMirroredUIDs;
+
+    /// @dev Seeded ACTIVE mirror counts per DATA UID — the placement readability proof
+    ///      reads the raw count then scans a filtered window; this simple mock treats
+    ///      raw == active and serves a single-element first window when nonzero.
+    mapping(bytes32 => uint256) public activeMirrors;
+
+    function seedActiveMirrors(bytes32 uid, uint256 n) external {
+        activeMirrors[uid] = n;
+    }
+
+    function getReferencingBySchemaAndAttesterCount(bytes32 targetUID, bytes32, address)
+        external
+        view
+        returns (uint256)
+    {
+        return activeMirrors[targetUID];
+    }
+
+    function getReferencingBySchemaAndAttester(
+        bytes32 targetUID,
+        bytes32,
+        address,
+        uint256 start,
+        uint256,
+        bool,
+        bool
+    ) external view returns (bytes32[] memory page) {
+        if (start == 0 && activeMirrors[targetUID] > 0) {
+            page = new bytes32[](1);
+            page[0] = keccak256(abi.encodePacked("MIRROR_OF", targetUID));
+        } else {
+            page = new bytes32[](0);
+        }
+    }
+
+    function index(bytes32 uid) external {
+        indexedUIDs.push(uid);
+    }
+
+    function indexRevocation(bytes32 uid) external {
+        revocationMirroredUIDs.push(uid);
+    }
+
+    function indexedCount() external view returns (uint256) {
+        return indexedUIDs.length;
+    }
+
+    function revocationMirroredCount() external view returns (uint256) {
+        return revocationMirroredUIDs.length;
+    }
+}
+
 contract ConsumerMock is EFSWriter {
     constructor(IEAS eas) EFSWriter(eas) {}
 
@@ -197,28 +253,33 @@ contract ConsumerMock is EFSWriter {
     }
 
     function placeExisting(
+        IEFSIndexerWrite indexer,
         EFSLib.SchemaUIDs memory schemas,
         bytes32 dataUID,
         bytes32 parentAnchorUID,
         string memory fileName
     ) external returns (bytes32 fileAnchorUID, bytes32 placementPinUID) {
-        return _efsPlaceExisting(schemas, dataUID, parentAnchorUID, fileName);
+        return _efsPlaceExisting(indexer, schemas, dataUID, parentAnchorUID, fileName);
     }
 
     function placeExistingAt(
+        IEFSIndexerWrite indexer,
         EFSLib.SchemaUIDs memory schemas,
         bytes32 dataUID,
         bytes32 parentAnchorUID,
         string memory fileName,
         bytes32 existingFileAnchorUID
     ) external returns (bytes32 fileAnchorUID, bytes32 placementPinUID) {
-        return _efsPlaceExisting(schemas, dataUID, parentAnchorUID, fileName, existingFileAnchorUID);
+        return _efsPlaceExisting(
+            indexer, schemas, dataUID, parentAnchorUID, fileName, existingFileAnchorUID
+        );
     }
 }
 
 contract EFSWriterTest is Test {
     MockEAS eas;
     ConsumerMock consumer;
+    MockIndexer indexer;
 
     // Distinct, recognizable schema UIDs.
     EFSLib.SchemaUIDs schemas = EFSLib.SchemaUIDs({
@@ -239,6 +300,7 @@ contract EFSWriterTest is Test {
 
     function setUp() public {
         consumer = new ConsumerMock(IEAS(address(eas = new MockEAS())));
+        indexer = new MockIndexer();
     }
 
     // Recompute the mock's deterministic UID for the i-th attest call.
@@ -403,10 +465,12 @@ contract EFSWriterTest is Test {
         bytes32 existingData = keccak256("PRE_EXISTING_DATA");
         eas.seedAuthor(existingData, address(consumer)); // self-authored — the gate passes
         eas.seedSchema(existingData, schemas.data);
+        indexer.seedActiveMirrors(existingData, 1); // the readability proof passes
 
         vm.prank(ALICE);
-        (bytes32 fileAnchorUID, bytes32 pinUID) =
-            consumer.placeExisting(schemas, existingData, PARENT, "linked.txt");
+        (bytes32 fileAnchorUID, bytes32 pinUID) = consumer.placeExisting(
+            IEFSIndexerWrite(address(indexer)), schemas, existingData, PARENT, "linked.txt"
+        );
 
         assertEq(eas.callCount(), 2, "hardlink = 2 attestations (anchor + pin)");
 
@@ -443,10 +507,17 @@ contract EFSWriterTest is Test {
         bytes32 existingAnchor = keccak256("ALREADY_RESOLVED_FILE_ANCHOR");
         eas.seedAuthor(existingData, address(consumer));
         eas.seedSchema(existingData, schemas.data);
+        indexer.seedActiveMirrors(existingData, 1);
 
         vm.prank(ALICE);
-        (bytes32 fileAnchorUID, bytes32 pinUID) =
-            consumer.placeExistingAt(schemas, existingData, PARENT, "linked.txt", existingAnchor);
+        (bytes32 fileAnchorUID, bytes32 pinUID) = consumer.placeExistingAt(
+            IEFSIndexerWrite(address(indexer)),
+            schemas,
+            existingData,
+            PARENT,
+            "linked.txt",
+            existingAnchor
+        );
 
         assertEq(eas.callCount(), 1, "relink = ONE attestation (the placement PIN only)");
 
@@ -470,8 +541,16 @@ contract EFSWriterTest is Test {
         bytes32 existingData = keccak256("PRE_EXISTING_DATA_3");
         eas.seedAuthor(existingData, address(consumer));
         eas.seedSchema(existingData, schemas.data);
+        indexer.seedActiveMirrors(existingData, 1);
         vm.prank(ALICE);
-        consumer.placeExistingAt(schemas, existingData, PARENT, "fresh.txt", bytes32(0));
+        consumer.placeExistingAt(
+            IEFSIndexerWrite(address(indexer)),
+            schemas,
+            existingData,
+            PARENT,
+            "fresh.txt",
+            bytes32(0)
+        );
         assertEq(eas.callCount(), 2, "new path = anchor + pin (2 attestations)");
         assertEq(eas.callAt(0).schema, schemas.anchor, "minted a fresh file-ANCHOR");
     }
@@ -486,14 +565,35 @@ contract EFSWriterTest is Test {
         vm.expectRevert(
             abi.encodeWithSelector(EFSLib.ForeignDataUID.selector, foreignData, address(0xBEEF))
         );
-        consumer.placeExisting(schemas, foreignData, PARENT, "foreign.txt");
+        consumer.placeExisting(
+            IEFSIndexerWrite(address(indexer)), schemas, foreignData, PARENT, "foreign.txt"
+        );
         // An UNKNOWN UID (empty attestation, attester 0) is foreign too.
         bytes32 unknownData = keccak256("NEVER_ATTESTED");
         vm.prank(ALICE);
         vm.expectRevert(
             abi.encodeWithSelector(EFSLib.ForeignDataUID.selector, unknownData, address(0))
         );
-        consumer.placeExisting(schemas, unknownData, PARENT, "unknown.txt");
+        consumer.placeExisting(
+            IEFSIndexerWrite(address(indexer)), schemas, unknownData, PARENT, "unknown.txt"
+        );
+    }
+
+    /// @notice placeExisting refuses a SELF-authored DATA with NO active mirror
+    ///         (r3741250936): the hardlink shortcut has no metadata to reuse — the
+    ///         placement would confirm and every lens-scoped read would fail.
+    function test_PlaceExisting_RevertsOnNoActiveMirror() public {
+        bytes32 bareData = keccak256("BARE_DATA_NO_MIRRORS_W");
+        eas.seedAuthor(bareData, address(consumer));
+        eas.seedSchema(bareData, schemas.data);
+        // no seedActiveMirrors — zero mirrors
+        vm.prank(ALICE);
+        vm.expectRevert(
+            abi.encodeWithSelector(EFSLib.NoActiveMirror.selector, bareData, address(consumer))
+        );
+        consumer.placeExisting(
+            IEFSIndexerWrite(address(indexer)), schemas, bareData, PARENT, "bare.txt"
+        );
     }
 
     /// @notice A SELF-authored non-DATA UID is rejected too (r3741115243): the PIN would
@@ -507,7 +607,9 @@ contract EFSWriterTest is Test {
         vm.expectRevert(
             abi.encodeWithSelector(EFSLib.NotDataUID.selector, anchorUID, schemas.anchor)
         );
-        consumer.placeExisting(schemas, anchorUID, PARENT, "not-data.txt");
+        consumer.placeExisting(
+            IEFSIndexerWrite(address(indexer)), schemas, anchorUID, PARENT, "not-data.txt"
+        );
     }
 
     /// @notice The library inlines, so EAS records the CALLER (the consumer) as attester, never

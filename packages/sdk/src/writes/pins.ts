@@ -19,6 +19,10 @@
 
 import type { Address, Hex } from 'viem'
 import { edgeResolverAbi } from '../chain/abi/edgeResolver.js'
+import {
+  getReferencingBySchemaAndAttesterAbi,
+  getReferencingBySchemaAndAttesterCountAbi,
+} from '../chain/abi/indexer.js'
 import type { EfsDeployment } from '../chain/deployments.js'
 import { getAttestationAbi } from '../eas/abi.js'
 import { EfsError } from '../errors.js'
@@ -92,6 +96,36 @@ export function makePinsNs(deps: PinsNsDeps): PinsNs {
       if (att.schema.toLowerCase() !== dep.schemas.data.toLowerCase()) {
         throw new EfsError(
           `efs.graph.pins.place: the target ${dataUID} is not a DATA attestation (schema ${att.schema}) — the PIN would index under that schema while pins.active() and file resolution read the DATA slot: a confirmed receipt for an invisible placement.`,
+          { code: 'InvalidArgument' },
+        )
+      }
+      // READABILITY proof (r3741250932) — same rule as the hardlink gate:
+      // authorship + schema still admit a BARE self-authored DATA (raw EAS
+      // verbs, or all mirrors since revoked), whose placement confirms and then
+      // fails every read() with AllMirrorsFailed. Require >=1 ACTIVE mirror
+      // authored by the connected account, scanning raw-count-bounded filtered
+      // windows (the reads/mirror-scan.ts InvalidOffset boundary) with a
+      // first-hit exit.
+      const rawCount = await read<bigint>(pc, {
+        address: dep.contracts.indexer,
+        abi: getReferencingBySchemaAndAttesterCountAbi,
+        functionName: 'getReferencingBySchemaAndAttesterCount',
+        args: [dataUID, dep.schemas.mirror, ctx.attester],
+      })
+      let hasActiveMirror = false
+      const total = Math.min(Number(rawCount), 500)
+      for (let start = 0; start < total && !hasActiveMirror; start += 50) {
+        const page = await read<readonly Hex[]>(pc, {
+          address: dep.contracts.indexer,
+          abi: getReferencingBySchemaAndAttesterAbi,
+          functionName: 'getReferencingBySchemaAndAttester',
+          args: [dataUID, dep.schemas.mirror, ctx.attester, BigInt(start), 50n, false, false],
+        })
+        hasActiveMirror = page.length > 0
+      }
+      if (!hasActiveMirror) {
+        throw new EfsError(
+          `efs.graph.pins.place: the DATA ${dataUID} has NO active mirror authored by ${ctx.attester} — the placement would confirm but every read() fails AllMirrorsFailed. Attest a mirror via efs.mirrors.add (or publish via fs.write), then place.`,
           { code: 'InvalidArgument' },
         )
       }

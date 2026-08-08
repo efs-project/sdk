@@ -846,10 +846,15 @@ describe('makePinsNs', () => {
   const DATA = uid(0x900)
 
   /** The place() gate's EAS read: self-authored DATA by default. */
-  const gateClient = (over?: { attester?: Address; schema?: Hex }) =>
+  const gateClient = (over?: { attester?: Address; schema?: Hex; mirrors?: bigint }) =>
     makeReadClient((fn) => {
       if (fn === 'getAttestation') {
         return { attester: over?.attester ?? ATTESTER, schema: over?.schema ?? SCHEMAS.data }
+      }
+      // The readability proof's active-mirror scan.
+      if (fn === 'getReferencingBySchemaAndAttesterCount') return over?.mirrors ?? 1n
+      if (fn === 'getReferencingBySchemaAndAttester') {
+        return (over?.mirrors ?? 1n) > 0n ? [uid(0x3141)] : []
       }
       return uid(0)
     })
@@ -899,6 +904,21 @@ describe('makePinsNs', () => {
     const err = await pins.place(ANCHOR, DATA).catch((e) => e)
     expect((err as { code?: string }).code).toBe('InvalidArgument')
     expect(String((err as Error).message)).toMatch(/not a DATA attestation/)
+    expect(calls).toHaveLength(0)
+  })
+
+  it('place REFUSES a bare DATA with NO active mirror — unreadable placement (r3741250932)', async () => {
+    const { ctx, calls } = makeSubmitCtx()
+    const pins = makePinsNs({
+      getDeployment: () => deployment,
+      publicClient: gateClient({ mirrors: 0n }) as never,
+      submitContext: () => ctx,
+      attester: () => ATTESTER,
+      revoke: async () => uid(0),
+    })
+    const err = await pins.place(ANCHOR, DATA).catch((e) => e)
+    expect((err as { code?: string }).code).toBe('InvalidArgument')
+    expect(String((err as Error).message)).toMatch(/NO active mirror/)
     expect(calls).toHaveLength(0)
   })
 
