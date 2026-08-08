@@ -23,7 +23,7 @@ import {
     IEdgeResolverRead,
     IEFSFileViewRead,
     IListReaderRead
-} from "../src/EFSReader.sol";
+} from "../src/v1/EFSReader.sol";
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 // Mock view contracts. EFSReader forwards into these through the `view`-declared read interfaces,

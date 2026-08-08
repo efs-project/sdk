@@ -10,10 +10,11 @@
  */
 
 import type { Address, Chain } from 'viem'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, expectTypeOf, it } from 'vitest'
 import {
   DeploymentNotFound,
   type DeploymentsMap,
+  EFS_PROFILE_V1,
   type EfsContracts,
   type EfsDeployment,
   EfsError,
@@ -22,6 +23,7 @@ import {
   SchemaMismatchError,
   WalletRequired,
   createEfsClient,
+  createEfsV1Client,
 } from '../src/index.js'
 import { type MethodHandler, createMockProvider } from './helpers/mock-eip1193.js'
 
@@ -314,5 +316,28 @@ describe('createEfsClient — deployment resolution via chainId (ADR-0005)', () 
     const efs = createEfsClient({ provider, chain: localChain, deployments })
     const err = await efs.raw.verifyDeployment().catch((e) => e)
     expect((err as { code?: string }).code).toBe('WrongChain')
+  })
+})
+
+// ── The v1 profile boundary (ADR-0019/R1) ───────────────────────────────────────
+
+describe('the v1 profile boundary (ADR-0019)', () => {
+  it('createEfsV1Client is the canonical factory; the client carries the profile discriminant', () => {
+    const provider = createMockProvider({ chainId: 31337 })
+    const efs = createEfsV1Client({ provider, chain: localChain })
+    expect(efs.profile).toBe('efs/v1')
+    expect(EFS_PROFILE_V1).toBe('efs/v1')
+  })
+
+  it('createEfsClient is the SAME function (deprecated one-cycle alias)', () => {
+    expect(createEfsClient).toBe(createEfsV1Client)
+  })
+
+  it('a write receipt carries the profile stamp and the separated roles (one EOA fills all on Tier-1)', async () => {
+    // Shape-level pin via the edge path's receipt (cheapest end-to-end): covered
+    // behaviorally in writes-edge/file-write suites; here pin the TYPE contract.
+    expectTypeOf<WriteReceipt['profile']>().toEqualTypeOf<'efs/v1'>()
+    expectTypeOf<WriteReceipt['roles']>().toEqualTypeOf<WriteRoles>()
+    expectTypeOf<DataRef['profile']>().toEqualTypeOf<'efs/v1'>()
   })
 })

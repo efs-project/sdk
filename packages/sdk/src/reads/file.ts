@@ -180,7 +180,7 @@ async function resolveFilePathWithSymlinks(
 
 /** Build the static {@link DataRef} for a resolved placement on this chain. */
 function toDataRef(dataUID: DataUID, chainId: number, resolvedBy: Address): DataRef {
-  return { __brand: 'DataRef', uid: dataUID, chainId, resolvedBy }
+  return { __brand: 'DataRef', profile: 'efs/v1', uid: dataUID, chainId, resolvedBy }
 }
 
 /**

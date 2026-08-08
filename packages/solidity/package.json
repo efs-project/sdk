@@ -1,7 +1,7 @@
 {
   "name": "@efs/solidity",
   "version": "0.0.0",
-  "description": "On-chain (Solidity) SDK for the Ethereum File System (EFS) — a compile-in library",
+  "description": "On-chain (Solidity) SDK for the Ethereum File System (EFS) \u2014 a compile-in library",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -9,9 +9,12 @@
     "directory": "packages/solidity"
   },
   "files": ["src/**/*.sol", "vendor/**/*.sol", "remappings.txt", "README.md"],
-  "publishConfig": { "access": "public", "provenance": true },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
   "exports": {
-    "./src/*.sol": "./src/*.sol",
+    "./src/v1/*.sol": "./src/v1/*.sol",
     "./package.json": "./package.json"
   },
   "keywords": ["ethereum", "efs", "eas", "solidity", "filesystem"],

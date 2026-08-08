@@ -31,7 +31,7 @@
 
 import type { Address } from 'viem'
 import type { ContentHash } from '../content/hash.js'
-import type { DataRef, DataUID, WriteMechanism, WriteReceipt } from '../types.js'
+import type { DataRef, DataUID, WriteMechanism, WriteReceipt, WriteRoles } from '../types.js'
 import type { FileWriteGraph } from './graph.js'
 import { type SubmitContext, type Tier1WriteResult, submitWriteTier1 } from './submit.js'
 
@@ -52,6 +52,12 @@ export interface SubmitterContext extends SubmitContext {
   readonly chainId: number
   /** The attester the receipt records (lenses key on it). */
   readonly attester: Address
+  /** Role overrides for the receipt's {@link WriteRoles} (ADR-0019/R4). The
+   * deferred AA/relay submitters (mechanism 'gateway'/'erc4337') record
+   * payer/submitter divergence here; absent fields default to `attester` (the
+   * v1 Tier-1 self-submit reality). `author` overrides are NOT honored on
+   * Tier-1 (the attest is signed by the wallet — see the write's author guard). */
+  readonly roles?: Partial<WriteRoles>
   /** Wallet transactions the on-chain storage step sent BEFORE the EAS layers (chunk +
    * manager deploys on the default `fs.write(path, bytes)` path; `0`/omitted when the
    * caller supplied mirrors). Folded into `signatureCount` so the receipt reports the
@@ -85,11 +91,21 @@ function toReceipt(result: Tier1WriteResult, ctx: SubmitterContext): WriteReceip
     result.dataUID !== undefined
       ? {
           __brand: 'DataRef',
+          profile: 'efs/v1',
           uid: result.dataUID as DataUID,
           chainId: ctx.chainId,
           resolvedBy: ctx.attester,
         }
       : undefined
+
+  // Separated roles (ADR-0019/R4): one EOA fills every role on Tier-1; the
+  // seam records divergence when an AA/relay submitter supplies overrides.
+  const roles: WriteRoles = {
+    author: ctx.roles?.author ?? ctx.attester,
+    signer: ctx.roles?.signer ?? ctx.attester,
+    payer: ctx.roles?.payer ?? ctx.attester,
+    ...(ctx.roles?.submitter !== undefined ? { submitter: ctx.roles.submitter } : {}),
+  }
 
   const steps = [...result.uids.entries()].map(([id, uid]) => ({
     id,
@@ -99,6 +115,8 @@ function toReceipt(result: Tier1WriteResult, ctx: SubmitterContext): WriteReceip
   }))
 
   return {
+    profile: 'efs/v1',
+    roles,
     contentHash: ctx.contentHash,
     ...(data !== undefined ? { data } : {}),
     steps,

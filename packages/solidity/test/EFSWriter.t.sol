@@ -18,8 +18,8 @@ import {Attestation} from "@ethereum-attestation-service/eas-contracts/contracts
 import {
     ISchemaRegistry
 } from "@ethereum-attestation-service/eas-contracts/contracts/ISchemaRegistry.sol";
-import {EFSWriter} from "../src/EFSWriter.sol";
-import {EFSLib} from "../src/EFSLib.sol";
+import {EFSWriter} from "../src/v1/EFSWriter.sol";
+import {EFSLib} from "../src/v1/EFSLib.sol";
 
 /// @dev A spy `IEAS` that records every `attest` call (schema + full request data + the
 ///      msg.sender it saw) and returns a deterministic, unique UID per call. Only `attest` is

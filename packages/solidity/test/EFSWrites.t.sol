@@ -3,8 +3,8 @@ pragma solidity ^0.8.26;
 
 import {Test} from "forge-std/Test.sol";
 import {IEAS} from "@ethereum-attestation-service/eas-contracts/contracts/IEAS.sol";
-import {EFSWriter} from "../src/EFSWriter.sol";
-import {EFSLib} from "../src/EFSLib.sol";
+import {EFSWriter} from "../src/v1/EFSWriter.sol";
+import {EFSLib} from "../src/v1/EFSLib.sol";
 import {MockEAS} from "./EFSWriter.t.sol";
 
 /// @dev Consumer exposing the new primitive wrappers, to assert the inline (attester = consumer)

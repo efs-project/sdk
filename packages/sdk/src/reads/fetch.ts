@@ -277,6 +277,7 @@ export async function read(
   if (!placement) throw new FileNotFoundError(path)
   const ref: DataRef = {
     __brand: 'DataRef',
+    profile: 'efs/v1',
     uid: placement.dataUID,
     chainId: ctx.deployment.chainId,
     resolvedBy: placement.resolvedBy,

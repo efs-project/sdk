@@ -296,17 +296,18 @@ export async function writeFileTier1(
   // under 0x0.
   if (ctx.account === undefined) throw new WalletRequired()
 
-  // Foreign-lens writes are not yet implemented. The Tier-1 path ALWAYS attests as the
-  // connected wallet account (EFS lenses key on the attester), so a different `opts.lens`
-  // cannot be honored without delegated/foreign-attester signing (a later slice).
-  // Accepting it silently would author under the WALLET lens while the caller expects
-  // theirs — so reads/lists through the requested lens would never see the file, with no
-  // signal. Fail fast; a lens equal to the connected account is a harmless no-op.
-  if (opts?.lens !== undefined) {
+  // Foreign-AUTHOR writes are not yet implemented. The Tier-1 path ALWAYS attests as the
+  // connected wallet account (EFS lenses key on the author), so a different `opts.author`
+  // cannot be honored without delegated/foreign-author signing (a later slice).
+  // Accepting it silently would author under the WALLET account while the caller expects
+  // theirs — so reads/lists through the requested author's lens would never see the file,
+  // with no signal. Fail fast; an author equal to the connected account is a harmless no-op.
+  // (Renamed from `lens` — a lens is READER policy; the write-side role is authorship.)
+  if (opts?.author !== undefined) {
     const writer = accountAddress(ctx.account)
-    if (opts.lens.toLowerCase() !== writer.toLowerCase()) {
+    if (opts.author.toLowerCase() !== writer.toLowerCase()) {
       throw new EfsError(
-        `EFS write: writing under a lens (${opts.lens}) other than the connected account (${writer}) is not yet supported — the Tier-1 path attests as the wallet. Omit \`lens\` (or pass the connected account) until delegated/foreign-lens writes land.`,
+        `EFS write: authoring as (${opts.author}) other than the connected account (${writer}) is not yet supported — the Tier-1 path attests as the wallet. Omit \`author\` (or pass the connected account) until delegated/foreign-author writes land.`,
         { code: 'NotImplemented' },
       )
     }

@@ -464,11 +464,11 @@ describe('writeFileTier1 — resume (not yet implemented)', () => {
   })
 })
 
-describe('writeFileTier1 — foreign lens (not yet honored)', () => {
-  it('throws NotImplemented for a lens other than the connected account', async () => {
+describe('writeFileTier1 — foreign author (not yet honored; renamed from lens per ADR-0019/R4)', () => {
+  it('throws NotImplemented for an author other than the connected account', async () => {
     const { ctx, sent, deploys } = makeCtx()
     const err = await writeFileTier1('/docs/readme.md', CONTENT, ctx, {
-      lens: addr(0xfeed), // != ACCOUNT (addr(0xacc01)) — Tier-1 always attests as the wallet
+      author: addr(0xfeed), // != ACCOUNT (addr(0xacc01)) — Tier-1 always attests as the wallet
     }).catch((e) => e)
     // Fail fast rather than silently authoring under the wallet lens (the requested lens
     // would never see the file). Nothing irreversible ran.
@@ -479,7 +479,7 @@ describe('writeFileTier1 — foreign lens (not yet honored)', () => {
 
   it('accepts a lens EQUAL to the connected account (harmless no-op)', async () => {
     const { ctx } = makeCtx()
-    const receipt = await writeFileTier1('/docs/readme.md', CONTENT, ctx, { lens: ACCOUNT })
+    const receipt = await writeFileTier1('/docs/readme.md', CONTENT, ctx, { author: ACCOUNT })
     expect(receipt.status).toBe('confirmed')
   })
 })

@@ -32,8 +32,8 @@ this package's Foundry `remappings.txt`, which is why the dependency must be dec
 @ethereum-attestation-service/eas-contracts/=node_modules/@efs/solidity/vendor/eas-contracts/
 ```
 
-The import `@efs/solidity/src/EFSWriter.sol` then resolves to
-`node_modules/@efs/solidity/src/EFSWriter.sol` (the remapping points at the package
+The import `@efs/solidity/src/v1/EFSWriter.sol` then resolves to
+`node_modules/@efs/solidity/src/v1/EFSWriter.sol` (the remapping points at the package
 root; the `src/` is part of the import path). You may instead point the second remapping
 at `node_modules/@ethereum-attestation-service/eas-contracts/` (the installed dependency)
 — the sources are identical, so either resolves.
@@ -45,8 +45,18 @@ Inherit `EFSWriter` (its constructor takes the `IEAS` instance) and call the
 
 ```solidity
 import {IEAS} from "@ethereum-attestation-service/eas-contracts/contracts/IEAS.sol";
-import {EFSWriter} from "@efs/solidity/src/EFSWriter.sol";
-import {EFSLib} from "@efs/solidity/src/EFSLib.sol";
+import {EFSWriter} from "@efs/solidity/src/v1/EFSWriter.sol";
+```
+
+> **The `v1` in the path is the PROFILE (ADR-0019/R6):** these libraries wrap the
+> EFS **v1** deployment (the 9 frozen EAS schemas). A future native-v2 library
+> lands at `src/v2/` in this package (or a sibling package) without changing the
+> meaning of any `v1` import — the profile is explicit in every import statement,
+> greppable in any consumer, while contract code keeps clean unversioned symbol
+> names (`EFSLib`, not `EFSLibV1`).
+
+```solidity
+import {EFSLib} from "@efs/solidity/src/v1/EFSLib.sol";
 
 contract MyApp is EFSWriter {
     // The frozen EFS schema UID set for your target chain (from the deployments registry).

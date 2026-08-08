@@ -28,8 +28,13 @@ export type AnchorUID = Hex & { readonly __kind: 'AnchorUID' }
  * the attested `contentHash` — the verified two-step flow is broken without it). */
 export type DataRef = {
   readonly __brand: 'DataRef'
+  /** The protocol profile this ref belongs to (ADR-0019): `uid` is an EAS
+   * attestation UID keyed to a v1 deployment — NEVER reinterpretable as a v2
+   * logical ID (both are bytes32; only this stamp tells them apart). */
+  readonly profile: 'efs/v1'
   readonly uid: DataUID
-  /** The EIP-155 chain this ref resolves on. */
+  /** The EIP-155 chain this ref resolves on (a v1 VENUE — part of identity in
+   * the v1 profile, unlike v2's chain-free logical IDs). */
   readonly chainId: number
   /** The attester whose lens won placement — the author `fetch` verifies against. */
   readonly resolvedBy: Address
@@ -410,14 +415,16 @@ export type WriteOptions = {
    */
   transportDefinition?: Hex
   /**
-   * The attester/lens the write authors under. Default: the connected wallet's
-   * account (lenses key on the attester — ADR-0013/0014). Reserved additively; the
-   * Tier-1 path always attests as the wallet account, so a value OTHER than the
-   * connected account is not yet honored and is REJECTED (`NotImplemented`) rather than
-   * silently authored under the wallet lens — delegated/foreign-lens writes are a later
-   * slice. Passing the connected account (or omitting this) is the supported path.
+   * The AUTHOR the write attests under (renamed from `lens` — a lens is READER
+   * policy; the write-side role is authorship, and `author` is the vocabulary
+   * v2 keeps where EAS's "attester" dies — ADR-0019/R4). Default: the connected
+   * wallet's account (lenses key on the author — ADR-0013/0014). Reserved
+   * additively; the Tier-1 path always attests as the wallet account, so a
+   * value OTHER than the connected account is not yet honored and is REJECTED
+   * (`NotImplemented`) rather than silently authored under the wallet account —
+   * delegated/foreign-author writes are a later slice.
    */
-  lens?: Address
+  author?: Address
   /**
    * `mkdir -p` for the write: when the target's ancestor folders don't yet exist,
    * create them in the SAME write. Each missing folder becomes one non-revocable
@@ -458,9 +465,37 @@ export type WriteConfig = {
  * Intentionally near-empty until the preview pass defines its knobs. */
 export type PreviewOptions = ReadOptions
 
+/**
+ * The separated write roles (ADR-0019/R4 — even though ONE EOA fills every
+ * role on the v1 Tier-1 path). `author` is the principal the attestations are
+ * authored under (what lenses key on — EAS's "attester", in the vocabulary v2
+ * keeps); `signer` is the key that actually signed; `payer` is the account gas
+ * was drawn from; `submitter` is a relay that broadcast on the author's behalf
+ * (ABSENT ⇒ self-submitted). A 4337/paymaster flow diverges `payer`; a
+ * sponsored-carriage flow sets `submitter` — neither ever changes `author`.
+ */
+export type WriteRoles = {
+  /** The principal the write is authored under — lenses key on this. */
+  readonly author: Address
+  /** The key that signed (the actor). Same as `author` on the Tier-1 path. */
+  readonly signer: Address
+  /** The account that paid gas. Diverges under a paymaster/sponsor. */
+  readonly payer: Address
+  /** The relay that broadcast, when not self-submitted. */
+  readonly submitter?: Address
+}
+
 /** A durable, serializable write session. `steps` are idempotent per
  * (path-qualified) id so a resume skips only mined work and never double-mints. */
 export type WriteReceipt = {
+  /** The protocol profile the receipt's UIDs/steps belong to (ADR-0019). */
+  profile: 'efs/v1'
+  /** The separated write roles (ADR-0019/R4) — all the same address on the v1
+   * Tier-1 path (the wallet account fills every role), but the SEAM exists so
+   * AA/relay submitters record payer/submitter divergence without a shape
+   * change, and a receipt reader never conflates "who authored" with "who
+   * paid" or "who broadcast". Output-only: simple callers never construct it. */
+  roles: WriteRoles
   /** The file's content-identity hash — present on a file write (`fs.write`).
    * ABSENT on the standalone edge/value writes (`graph.tags`/`props`/`graph.pins`),
    * which place/bind no content (additive — these primitives reuse the same receipt

@@ -132,7 +132,13 @@ export async function overview(
   // buffering past it rather than letting an attacker force a huge folder header.
   const file = await fetchRef(
     ctx,
-    { __brand: 'DataRef', uid: dataUID as never, chainId: ctx.deployment.chainId, resolvedBy },
+    {
+      __brand: 'DataRef',
+      profile: 'efs/v1',
+      uid: dataUID as never,
+      chainId: ctx.deployment.chainId,
+      resolvedBy,
+    },
     { ...(opts as FetchOptions | undefined), maxBytes: MAX_RENDER_BYTES },
   )
 

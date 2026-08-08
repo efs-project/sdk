@@ -419,6 +419,11 @@ export type RedirectsReadNs = Pick<RedirectsNs, 'get' | 'list' | 'canonical' | '
  * graph/value namespaces expose only their lens-scoped READ verbs (the mutators appear on
  * the full {@link EfsClient}). */
 export type EfsReadClient = {
+  /** The protocol profile this client implements: the EFS **v1** profile —
+   * 9 frozen EAS schemas, chain-bound deployment, EAS UIDs as identity
+   * (ADR-0019). A v2 client will carry its own literal; branch on this, never
+   * on duck-typing. */
+  readonly profile: 'efs/v1'
   fs: EfsFsRead
   lenses: EfsLensesNs
   /** Curated-collection reads (`efs.lists.*`); no wallet required. */
@@ -645,10 +650,21 @@ function chainGuardedPublicClient(
 // Type-level write gate: a write-capable config (an `account` in the provider form,
 // or a `walletClient` in the viem form) widens the return to `EfsClient`; otherwise
 // you get `EfsReadClient` (no write verbs).
-export function createEfsClient(config: ProviderConfig & { account: Address | Account }): EfsClient
-export function createEfsClient(config: ViemConfig & { walletClient: WalletClient }): EfsClient
-export function createEfsClient(config: EfsClientConfig): EfsReadClient
-export function createEfsClient(config: EfsClientConfig): EfsClient {
+//
+// PROFILE-EXPLICIT FACTORY (ADR-0019/R1): `createEfsV1Client` is the canonical
+// name — the implementation is the EFS **v1 profile** (the 9 frozen EAS schemas
+// on a chain-bound deployment; EAS UIDs as identity). A future v2 profile lands
+// as a SIBLING factory (`createEfsV2Client`) with its own client type — v1
+// callers never break, and a persisted v1 ref can never be silently
+// reinterpreted as a v2 logical ID (see the `profile` stamps + artifacts.ts).
+// A required `profile:` config param and a nested `efs.v1.*` namespace were
+// both rejected (ceremony / call-site churn) — the factory name IS the profile.
+export function createEfsV1Client(
+  config: ProviderConfig & { account: Address | Account },
+): EfsClient
+export function createEfsV1Client(config: ViemConfig & { walletClient: WalletClient }): EfsClient
+export function createEfsV1Client(config: EfsClientConfig): EfsReadClient
+export function createEfsV1Client(config: EfsClientConfig): EfsClient {
   // RESERVED config seams (ADR-0014, Fork 2): the shapes exist so future runtimes (Ring-3,
   // non-ECDSA verticals) plug in here, but they're not yet wired. Fail loudly rather than
   // silently ignore a passed value — an accidental no-op on a security-relevant slot is worse
@@ -926,6 +942,7 @@ export function createEfsClient(config: EfsClientConfig): EfsClient {
   }) as EfsDecodeNs
 
   return {
+    profile: EFS_PROFILE_V1,
     fs: {
       // `async` so a synchronous throw from `readContext()` (e.g. DeploymentNotFound)
       // surfaces as a rejected promise, not a sync throw at the call site.
@@ -1209,6 +1226,37 @@ export function createEfsClient(config: EfsClientConfig): EfsClient {
   }
 }
 
+/** The v1 profile literal — what `efs.profile` and every persisted-artifact
+ * stamp carry (ADR-0019). */
+export const EFS_PROFILE_V1 = 'efs/v1' as const
+
+/** @deprecated Use {@link createEfsV1Client} — the profile-explicit canonical
+ * name (ADR-0019/R1). Same function; this alias exists so in-flight branches
+ * keep compiling for one cycle and will be removed before 1.0. */
+export const createEfsClient = createEfsV1Client
+
+/** Profile-explicit alias of {@link EfsClient} (ADR-0019/R1). */
+export type EfsV1Client = EfsClient
+/** Profile-explicit alias of {@link EfsReadClient} (ADR-0019/R1). */
+export type EfsV1ReadClient = EfsReadClient
+/** Profile-explicit alias of {@link EfsClientConfig} (ADR-0019/R1). */
+export type EfsV1ClientConfig = EfsClientConfig
+
+/**
+ * The v1-profile-SCOPED namespaces (ADR-0019/R2) — the surfaces that are EAS/
+ * deployment-specific BY CONSTRUCTION and will NOT be reinterpreted for a
+ * future profile: the raw EAS verbs, the pre-wired contract escape hatches,
+ * the attestation decode bridge, the schema-UID-keyed graph/value primitives,
+ * and account capability detection. The rest of the client (`fs.*` verbs,
+ * lenses-as-concept, pagination, typed errors, fetch/verify, receipts) is the
+ * STABLE surface future profiles re-implement behind the same verbs
+ * ("stable verbs, versioned result envelopes").
+ */
+export type EfsV1ProtocolSurface = Pick<
+  EfsClient,
+  'eas' | 'raw' | 'decode' | 'graph' | 'props' | 'mirrors' | 'redirects' | 'lists' | 'account'
+>
+
 // ── Standalone exports (chain-independent; usable now) ─────────────────────────
 export {
   SchemaEncoder,
@@ -1278,7 +1326,19 @@ export {
   type InvalidNameReason,
 } from './names/segment.js'
 // Bigint-safe JSON serialization for EFS result DTOs (`efs.toJSON`) — review P3 DX.
+// LOGGING ONLY — durable persistence is artifacts.ts below (ADR-0019/R3).
 export { toJSON, jsonReplacer } from './json.js'
+// Durable-artifact serializers (ADR-0019/R3): typed, VERSIONED persistence for
+// refs/receipts — lossless bigints, fail-closed profile/version rejection,
+// opaque-extension preservation.
+export {
+  serializeDataRef,
+  parseDataRef,
+  serializeWriteReceipt,
+  parseWriteReceipt,
+  UnsupportedArtifact,
+  MalformedArtifact,
+} from './artifacts.js'
 // Off-chain fetch/verify/mirror engine (freeze-independent; see future-proofing.md §2).
 export * from './mirror/index.js'
 // Write path: pure graph builder + Tier-1 submitter (writes/index barrels both).

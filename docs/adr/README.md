@@ -64,3 +64,4 @@ Compact, scannable — one screen per ADR. Copy `_template.md`. The next number 
 - [ADR-0016 — `contentHash` is a multibase-multihash string (specs/10 conformance)](./0016-content-hash-multibase-multihash.md)
 - [ADR-0017 — REDIRECT writes complete the EFSIndexer indexing lifecycle](./0017-redirect-indexing-lifecycle.md)
 - [ADR-0018 — Deployment record precedence, view revisions, and the devnet entry](./0018-deployment-record-precedence-view-revisions-devnet.md)
+- [ADR-0019 — The EFS v1 profile boundary](./0019-efs-v1-profile-boundary.md)

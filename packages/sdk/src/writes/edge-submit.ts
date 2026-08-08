@@ -50,7 +50,7 @@ export async function submitEdgePlan(
   // EACH layer's multiAttest — including the first — so it fails closed even if the wallet
   // switches chains between a multi-layer write's prompts. No separate preflight needed.
   const result: LayeredWriteResult = await submitLayeredTier1(plan, ctx)
-  return toEdgeReceipt(result)
+  return toEdgeReceipt(result, ctx.attester)
 }
 
 /**
@@ -76,12 +76,13 @@ export async function submitEdgePlanWithUID(
       { code: 'EfsError' },
     )
   }
-  return { receipt: toEdgeReceipt(result), uid }
+  return { receipt: toEdgeReceipt(result, ctx.attester), uid }
 }
 
 /** Map a {@link LayeredWriteResult} to the public {@link WriteReceipt} (no content
- * → no `contentHash`/`data`). */
-function toEdgeReceipt(result: LayeredWriteResult): WriteReceipt {
+ * → no `contentHash`/`data`). Roles: one EOA fills every role on the Tier-1
+ * edge path (ADR-0019/R4). */
+function toEdgeReceipt(result: LayeredWriteResult, attester: Address): WriteReceipt {
   const steps = [...result.uids.entries()].map(([id, uid]) => ({
     id,
     // Raw attestation UID (kind given by `id`) — NOT branded DataUID (see WriteReceipt).
@@ -89,6 +90,8 @@ function toEdgeReceipt(result: LayeredWriteResult): WriteReceipt {
     done: true,
   }))
   return {
+    profile: 'efs/v1',
+    roles: { author: attester, signer: attester, payer: attester },
     steps,
     signatureCount: result.layerTxHashes.length,
     mechanism: 'sequential',

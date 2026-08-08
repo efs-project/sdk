@@ -267,6 +267,11 @@ export interface FileWriteGraphInput {
 
 /** The ordered write plan returned by {@link buildFileWriteGraph}. */
 export interface FileWriteGraph {
+  /** The protocol profile the plan's attestations belong to (ADR-0019): a plan
+   * is the artifact a future Tier-2/relay submitter receives across a trust
+   * boundary, so it carries the stamp from birth (a serializer is a later
+   * slice — this reserves the discriminant). */
+  readonly profile: 'efs/v1'
   /** True iff the hardlink/dedup short-circuit fired (single placement PIN). */
   readonly hardlink: boolean
   /** Every planned attestation, ordered by layer (L1 → L2 → L3). The submitter
@@ -390,6 +395,7 @@ export function buildFileWriteGraph(input: FileWriteGraphInput): FileWriteGraph 
     // live at m + 2 (no reserved-key triplets), so TAGs follow at m + 3.
     const visibilityTags = buildVisibilityTags(input, m + 3)
     return {
+      profile: 'efs/v1',
       hardlink: true,
       attestations: stableSortByLayer([
         ...folderAttestations,
@@ -539,7 +545,7 @@ export function buildFileWriteGraph(input: FileWriteGraphInput): FileWriteGraph 
   // way to present a clean per-layer grouping — the unit the submitter batches into
   // one `multiAttest` per layer. Stable, so within a layer the build order is kept.
   const ordered = stableSortByLayer(attestations)
-  return { hardlink: false, attestations: ordered }
+  return { profile: 'efs/v1', hardlink: false, attestations: ordered }
 }
 
 /** Stable sort by layer (ascending). Array.prototype.sort is spec-stable. */

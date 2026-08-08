@@ -19,6 +19,14 @@
  * the fields you know are numeric. This matches how viem/wagmi treat bigints at the JSON
  * boundary — there is no canonical round-trip; the producer and consumer agree on which
  * fields are numeric.
+ *
+ * **NOT PERSISTENCE (ADR-0019/R3).** This is a LOGGING/DISPLAY helper — the
+ * bigint round-trip is documented-lossy (decimal strings, no reviver). Durable
+ * refs/receipts go through the typed, VERSIONED serializers in `artifacts.ts`
+ * (`serializeDataRef`/`parseDataRef`, `serializeWriteReceipt`/
+ * `parseWriteReceipt`): those restore bigints, reject foreign-profile/newer
+ * envelopes with typed errors, and preserve opaque extensions. `parseWriteReceipt`
+ * deliberately REJECTS `toJSON` output (no envelope) — the two formats never mix.
  */
 
 /**

@@ -146,7 +146,7 @@ export function buildTagPlan(
     refUID: target, // the tagged target (concrete pre-existing UID)
     dataRefs: [],
   }
-  return { hardlink: false, attestations: [tag] }
+  return { profile: 'efs/v1', hardlink: false, attestations: [tag] }
 }
 
 /**
@@ -216,7 +216,7 @@ export function buildPropertyPlan(
       refUID: { ref: EDGE_REF.PROPERTY }, // refUID = the fresh PROPERTY (the binding claim)
       dataRefs: [], // definition is concrete — nothing for the submitter to thread
     }
-    return { hardlink: false, attestations: [property, bindingPin] }
+    return { profile: 'efs/v1', hardlink: false, attestations: [property, bindingPin] }
   }
 
   // NEW key — the full triple. L1 key-ANCHOR — `forSchema` MUST be the PROPERTY schema
@@ -248,7 +248,7 @@ export function buildPropertyPlan(
     dataRefs: [{ field: 'definition', ref: { ref: EDGE_REF.KEY_ANCHOR } }],
   }
 
-  return { hardlink: false, attestations: [keyAnchor, property, bindingPin] }
+  return { profile: 'efs/v1', hardlink: false, attestations: [keyAnchor, property, bindingPin] }
 }
 
 /**
@@ -278,7 +278,7 @@ export function buildPlacementPinPlan(
     refUID: dataUID, // refUID = the placed DATA/target (concrete)
     dataRefs: [], // no fresh siblings — the anchor is concrete, encoded in `data`
   }
-  return { hardlink: false, attestations: [pin] }
+  return { profile: 'efs/v1', hardlink: false, attestations: [pin] }
 }
 
 /**
@@ -323,7 +323,7 @@ export function buildRedirectPlan(
     refUID: from, // AliasResolver — the SOURCE rides in refUID (concrete pre-existing UID)
     dataRefs: [], // no fresh siblings — both endpoints are concrete, encoded in data/refUID
   }
-  return { hardlink: false, attestations: [redirect] }
+  return { profile: 'efs/v1', hardlink: false, attestations: [redirect] }
 }
 
 /**
@@ -371,7 +371,7 @@ export function buildMirrorPlan(
     refUID: dataUID, // MirrorResolver.sol:153-156 — refUID must be a DATA attestation (concrete)
     dataRefs: [], // no fresh siblings — DATA + transport anchor are both concrete
   }
-  return { hardlink: false, attestations: [mirror] }
+  return { profile: 'efs/v1', hardlink: false, attestations: [mirror] }
 }
 
 // ── LIST / LIST_ENTRY (curated collections — ADR-0044/0046/0047) ──────────────────
@@ -468,7 +468,7 @@ export function buildCreateListPlan(
     refUID: ZERO_UID, // ListResolver — LIST must be free-floating
     dataRefs: [],
   }
-  return { hardlink: false, attestations: [list] }
+  return { profile: 'efs/v1', hardlink: false, attestations: [list] }
 }
 
 /**
@@ -509,7 +509,7 @@ export function buildAddEntryPlan(
       recipient: member, // ADDR mode — the member address (address(0) is valid)
       dataRefs: [],
     }
-    return { hardlink: false, attestations: [entry] }
+    return { profile: 'efs/v1', hardlink: false, attestations: [entry] }
   }
   // ANY / SCHEMA — the member key/UID rides in the payload `target`, recipient 0.
   const entry: PlannedAttestation = {
@@ -523,7 +523,7 @@ export function buildAddEntryPlan(
     recipient: ZERO_ADDRESS, // ANY/SCHEMA require recipient 0
     dataRefs: [],
   }
-  return { hardlink: false, attestations: [entry] }
+  return { profile: 'efs/v1', hardlink: false, attestations: [entry] }
 }
 
 /** A 32-byte hex word (`0x` + 64 hex). */

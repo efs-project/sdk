@@ -57,6 +57,13 @@ export type EfsErrorCode =
    * (ADR-0015) — e.g. a content-only cached answer on the fail-closed sugar.
    * The rich results surface the same state on `.trust` without throwing. */
   | 'StaleTrust'
+  /** A persisted artifact belongs to a FOREIGN profile or a NEWER envelope
+   * version (ADR-0019) — never best-effort-parsed (a v2 logical ID read as a
+   * v1 EAS UID would silently mis-dereference). */
+  | 'UnsupportedArtifact'
+  /** A persisted-artifact parse failed structurally (not JSON / no envelope /
+   * missing required payload fields) — it was never a valid artifact. */
+  | 'MalformedArtifact'
   /** A write is missing a required input the deployment/opts should supply
    * (e.g. a transport-definition anchor UID for a mirror scheme). */
   | 'MissingTransport'
