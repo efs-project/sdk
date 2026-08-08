@@ -686,8 +686,14 @@ function chainGuardedPublicClient(
 }
 
 // Type-level write gate: a write-capable config (an `account` in the provider form,
-// or a `walletClient` in the viem form) widens the return to `EfsClient`; otherwise
-// you get `EfsReadClient` (no write verbs).
+// or an account-BOUND `walletClient` in the viem form) widens the return to
+// `EfsClient`; otherwise you get `EfsReadClient` (no write verbs). The viem-form
+// overload requires `walletClient.account` to be a definite `Account`
+// (r3741036567): an UNBOUND wallet (`createWalletClient({ chain, transport })`)
+// cannot sign, so every write verb it would advertise throws `WalletRequired` at
+// runtime — it falls through to the read-only overload instead. A wallet whose
+// account is statically `Account | undefined` also reads as read-only: narrow
+// (or rebuild the client with the account bound) to get the write surface.
 //
 // PROFILE-EXPLICIT FACTORY (ADR-0019/R1): `createEfsV1Client` is the canonical
 // name — the implementation is the EFS **v1 profile** (the 9 frozen EAS schemas
@@ -700,7 +706,9 @@ function chainGuardedPublicClient(
 export function createEfsV1Client(
   config: ProviderConfig & { account: Address | Account },
 ): EfsClient
-export function createEfsV1Client(config: ViemConfig & { walletClient: WalletClient }): EfsClient
+export function createEfsV1Client(
+  config: ViemConfig & { walletClient: WalletClient & { account: Account } },
+): EfsClient
 export function createEfsV1Client(config: EfsClientConfig): EfsReadClient
 export function createEfsV1Client(config: EfsClientConfig): EfsClient {
   // RESERVED config seams (ADR-0014, Fork 2): the shapes exist so future runtimes (Ring-3,
@@ -1337,6 +1345,22 @@ export const EFS_PROFILE_V1 = 'efs/v1' as const
 /** @deprecated Use {@link createEfsV1Client} — the profile-explicit canonical
  * name (ADR-0019/R1). Same function; this alias exists so in-flight branches
  * keep compiling for one cycle and will be removed before 1.0. */
+// Compile-time overload contract (tsc-enforced — the test tree is excluded from
+// `typecheck`, so the write-gate narrowing is pinned here; never executed and
+// tree-shaken from the bundle).
+function _typecheckCreateClientOverloads(
+  bound: ViemConfig & { walletClient: WalletClient & { account: Account } },
+  unbound: ViemConfig & { walletClient: WalletClient },
+): void {
+  const writable: EfsClient = createEfsV1Client(bound)
+  const readOnly: EfsReadClient = createEfsV1Client(unbound)
+  // @ts-expect-error — an UNBOUND wallet client must NOT advertise write verbs
+  void createEfsV1Client(unbound).fs.write
+  void writable
+  void readOnly
+}
+void _typecheckCreateClientOverloads
+
 export const createEfsClient = createEfsV1Client
 
 /** Profile-explicit alias of {@link EfsClient} (ADR-0019/R1). */
