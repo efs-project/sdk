@@ -109,12 +109,29 @@ export function parseWeb3Uri(uri: string): Address {
  *
  * @throws {Web3ReadError} on a malformed URI, an unreadable chunk count/address, or a
  *   chunk contract with no code (the router returns HTTP 500 in those cases).
+ * @throws {RangeError} on a non-finite/non-positive `maxBytes` — this is a PUBLIC
+ *   entry point (every downstream cap check is a `>`, so NaN never rejects and
+ *   Infinity disables the ceiling across up to {@link MAX_CHUNKS} chunk reads);
+ *   same rule as the other exported transport helpers.
+ * @throws {DOMException} (`AbortError`) when `opts.signal` aborts — checked
+ *   between chunk RPCs, so a caller's cancellation (or the fetch engine's
+ *   per-attempt timeout) stops a long chunk walk instead of blocking failover.
  */
 export async function readWeb3Bytes(
   uri: string,
   client: Web3ReadClient,
-  maxBytes?: number,
+  opts?: { maxBytes?: number; signal?: AbortSignal } | number,
 ): Promise<Uint8Array> {
+  // Back-compat shim for the prior positional `maxBytes` (pre-1.0 courtesy —
+  // the object form is canonical).
+  const o = typeof opts === 'number' ? { maxBytes: opts } : (opts ?? {})
+  const { maxBytes, signal } = o
+  if (maxBytes !== undefined && (!Number.isFinite(maxBytes) || maxBytes <= 0)) {
+    throw new RangeError(
+      `readWeb3Bytes: \`maxBytes\` must be a finite positive number (got ${maxBytes}). Omit it for an uncapped read (the fetch engine always passes its cap).`,
+    )
+  }
+  signal?.throwIfAborted()
   const manager = parseWeb3Uri(uri)
 
   // chunkCount() — the router probes this to detect EIP-7617 chunking (it
@@ -143,6 +160,7 @@ export async function readWeb3Bytes(
         (e) => e instanceof ContractFunctionZeroDataError || e instanceof AbiDecodingZeroDataError,
       ) !== null
     if (returnedNoData) return readRawSstore2(manager, client, maxBytes)
+
     throw new Web3ReadError(`chunkCount() unreadable on ${manager}: ${errMsg(err)}`)
   }
   if (count <= 0n) throw new Web3ReadError(`chunk manager ${manager} reports zero chunks`)
@@ -153,6 +171,9 @@ export async function readWeb3Bytes(
   const parts: Uint8Array[] = []
   let total = 0
   for (let i = 0n; i < count; i += 1n) {
+    // Cancellation point: one check per chunk bounds a stalled/hostile walk to a
+    // single in-flight RPC after the caller (or the per-attempt timer) aborts.
+    signal?.throwIfAborted()
     let chunkAddr: Address
     try {
       chunkAddr = (await client.readContract({

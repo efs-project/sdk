@@ -309,13 +309,22 @@ async function requireContractAddress(
   hash: Hex,
   what: string,
 ): Promise<Address> {
-  // The provider can drift AFTER the deploy tx is broadcast and BEFORE this wait; waiting on
-  // the wrong chain would surface a deploy that mined on the deployment chain as "no contract
-  // address", aborting the default no-mirror write even though the chunk/manager landed.
-  // Re-assert the live chain before waiting (outside the classify funnel, like the signal
-  // checks) so a drift fails closed with WrongChain rather than a misleading no-address error.
-  await ctx.assertChain?.()
-  const receipt = await classified(() => ctx.publicClient.waitForTransactionReceipt({ hash }))
+  let receipt: { contractAddress?: Address | null }
+  try {
+    // The provider can drift AFTER the deploy tx is broadcast and BEFORE this wait; waiting
+    // on the wrong chain would surface a deploy that mined on the deployment chain as "no
+    // contract address", aborting the default no-mirror write even though the chunk/manager
+    // landed. Re-assert the live chain before waiting so a drift fails closed.
+    await ctx.assertChain?.()
+    receipt = await classified(() => ctx.publicClient.waitForTransactionReceipt({ hash }))
+  } catch (cause) {
+    // The deploy tx IS broadcast — a wait failure (timeout / RPC loss / chain
+    // drift) is an UNKNOWN outcome, not a definite failure. Losing the hash
+    // here would invite a blind retry that pays for a DUPLICATE chunk/manager
+    // deploy while the first still mines — preserve the in-flight state the
+    // way the layered submitter does for sent-but-unconfirmed layers.
+    throw new OnchainDeployUnconfirmed(hash, what, cause)
+  }
   const addr = receipt.contractAddress
   if (addr === undefined || addr === null) {
     throw new EfsError(
@@ -324,4 +333,25 @@ async function requireContractAddress(
     )
   }
   return addr
+}
+
+/** A storage deploy tx was BROADCAST but its receipt could not be confirmed
+ * (timeout / RPC loss / provider chain-drift during the wait) — the outcome is
+ * UNKNOWN, not failed: the deploy may still mine and bill gas. Carries the
+ * in-flight `txHash` so recovery can check its fate instead of blindly
+ * retrying `fs.write` into a duplicate chunk/manager deploy. */
+export class OnchainDeployUnconfirmed extends EfsError {
+  override name = 'OnchainDeployUnconfirmed'
+  /** The broadcast deploy transaction whose receipt is unconfirmed. */
+  readonly txHash: Hex
+  /** Which deploy this was (`chunk N` / `manager`). */
+  readonly what: string
+  constructor(txHash: Hex, what: string, cause: unknown) {
+    super(
+      `EFS write: the on-chain ${what} deploy (tx ${txHash}) was broadcast but its receipt could not be confirmed — the transaction may STILL MINE and bill gas. Check the tx's fate before retrying: a blind fs.write retry deploys a duplicate ${what}.`,
+      { code: 'PartialBatchFailure', cause },
+    )
+    this.txHash = txHash
+    this.what = what
+  }
 }

@@ -49,7 +49,10 @@ function mirrorUri(m: Mirror): string {
  * mirror engine itself stays chain-free. Absent ⇒ `web3://` mirrors are recorded as
  * a failed attempt (the original NotImplemented seam), so a later mirror can win.
  */
-export type Web3Reader = (uri: string, opts?: { maxBytes?: number }) => Promise<Uint8Array>
+export type Web3Reader = (
+  uri: string,
+  opts?: { maxBytes?: number; signal?: AbortSignal },
+) => Promise<Uint8Array>
 
 /** Options for {@link fetchVerified}. */
 export type FetchVerifiedOptions = ResolveOptions &
@@ -400,12 +403,19 @@ export async function fetchVerified(
     // the size + verify like any mirror (the on-chain store is a locator, not the
     // hash). With no reader, fall through to httpUrls() → the NotImplemented seam.
     if (resolved.scheme === TRANSPORT.web3 && opts.web3Reader) {
+      // Same cancellation envelope as an HTTP attempt: the caller's signal is
+      // linked and the per-attempt timeout armed, so a stalled RPC or a hostile
+      // manager's long chunk walk cannot block failover past `timeoutMs`, and
+      // aborting the documented whole-operation signal actually stops the read.
+      const controller = new AbortController()
+      const unlink = linkAbort(opts.signal, controller)
+      const timer = setTimeout(() => controller.abort(), opts.timeoutMs ?? DEFAULT_TIMEOUT_MS)
       try {
         const maxBytes = opts.maxBytes ?? DEFAULT_MAX_BYTES
         // Thread the cap INTO the reader so it stops mid-walk (the bundled
         // readWeb3Bytes throws once the running total exceeds it) instead of
         // accumulating every chunk first. The post-check below stays as defense.
-        const bytes = await opts.web3Reader(uri, { maxBytes })
+        const bytes = await opts.web3Reader(uri, { maxBytes, signal: controller.signal })
         if (bytes.byteLength > maxBytes) {
           attempts.push({
             uri: safeUri,
@@ -419,6 +429,9 @@ export async function fetchVerified(
       } catch (err) {
         attempts.push({ uri: safeUri, scheme: resolved.scheme, reason: errMsg(err) })
         continue
+      } finally {
+        clearTimeout(timer)
+        unlink()
       }
     }
 

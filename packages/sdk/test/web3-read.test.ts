@@ -264,3 +264,39 @@ describe('fetchVerified web3:// transport (engine integration)', () => {
     expect(res.attempts[0]?.scheme).toBe('web3')
   })
 })
+
+describe('readWeb3Bytes entry validation + cancellation (reviews r3740521402 / r3740521400)', () => {
+  it('rejects non-finite/non-positive maxBytes at the public entry', async () => {
+    const { readWeb3Bytes } = await import('../src/mirror/web3.js')
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, 0, -1]) {
+      await expect(
+        readWeb3Bytes(
+          `web3://0x${'aa'.repeat(20)}`,
+          { readContract: async () => 0n, getCode: async () => '0x' } as never,
+          { maxBytes: bad },
+        ),
+        String(bad),
+      ).rejects.toThrow(RangeError)
+    }
+  })
+
+  it('an aborted signal stops the chunk walk between RPCs', async () => {
+    const { readWeb3Bytes } = await import('../src/mirror/web3.js')
+    const controller = new AbortController()
+    let chunkReads = 0
+    const client = {
+      readContract: async (a: { functionName: string }) => {
+        if (a.functionName === 'chunkCount') return 100n
+        chunkReads += 1
+        if (chunkReads === 1) controller.abort() // abort mid-walk
+        return `0x${'bb'.repeat(20)}`
+      },
+      getCode: async () => `0x00${'cc'.repeat(4)}`,
+    } as never
+    const err = await readWeb3Bytes(`web3://0x${'aa'.repeat(20)}`, client, {
+      signal: controller.signal,
+    }).catch((e) => e)
+    expect((err as Error).name).toBe('AbortError')
+    expect(chunkReads).toBeLessThanOrEqual(2) // stopped promptly, not 100 chunks
+  })
+})

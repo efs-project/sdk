@@ -225,6 +225,27 @@ export function parseWriteReceipt(json: string): WriteReceipt & { ext?: Record<s
       `WriteReceipt signatureCount is not a non-negative integer (${String(d.signatureCount)})`,
     )
   }
+  // The remaining REQUIRED WriteReceipt fields — a payload missing `mechanism`
+  // or `roles` would brand through and fail later at `receipt.roles.author`
+  // with a bare TypeError instead of the promised MalformedArtifact.
+  if (typeof d.mechanism !== 'string' || d.mechanism.length === 0) {
+    throw new MalformedArtifact(`WriteReceipt mechanism is not a string (${String(d.mechanism)})`)
+  }
+  const roles = d.roles as { author?: unknown; signer?: unknown; payer?: unknown } | undefined
+  const isAddr = (v: unknown): boolean => typeof v === 'string' && /^0x[0-9a-fA-F]{40}$/.test(v)
+  if (
+    typeof roles !== 'object' ||
+    roles === null ||
+    !isAddr(roles.author) ||
+    !isAddr(roles.signer) ||
+    !isAddr(roles.payer) ||
+    ((roles as { submitter?: unknown }).submitter !== undefined &&
+      !isAddr((roles as { submitter?: unknown }).submitter))
+  ) {
+    throw new MalformedArtifact(
+      'WriteReceipt roles missing/malformed (author/signer/payer must be addresses; submitter, when present, too)',
+    )
+  }
   for (const step of d.steps as unknown[]) {
     if (
       typeof step !== 'object' ||

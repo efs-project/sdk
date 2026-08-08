@@ -203,8 +203,11 @@ export async function fetchRef(
     // the reader is the only chain-touching closure.
     ...(typeof ctx.publicClient.getCode === 'function'
       ? {
-          web3Reader: (uri: string, o?: { maxBytes?: number }) =>
-            readWeb3Bytes(uri, ctx.publicClient as Web3ReadClient, o?.maxBytes),
+          web3Reader: (uri: string, o?: { maxBytes?: number; signal?: AbortSignal }) =>
+            readWeb3Bytes(uri, ctx.publicClient as Web3ReadClient, {
+              ...(o?.maxBytes !== undefined ? { maxBytes: o.maxBytes } : {}),
+              ...(o?.signal !== undefined ? { signal: o.signal } : {}),
+            }),
         }
       : {}),
   }

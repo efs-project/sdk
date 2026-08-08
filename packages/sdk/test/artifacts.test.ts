@@ -116,10 +116,12 @@ describe('WriteReceipt round-trip', () => {
 describe('adversarial-review regressions', () => {
   it('bigint tag is INJECTIVE: user ext/data shaped like the tag round-trips verbatim', async () => {
     const { parseWriteReceipt, serializeWriteReceipt } = await import('../src/artifacts.js')
+    const A = `0x${'01'.repeat(20)}`
     const receipt = {
       profile: 'efs/v1',
       path: '/x',
-      resolvedBy: '0x0000000000000000000000000000000000000001',
+      resolvedBy: A,
+      roles: { author: A, signer: A, payer: A },
       steps: [],
       signatureCount: 1,
       mechanism: 'direct',
@@ -187,8 +189,10 @@ describe('strict ID validation at the parse boundary (review r3740509657)', () =
     const { parseWriteReceipt, serializeWriteReceipt, MalformedArtifact } = await import(
       '../src/artifacts.js'
     )
+    const B = `0x${'02'.repeat(20)}`
     const receipt = {
       profile: 'efs/v1',
+      roles: { author: B, signer: B, payer: B },
       steps: [{ id: 'DATA', uid: `0x${'33'.repeat(32)}`, done: true }],
       signatureCount: 1,
       mechanism: 'direct',
@@ -198,6 +202,8 @@ describe('strict ID validation at the parse boundary (review r3740509657)', () =
       ['"signatureCount":1', '"signatureCount":null'],
       ['"signatureCount":1', '"signatureCount":1.5'],
       [`"uid":"0x${'33'.repeat(32)}"`, '"uid":"0xdead"'],
+      ['"mechanism":"direct"', '"mechanism":7'],
+      [`"author":"${B}"`, '"author":"0xnope"'],
     ] as [string, string][]) {
       const tampered = json.replace(from, to)
       expect(tampered, to).not.toBe(json)

@@ -16,6 +16,7 @@ import { EfsError, RpcError, UserRejected } from '../src/errors.js'
 import {
   MAX_SINGLE_CHUNK_BYTES,
   MultiChunkUnsupported,
+  OnchainDeployUnconfirmed,
   type OnchainStoreContext,
   buildSstore2InitCode,
   storeOnchain,
@@ -172,7 +173,12 @@ describe('storeOnchain', () => {
     )
   })
 
-  it('classifies an RPC failure on the receipt wait into RpcError', async () => {
+  it('a wait failure after broadcast preserves the in-flight txHash (OnchainDeployUnconfirmed, review r3740521403)', async () => {
+    // The deploy tx IS broadcast when the wait dies — reducing that to a bare
+    // classified RpcError (the old contract) lost the hash and invited a blind
+    // retry paying for a DUPLICATE deploy. The unknown-outcome state is now
+    // structured: OnchainDeployUnconfirmed carries the hash; the classified
+    // RPC failure rides as `cause`.
     const { ctx } = makeCtx()
     const flaky = {
       ...ctx,
@@ -182,7 +188,12 @@ describe('storeOnchain', () => {
         },
       },
     } as unknown as OnchainStoreContext
-    await expect(storeOnchain(new Uint8Array([1, 2, 3]), flaky)).rejects.toBeInstanceOf(RpcError)
+    const err = await storeOnchain(new Uint8Array([1, 2, 3]), flaky).catch((e) => e)
+    expect(err).toBeInstanceOf(OnchainDeployUnconfirmed)
+    const u = err as OnchainDeployUnconfirmed
+    expect(u.txHash).toMatch(/^0x/)
+    expect(u.code).toBe('PartialBatchFailure')
+    expect((u.cause as { code?: string })?.code).toBe('RpcError') // classified underneath
   })
 
   it('does NOT re-wrap a typed MultiChunkUnsupported through the classifier', async () => {
@@ -227,7 +238,11 @@ describe('storeOnchain', () => {
     }
     const guarded = { ...ctx, assertChain } as unknown as OnchainStoreContext
     const err = await storeOnchain(new Uint8Array([1, 2, 3]), guarded).catch((e) => e)
-    expect((err as { code?: string }).code).toBe('WrongChain')
+    // Post-broadcast the drift is an UNKNOWN outcome, not a definite failure —
+    // it surfaces as OnchainDeployUnconfirmed carrying the in-flight hash, with
+    // the WrongChain visible as `cause` (pre-send drift still throws raw).
+    expect(err).toBeInstanceOf(OnchainDeployUnconfirmed)
+    expect(((err as OnchainDeployUnconfirmed).cause as { code?: string })?.code).toBe('WrongChain')
     expect(checks).toBe(2) // before the chunk deploy (passed), before the chunk wait (threw)
     expect(calls.filter((c) => c.kind === 'chunk')).toHaveLength(1) // chunk did deploy
     expect(calls.filter((c) => c.kind === 'manager')).toHaveLength(0) // manager never sent
