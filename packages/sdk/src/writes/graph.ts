@@ -537,14 +537,25 @@ export function buildFileWriteGraph(input: FileWriteGraphInput): FileWriteGraph 
     dataRefs: [],
   })
 
-  // ── file-ANCHOR — names the path under the parent folder (base layer 2) ───────
+  // ── file-ANCHOR — names the path under the parent folder (base layer 1, WITH
+  // DATA) ────────────────────────────────────────────────────────────────────────
+  // The anchor depends only on the already-resolved parent (concrete, or the
+  // LAST created folder from layer `m`), so it shares DATA's layer
+  // (r3741399511): two fs.write calls racing for the same empty path both probe
+  // no-anchor, and with the anchor in a LATER layer the loser's DATA layer
+  // mined before its anchor layer reverted `DuplicateFileName` — paid storage
+  // plus an orphaned DATA graph. In ONE multiAttest the slot collision rolls
+  // the whole layer back atomically: the loser lands NOTHING (its storage
+  // deploys remain, but they ride the partial-error's `storage` and are reused
+  // by the retry, which then resolves the winner's anchor → the overwrite path).
+  //
   // OVERWRITE (Bug-1 fix): when the file anchor at `(parent, fileName, DATA)` already
   // exists, it is PERMANENT/non-revocable — re-minting the same slot reverts
   // (`DuplicateFileName`). So skip the file-ANCHOR entirely; the placement PIN and any
   // Overview `system` TAG point at the supplied CONCRETE `existingFileAnchorUID` instead.
   const existingFileAnchorUID = input.existingFileAnchorUID
   if (existingFileAnchorUID === undefined) {
-    attestations.push(buildFileAnchor(input, m + 2))
+    attestations.push(buildFileAnchor(input, m + 1))
   }
   // The file-ANCHOR reference the Overview TAG + placement PIN target: the freshly
   // minted anchor (symbolic) on a first write, or the concrete reused UID on overwrite.

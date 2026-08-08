@@ -308,8 +308,9 @@ describe('submitWriteTier1 — full fresh-file graph', () => {
     expect(result.layerTxHashes).toHaveLength(3)
     expect(result.layers.map((l) => l.layer)).toEqual([1, 2, 3])
 
-    // L1 = just DATA (1 entry), L3 = 4 PINs (placement + 3 binding), L2 = the rest.
-    expect(sent[0].entries).toHaveLength(1) // DATA
+    // L1 = DATA + file-ANCHOR (atomic slot mint, r3741399511), L3 = 4 PINs
+    // (placement + 3 binding), L2 = the rest.
+    expect(sent[0].entries).toHaveLength(2) // DATA + file-ANCHOR
     expect(sent[2].entries).toHaveLength(4) // PINs
     const total = sent.reduce((n, s) => n + s.entries.length, 0)
     expect(total).toBe(13)
@@ -344,15 +345,17 @@ describe('submitWriteTier1 — full fresh-file graph', () => {
     expect(dataUID).toBe(uid(0xd000))
 
     // Every L2 entry whose graph refUID was symbolic-DATA must now carry the real
-    // DATA UID. The file-ANCHOR refs the concrete PARENT (not DATA). PROPERTYs ref 0x0.
+    // DATA UID. PROPERTYs ref 0x0. The file-ANCHOR rides in L1 with DATA now
+    // (r3741399511) and points at the concrete PARENT.
+    const l1refs = sent[0].entries.map((e) => e.refUID)
+    expect(l1refs).toContain(PARENT) // the file-ANCHOR, atomically with DATA
     const l2 = sent[1].entries
     const refUIDs = l2.map((e) => e.refUID)
     // MIRROR + 3 key-anchors point at DATA.
     expect(refUIDs.filter((r) => r === dataUID).length).toBe(4)
-    // file-ANCHOR points at the concrete parent.
-    expect(refUIDs).toContain(PARENT)
     // PROPERTYs point at 0x0.
     expect(refUIDs.filter((r) => r === ZERO_UID).length).toBe(3)
+    expect(refUIDs).not.toContain(PARENT) // no anchor left in L2
   })
 
   it('re-encodes PIN `definition` between layers with the mined anchor UID', async () => {
@@ -427,7 +430,7 @@ describe('submitWriteTier1 — full fresh-file graph', () => {
     const events: number[] = []
     const { ctx } = makeMockChain()
     await submitWriteTier1(plan, { ...ctx, onLayer: (e) => events.push(e.minted.length) })
-    expect(events).toEqual([1, 8, 4]) // L1=1, L2=8, L3=4
+    expect(events).toEqual([2, 7, 4]) // L1=2 (DATA + fileAnchor), L2=7, L3=4
   })
 })
 
@@ -810,12 +813,14 @@ describe('submitWriteTier1 — partial-write boundary: three distinct failure mo
     expect(we.code).toBe('PartialBatchFailure')
     // No txHash field — nothing is in flight.
     expect((we as unknown as { txHash?: unknown }).txHash).toBeUndefined()
-    // Layer-1 DATA landed before the failure (prior-layer refs preserved).
-    expect(we.landed.size).toBe(1)
+    // Layer-1 DATA + file-ANCHOR landed before the failure (r3741399511: the
+    // anchor shares DATA's layer now — prior-layer refs preserved).
+    expect(we.landed.size).toBe(2)
     expect(we.landed.get('DATA')).toBe(uid(0xd000))
-    // The failed refs are the layer-2 refs (8 of them).
-    expect(we.failedRefs).toHaveLength(8)
-    expect(we.failedRefs).toContain('fileAnchor')
+    expect(we.landed.has('fileAnchor')).toBe(true)
+    // The failed refs are the layer-2 refs (7 of them — the anchor moved to L1).
+    expect(we.failedRefs).toHaveLength(7)
+    expect(we.failedRefs).toContain('mirror:0')
     // Only one layer tx was sent successfully before the failure.
     expect(sent).toHaveLength(1)
     // r3740820587: layer 1 ALREADY LANDED, so the message must NOT bless a
@@ -836,7 +841,7 @@ describe('submitWriteTier1 — partial-write boundary: three distinct failure mo
     const we = err as WriteSendUnknownError
     expect(we.layer).toBe(2)
     expect(we.landed.get('DATA')).toBe(uid(0xd000)) // prior layer preserved
-    expect(we.refs).toContain('fileAnchor')
+    expect(we.refs).toContain('mirror:0') // a layer-2 ref (the anchor now lands in L1)
     expect(String(we.message)).toMatch(/UNKNOWN and it MAY still mine/)
   })
 
@@ -854,10 +859,10 @@ describe('submitWriteTier1 — partial-write boundary: three distinct failure mo
     expect(we.mined).toBe(false)
     // Carries the in-flight tx hash (call 2 → 0x..02).
     expect(we.txHash).toBe(uid(2))
-    // Prior-layer (DATA) refs preserved.
-    expect(we.landed.size).toBe(1)
+    // Prior-layer (DATA + file-ANCHOR) refs preserved.
+    expect(we.landed.size).toBe(2)
     expect(we.landed.get('DATA')).toBe(uid(0xd000))
-    expect(we.failedRefs).toContain('fileAnchor')
+    expect(we.failedRefs).toContain('mirror:0')
     // The layer-2 tx WAS broadcast before the receipt wait failed.
     expect(sent).toHaveLength(2)
     expect(String(we.message)).toMatch(/may still mine/)
@@ -874,7 +879,7 @@ describe('submitWriteTier1 — partial-write boundary: three distinct failure mo
     expect(we.mined).toBe(true)
     // Carries the mined tx hash (call 3 → 0x..03).
     expect(we.txHash).toBe(uid(3))
-    // Layers 1 + 2 landed (1 + 8 = 9 refs) — prior-layer refs preserved.
+    // Layers 1 + 2 landed (2 + 7 = 9 refs) — prior-layer refs preserved.
     expect(we.landed.size).toBe(9)
     expect(String(we.message)).toMatch(/mined and reverted/)
   })

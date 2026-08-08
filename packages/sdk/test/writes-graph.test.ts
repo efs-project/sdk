@@ -89,9 +89,11 @@ describe('buildFileWriteGraph — full new-file graph', () => {
 
   it('assigns each node to the correct DAG layer', () => {
     expect(find(atts, REF.DATA).layer).toBe(1)
+    // The file-ANCHOR shares DATA's layer (r3741399511): a same-path race then
+    // rolls the WHOLE layer back on DuplicateFileName — no orphaned DATA.
+    expect(find(atts, REF.FILE_ANCHOR).layer).toBe(1)
 
     for (const ref of [
-      REF.FILE_ANCHOR,
       REF.mirror(0),
       REF.keyAnchor('contentType'),
       REF.keyAnchor('contentHash'),
@@ -359,8 +361,8 @@ describe('mkdir -p — missing ancestor folders folded into the write', () => {
       const m = 2 // two created folders
       // DATA base layer 1 → m+1 = 3.
       expect(find(atts, REF.DATA).layer).toBe(m + 1)
-      // file-ANCHOR / MIRROR base layer 2 → m+2 = 4.
-      expect(find(atts, REF.FILE_ANCHOR).layer).toBe(m + 2)
+      // file-ANCHOR shares DATA's layer (m+1); MIRROR base layer 2 → m+2 = 4.
+      expect(find(atts, REF.FILE_ANCHOR).layer).toBe(m + 1)
       expect(find(atts, REF.mirror(0)).layer).toBe(m + 2)
       // placement-PIN base layer 3 → m+3 = 5.
       expect(find(atts, REF.PLACEMENT_PIN).layer).toBe(m + 3)
@@ -420,7 +422,7 @@ describe('mkdir -p — missing ancestor folders folded into the write', () => {
     it('file-ANCHOR refs the single created folder; layers shift by 1', () => {
       const fileAnchor = find(atts, REF.FILE_ANCHOR)
       expect(fileAnchor.refUID).toEqual({ ref: REF.parentFolder(0) })
-      expect(fileAnchor.layer).toBe(3) // m=1 → base L2 = m+2 = 3
+      expect(fileAnchor.layer).toBe(2) // m=1 → shares DATA's layer (m+1 = 2)
       expect(find(atts, REF.DATA).layer).toBe(2) // m+1
     })
 
