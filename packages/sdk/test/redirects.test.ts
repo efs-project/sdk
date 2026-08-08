@@ -581,6 +581,30 @@ describe('canonicalizeSameAs', () => {
   const B = uid(0x2)
   const C = uid(0x3)
 
+  it('bounds the GRAPH at MAX_SAMEAS_NODES, counting discovered targets (r3741950437)', async () => {
+    // ONE node fanning out to 400 distinct sameAs targets — under the per-node
+    // 512-slot scan bound, but well over the 256-NODE graph budget. Gating only
+    // the fetch loop admitted every target (the leaf backfill then inserted
+    // them all), so Tarjan saw 400+ nodes despite the documented cap; with a
+    // few such nodes it reached ~131k. The budget now applies at DISCOVERY, and
+    // the truncation is reported.
+    const fanOut = uid(0x100)
+    const edges: Record<string, Edge[]> = {
+      [fanOut]: Array.from({ length: 400 }, (_, i) => ({
+        attester: ATTESTER,
+        redirectUID: uid(0x20000 + i),
+        target: uid(0x30000 + i),
+        kind: 0,
+      })),
+    }
+    const out = await canonicalizeSameAs(ctxWith(makeChain(edges)), fanOut, [ATTESTER])
+    expect(out.complete).toBe(false) // truncated, and says so
+    // The entry node has no incoming edge here, so its SCC is itself — the
+    // point is that the WALK stayed bounded rather than materializing 5000.
+    expect(out.canonical).toBe(fanOut)
+    expect(out.members).toEqual([fanOut])
+  })
+
   it('V11 — the canonical representative is the lowest UID in the SCC, entry-independent', async () => {
     // A↔B, B↔C — one SCC {A,B,C}; canonical = A from any entry.
     const edges: Record<string, Edge[]> = {

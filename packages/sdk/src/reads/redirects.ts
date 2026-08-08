@@ -382,32 +382,42 @@ export async function canonicalizeSameAs(
   const canonicalCase = new Map<string, Hex>() // lowercase → original casing
   const queue: Hex[] = [dataUID]
   canonicalCase.set(dataUID.toLowerCase(), dataUID)
+  // Every node ADMITTED to the graph — fetched or merely discovered as an edge
+  // target. The budget is enforced HERE, at discovery (r3741950437): gating only
+  // the fetch loop let each of the 256 fetched nodes queue up to 512 targets,
+  // all of which the leaf-backfill below then inserted — ~131k nodes into
+  // Tarjan despite the documented 256-node cap. An edge whose target cannot be
+  // admitted is dropped (and `complete: false` says so), which keeps
+  // `adjacency ⊆ known` and therefore |graph| <= MAX_SAMEAS_NODES.
+  const known = new Set<string>([dataUID.toLowerCase()])
   let complete = true
 
   while (queue.length > 0) {
     const node = queue.shift() as Hex
     const key = node.toLowerCase()
     if (adjacency.has(key)) continue
-    if (adjacency.size >= MAX_SAMEAS_NODES) {
-      complete = false
-      break
-    }
     const edges = await listLensRedirects(ctx, node, attesters)
     const targets = new Set<string>()
     for (const e of edges) {
       if (e.kindCode !== 0) continue // sameAs only
       const tKey = e.to.toLowerCase()
-      targets.add(tKey)
-      if (!canonicalCase.has(tKey)) {
+      if (!known.has(tKey)) {
+        if (known.size >= MAX_SAMEAS_NODES) {
+          complete = false // budget exhausted — drop the edge rather than admit
+          continue
+        }
+        known.add(tKey)
         canonicalCase.set(tKey, e.to)
         queue.push(e.to)
       }
+      targets.add(tKey)
     }
     adjacency.set(key, targets)
   }
 
-  // Targets we never fetched edges for (beyond the cap, or plain leaves) are
-  // nodes with no known outgoing edges — trivially their own SCC.
+  // Targets we never fetched edges for (plain leaves — every one already
+  // ADMITTED, so this cannot exceed the budget) are nodes with no known
+  // outgoing edges: trivially their own SCC.
   for (const targets of adjacency.values()) {
     for (const t of targets) if (!adjacency.has(t)) adjacency.set(t, new Set())
   }
