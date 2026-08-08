@@ -1115,6 +1115,38 @@ describe('attestationsFor', () => {
   })
 })
 
+describe('attestation hydration excludes revoked (review r3740549057)', () => {
+  it('a revoked UID degrades to undefined in the hydration bag — same as absent', async () => {
+    const revokedUID = uid(0x9e40)
+    const ctx = makeCtx({
+      attestations: {},
+    })
+    const inner = ctx.publicClient.readContract.bind(ctx.publicClient)
+    ctx.publicClient.readContract = async (args) => {
+      if (
+        args.functionName === 'getAttestation' &&
+        (args.args?.[0] as string)?.toLowerCase() === revokedUID.toLowerCase()
+      ) {
+        return {
+          uid: revokedUID,
+          schema: SCHEMAS.data,
+          time: 1n,
+          expirationTime: 0n,
+          revocationTime: 77n, // REVOKED — EAS still returns the record
+          refUID: uid(0),
+          recipient: addr(0),
+          attester: LENS,
+          revocable: true,
+          data: '0x' as Hex,
+        }
+      }
+      return inner(args)
+    }
+    const out = await attestationsFor(ctx, [{ sourceUIDs: { placement: revokedUID } }])
+    expect(out[0]?.attestations.placement).toBeUndefined()
+  })
+})
+
 // ── list (pagination + iteration) ───────────────────────────────────────────────
 
 describe('list', () => {

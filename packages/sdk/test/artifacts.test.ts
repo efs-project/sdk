@@ -215,3 +215,33 @@ describe('strict ID validation at the parse boundary (review r3740509657)', () =
     }
   })
 })
+
+describe('envelope version discipline (review r3740549059)', () => {
+  it('rejects 0 / negative / fractional versions as MalformedArtifact; newer stays UnsupportedArtifact', async () => {
+    const { parseDataRef, serializeDataRef, MalformedArtifact, UnsupportedArtifact } = await import(
+      '../src/artifacts.js'
+    )
+    const A20 = `0x${'04'.repeat(20)}`
+    const ref = {
+      __brand: 'DataRef',
+      profile: 'efs/v1',
+      uid: `0x${'44'.repeat(32)}`,
+      chainId: 1,
+      resolvedBy: A20,
+    } as never
+    const json = serializeDataRef(ref)
+    for (const v of ['0', '-1', '0.5']) {
+      const tampered = json.replace('"v":1', `"v":${v}`)
+      expect(tampered).not.toBe(json)
+      const err = await Promise.resolve()
+        .then(() => parseDataRef(tampered))
+        .then(() => undefined)
+        .catch((e) => e)
+      expect(err, v).toBeInstanceOf(MalformedArtifact)
+    }
+    const newer = json.replace('"v":1', '"v":2')
+    await expect(Promise.resolve().then(() => parseDataRef(newer))).rejects.toBeInstanceOf(
+      UnsupportedArtifact,
+    )
+  })
+})

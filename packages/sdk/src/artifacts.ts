@@ -135,7 +135,13 @@ function parseEnvelope(json: string, artifact: ArtifactHeader['artifact']): Enve
     throw new MalformedArtifact('missing the envelope header')
   }
   if (header.profile !== 'efs/v1') throw new UnsupportedArtifact({ foundProfile: header.profile })
-  if (typeof header.v !== 'number' || header.v > CURRENT_VERSION) {
+  // Version discipline: NEWER-than-supported is UnsupportedArtifact (upgrade
+  // the SDK); a version that was never legal — 0, negative, fractional, NaN —
+  // is structural corruption, not a future format: MalformedArtifact.
+  if (typeof header.v !== 'number' || !Number.isInteger(header.v) || header.v < 1) {
+    throw new MalformedArtifact(`envelope version is not a positive integer (${String(header.v)})`)
+  }
+  if (header.v > CURRENT_VERSION) {
     throw new UnsupportedArtifact({ foundVersion: header.v })
   }
   if (header.artifact !== artifact) {

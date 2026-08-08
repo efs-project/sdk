@@ -18,6 +18,7 @@ import {
   MultiChunkUnsupported,
   OnchainDeployUnconfirmed,
   type OnchainStoreContext,
+  OnchainStoreIncomplete,
   buildSstore2InitCode,
   storeOnchain,
 } from '../src/writes/onchain.js'
@@ -217,10 +218,15 @@ describe('storeOnchain', () => {
     }
     const signalCtx = { ...ctx, signal: controller.signal } as unknown as OnchainStoreContext
     const err = await storeOnchain(new Uint8Array([1, 2, 3]), signalCtx).catch((e) => e)
-    // The abort comes from `signal.throwIfAborted()`, which is OUTSIDE the classifier
-    // funnel — so it must propagate as the raw AbortError, NOT a wrapped EfsError.
-    expect(err).not.toBeInstanceOf(EfsError)
-    expect((err as Error).name).toBe('AbortError')
+    // The chunk LANDED before the abort — the failure must carry the landed
+    // chunk state (r3740549054): a raw AbortError would invite a blind retry
+    // paying for a duplicate chunk. Same post-landed-wraps rule as the layered
+    // submitter; the AbortError rides as `cause`.
+    expect(err).toBeInstanceOf(OnchainStoreIncomplete)
+    const p = err as OnchainStoreIncomplete
+    expect(p.chunkAddress).toMatch(/^0x/)
+    expect(p.chunkTx).toMatch(/^0x/)
+    expect((p.cause as Error).name).toBe('AbortError')
     expect(calls.filter((c) => c.kind === 'chunk')).toHaveLength(1) // chunk did deploy
     expect(calls.filter((c) => c.kind === 'manager')).toHaveLength(0) // manager never sent
   })
@@ -260,9 +266,28 @@ describe('storeOnchain', () => {
     }
     const guarded = { ...ctx, assertChain } as unknown as OnchainStoreContext
     const err = await storeOnchain(new Uint8Array([1, 2, 3]), guarded).catch((e) => e)
-    expect((err as { code?: string }).code).toBe('WrongChain')
+    // Post-landed-chunk failures carry the landed state; the drift rides as cause.
+    expect(err).toBeInstanceOf(OnchainStoreIncomplete)
+    expect(((err as OnchainStoreIncomplete).cause as { code?: string })?.code).toBe('WrongChain')
     expect(checks).toBe(3) // chunk deploy + chunk wait passed; manager deploy guard threw
     expect(calls.filter((c) => c.kind === 'chunk')).toHaveLength(1) // chunk did deploy
     expect(calls.filter((c) => c.kind === 'manager')).toHaveLength(0) // manager never sent
+  })
+})
+
+describe('OnchainStoreIncomplete (review r3740549054)', () => {
+  it('a wallet rejection on the MANAGER deploy carries the landed chunk state', async () => {
+    const { ctx, calls } = makeCtx()
+    const origSend = ctx.walletClient.deployContract?.bind(ctx.walletClient)
+    ;(ctx.walletClient as { deployContract: unknown }).deployContract = async () => {
+      throw Object.assign(new Error('User rejected the request.'), { code: 4001 })
+    }
+    void origSend
+    const err = await storeOnchain(new Uint8Array([1, 2, 3]), ctx).catch((e) => e)
+    expect(err).toBeInstanceOf(OnchainStoreIncomplete)
+    const p = err as OnchainStoreIncomplete
+    expect(p.chunkAddress).toMatch(/^0x/)
+    expect((p.cause as { code?: string })?.code).toBe('UserRejected')
+    expect(calls.filter((c) => c.kind === 'chunk')).toHaveLength(1)
   })
 })

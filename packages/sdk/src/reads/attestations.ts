@@ -77,6 +77,13 @@ export async function attestationFor(
     args: [uid],
   })
   if (raw.uid === ZERO_UID) return undefined
+  // The documented hydration contract: revoked records degrade to `undefined`
+  // exactly like absent ones (ADR-0051 read-excludes-revoked). EAS still
+  // returns the full record for a revoked UID, so without this check a direct
+  // `eas.attestationsFor()` input — or an expansion whose source was revoked
+  // between the active-record lookup and this hydration — surfaced a revoked
+  // record as live.
+  if (raw.revocationTime !== 0n) return undefined
   const att = toAttestation(raw)
   if (opts?.withSchema && att.schema !== ZERO_UID) {
     const schemaRecord = await schemaRecordFor(ctx, att.schema)

@@ -261,23 +261,32 @@ export async function storeOnchain(
   const chunkAddress = await requireContractAddress(ctx, chunkTx, 'SSTORE2 chunk')
 
   // 2. Deploy the chunk manager wrapping the chunk address (single-element array).
-  //    Re-check the signal BETWEEN the two irreversible deploys — an abort after the
-  //    chunk landed must not still send the manager tx.
-  ctx.signal?.throwIfAborted()
-  // Re-assert the live chain BETWEEN the two deploys — the wallet prompt for the chunk
-  // is the user's chance to switch networks; the manager must not land on the new chain
-  // while the chunk's receipt was awaited on the deployment chain (orphaned storage).
-  await ctx.assertChain?.()
-  const managerTx = await classified(() =>
-    ctx.walletClient.deployContract({
-      abi: EFS_BYTES_STORE_ABI,
-      bytecode: EFS_BYTES_STORE_BYTECODE,
-      // The store reports `ctx.contentType` on its ERC-5219 path (empty ⇒
-      // application/octet-stream). viem ABI-encodes the 2-arg constructor.
-      args: [[chunkAddress], ctx.contentType ?? ''],
-      ...fwd,
-    }),
-  )
+  //    The chunk is now LANDED and IRREVERSIBLE — every failure from here to the
+  //    manager broadcast (abort, chain drift, wallet rejection) must carry the
+  //    landed chunk state: a raw error would invite a blind fs.write retry that
+  //    pays for a DUPLICATE chunk while this one sits on-chain.
+  let managerTx: Hex
+  try {
+    // Re-check the signal BETWEEN the two irreversible deploys — an abort after the
+    // chunk landed must not still send the manager tx.
+    ctx.signal?.throwIfAborted()
+    // Re-assert the live chain BETWEEN the two deploys — the wallet prompt for the chunk
+    // is the user's chance to switch networks; the manager must not land on the new chain
+    // while the chunk's receipt was awaited on the deployment chain (orphaned storage).
+    await ctx.assertChain?.()
+    managerTx = await classified(() =>
+      ctx.walletClient.deployContract({
+        abi: EFS_BYTES_STORE_ABI,
+        bytecode: EFS_BYTES_STORE_BYTECODE,
+        // The store reports `ctx.contentType` on its ERC-5219 path (empty ⇒
+        // application/octet-stream). viem ABI-encodes the 2-arg constructor.
+        args: [[chunkAddress], ctx.contentType ?? ''],
+        ...fwd,
+      }),
+    )
+  } catch (cause) {
+    throw new OnchainStoreIncomplete(chunkAddress, chunkTx, cause)
+  }
   const chunkManager = await requireContractAddress(ctx, managerTx, 'chunk manager')
 
   // web3://<chunkManager> — EFSRouter._parseContractFromWeb3URI parses the address
@@ -333,6 +342,27 @@ async function requireContractAddress(
     )
   }
   return addr
+}
+
+/** The SSTORE2 chunk LANDED (irreversibly, receipt confirmed) but the write
+ * stopped before the manager tx was broadcast — an abort, a chain drift, or a
+ * wallet rejection on the second leg. Carries the landed chunk state so the
+ * caller (or a future resume) can wrap the EXISTING chunk in a manager instead
+ * of a blind `fs.write` retry paying for a duplicate chunk deploy. */
+export class OnchainStoreIncomplete extends EfsError {
+  override name = 'OnchainStoreIncomplete'
+  /** The landed (irreversible) SSTORE2 chunk contract. */
+  readonly chunkAddress: Address
+  /** The mined chunk deploy transaction. */
+  readonly chunkTx: Hex
+  constructor(chunkAddress: Address, chunkTx: Hex, cause: unknown) {
+    super(
+      `EFS write: the SSTORE2 chunk landed at ${chunkAddress} (tx ${chunkTx}), but the write stopped before the chunk-manager deploy. The chunk is on-chain and paid for — a blind fs.write retry deploys a DUPLICATE; recovery should wrap the existing chunk in a manager instead.`,
+      { code: 'PartialBatchFailure', cause },
+    )
+    this.chunkAddress = chunkAddress
+    this.chunkTx = chunkTx
+  }
 }
 
 /** A storage deploy tx was BROADCAST but its receipt could not be confirmed
