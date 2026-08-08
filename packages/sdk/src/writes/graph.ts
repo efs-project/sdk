@@ -329,6 +329,11 @@ export interface FileWriteGraph {
   readonly existingAnchorParentUID?: Hex
   /** See {@link FileWriteGraph.existingAnchorParentUID}. */
   readonly existingAnchorName?: string
+  /** The BUCKET the reused/definition anchor must live in (files: the DATA
+   * schema; property bindings: the PROPERTY schema). Checked UNCONDITIONALLY —
+   * reads only discover anchors in the right bucket. Falls back to
+   * `dataSchemaUID` when absent. */
+  readonly existingAnchorForSchema?: Hex
   /** The hardlink target DATA UID, stamped so the submitter's gates need no
    * placement-PIN ref lookup (and so STAMPED edge plans can be gated). */
   readonly hardlinkDataUID?: Hex
@@ -502,6 +507,7 @@ export function buildFileWriteGraph(input: FileWriteGraphInput): FileWriteGraph 
             existingAnchorUID: existingFileAnchorUID,
             existingAnchorParentUID: input.parentAnchorUID,
             existingAnchorName: input.fileName,
+            existingAnchorForSchema: schemas.data,
           }
         : {}),
       attestations: stableSortByLayer([
@@ -664,6 +670,7 @@ export function buildFileWriteGraph(input: FileWriteGraphInput): FileWriteGraph 
           existingAnchorUID: existingFileAnchorUID,
           existingAnchorParentUID: input.parentAnchorUID,
           existingAnchorName: input.fileName,
+          existingAnchorForSchema: schemas.data,
         }
       : {}),
     attestations: ordered,

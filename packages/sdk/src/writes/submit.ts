@@ -565,54 +565,56 @@ async function assertConcreteAnchorIsAnchor(
       { code: 'InvalidArgument' },
     )
   }
-  // SLOT BINDING (r3741335345): being an ANCHOR is not enough — a valid ANCHOR
-  // from a DIFFERENT slot (another file, a generic folder) would skip the
-  // requested anchor's mint and silently overwrite a different path. When the
-  // builder stamped the requested slot, verify the reused anchor's refUID
-  // (parent) and encoded (name, forSchema) name EXACTLY that slot. Plans whose
-  // anchor is caller-chosen by design (the standalone placement-PIN plan) carry
-  // no slot stamps and skip this.
+  // BUCKET check — UNCONDITIONAL (r3741378774): decode every reused/definition
+  // anchor's (name, forSchema) payload and require the plan's expected bucket
+  // (files: DATA; property bindings: PROPERTY) even when no parent/name slot
+  // was stamped — reads only discover anchors in the right bucket, so a
+  // generic-folder or wrong-bucket ANCHOR yields a confirmed-but-invisible
+  // write. (The first attempt at this hoist never landed — a script fault this
+  // review caught; the pins.place inline gate had masked it in tests.)
+  let name: string | undefined
+  let forSchema: Hex | undefined
+  try {
+    const [n, f] = decodeAbiParameters(
+      [{ type: 'string' }, { type: 'bytes32' }],
+      att?.data as Hex,
+    ) as [string, Hex]
+    name = n
+    forSchema = f
+  } catch {
+    throw new EfsError(
+      `EFS write: the reused/definition ANCHOR ${target}'s payload does not decode as (name, forSchema) — it does not name a slot.`,
+      { code: 'InvalidArgument' },
+    )
+  }
+  const expectedBucket = plan.existingAnchorForSchema ?? plan.dataSchemaUID
+  if (expectedBucket !== undefined && forSchema.toLowerCase() !== expectedBucket.toLowerCase()) {
+    throw new EfsError(
+      `EFS write: the reused/definition ANCHOR ${target} lives in bucket ${forSchema}, not the expected bucket ${expectedBucket} — reads resolve anchors per-bucket, so this write would confirm but never be discovered.`,
+      { code: 'InvalidArgument' },
+    )
+  }
+  // SLOT BINDING (r3741335345/r3741378777): when the builder stamped the
+  // REQUESTED slot, verify the anchor's refUID (parent) and decoded name match
+  // it — a valid ANCHOR from a DIFFERENT slot would silently write another
+  // path/key. Caller-chosen-anchor plans carry no slot stamps and skip only
+  // THIS part.
   const expectedParent = plan.existingAnchorParentUID
   const expectedName = plan.existingAnchorName
-  if (expectedParent !== undefined || expectedName !== undefined) {
+  if (expectedParent !== undefined) {
     const refUID = att?.refUID
-    if (
-      expectedParent !== undefined &&
-      (refUID === undefined || refUID.toLowerCase() !== expectedParent.toLowerCase())
-    ) {
+    if (refUID === undefined || refUID.toLowerCase() !== expectedParent.toLowerCase()) {
       throw new EfsError(
-        `EFS write: the reused file-ANCHOR ${target} hangs under parent ${refUID ?? 'unknown'}, not the requested parent ${expectedParent} — placing here would overwrite a DIFFERENT path while leaving the requested one unchanged.`,
+        `EFS write: the reused ANCHOR ${target} hangs under parent ${refUID ?? 'unknown'}, not the requested parent ${expectedParent} — this write would land at a DIFFERENT slot while the requested one stays unchanged.`,
         { code: 'InvalidArgument' },
       )
     }
-    let name: string | undefined
-    let forSchema: Hex | undefined
-    try {
-      const [n, f] = decodeAbiParameters(
-        [{ type: 'string' }, { type: 'bytes32' }],
-        att?.data as Hex,
-      ) as [string, Hex]
-      name = n
-      forSchema = f
-    } catch {
-      throw new EfsError(
-        `EFS write: the reused file-ANCHOR ${target}'s payload does not decode as (name, forSchema) — it does not name a file slot.`,
-        { code: 'InvalidArgument' },
-      )
-    }
-    if (expectedName !== undefined && name !== expectedName) {
-      throw new EfsError(
-        `EFS write: the reused file-ANCHOR ${target} is named '${name}', not the requested '${expectedName}' — placing here would overwrite a DIFFERENT file.`,
-        { code: 'InvalidArgument' },
-      )
-    }
-    const expectedBucket = plan.dataSchemaUID
-    if (expectedBucket !== undefined && forSchema.toLowerCase() !== expectedBucket.toLowerCase()) {
-      throw new EfsError(
-        `EFS write: the reused file-ANCHOR ${target} lives in bucket ${forSchema}, not the DATA file bucket ${expectedBucket} — it is a folder/typed anchor, not this file's slot.`,
-        { code: 'InvalidArgument' },
-      )
-    }
+  }
+  if (expectedName !== undefined && name !== expectedName) {
+    throw new EfsError(
+      `EFS write: the reused ANCHOR ${target} is named '${name}', not the requested '${expectedName}' — this write would land at a DIFFERENT slot.`,
+      { code: 'InvalidArgument' },
+    )
   }
 }
 

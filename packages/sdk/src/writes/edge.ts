@@ -216,7 +216,20 @@ export function buildPropertyPlan(
       refUID: { ref: EDGE_REF.PROPERTY }, // refUID = the fresh PROPERTY (the binding claim)
       dataRefs: [], // definition is concrete — nothing for the submitter to thread
     }
-    return { profile: 'efs/v1', hardlink: false, attestations: [property, bindingPin] }
+    // REUSE stamps (r3741378777): the boundary gate verifies the reused
+    // key-anchor actually names the REQUESTED (dataUID, key, PROPERTY) slot
+    // before layer 1 broadcasts — an unrelated anchor would bind the fresh
+    // PROPERTY at a definition `props.get(dataUID, key)` never resolves.
+    return {
+      profile: 'efs/v1',
+      hardlink: false,
+      anchorSchemaUID: schemas.anchor,
+      existingAnchorUID: existingKeyAnchorUID,
+      existingAnchorParentUID: dataUID,
+      existingAnchorName: key,
+      existingAnchorForSchema: schemas.property,
+      attestations: [property, bindingPin],
+    }
   }
 
   // NEW key — the full triple. L1 key-ANCHOR — `forSchema` MUST be the PROPERTY schema
@@ -292,6 +305,7 @@ export function buildPlacementPinPlan(
     mirrorSchemaUID: schemas.mirror,
     anchorSchemaUID: schemas.anchor,
     existingAnchorUID: anchor,
+    existingAnchorForSchema: schemas.data,
     attestations: [pin],
   }
 }

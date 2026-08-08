@@ -245,6 +245,19 @@ function makeSubmitCtx(): {
     async readContract(args: { functionName: string; args?: readonly unknown[] }) {
       if (args.functionName === 'getAttestation') {
         const [queried] = (args.args ?? []) as [Hex]
+        // The props-reuse boundary gate reads the KEY_ANCHOR (uid 0x701): a
+        // genuine (DATA=0x700, 'author', PROPERTY) slot anchor.
+        if (queried === uid(0x701)) {
+          return {
+            uid: queried,
+            schema: SCHEMAS.anchor,
+            refUID: uid(0x700),
+            data: encodeAbiParameters(
+              [{ type: 'string' }, { type: 'bytes32' }],
+              ['author', SCHEMAS.property],
+            ),
+          }
+        }
         if (queried === uid(0x800)) {
           return {
             uid: queried,
@@ -675,6 +688,18 @@ describe('makePropsNs', () => {
       pinReq?.data[0]?.data as Hex,
     ) as [Hex]
     expect(definition).toBe(KEY_ANCHOR)
+  })
+
+  it('a reused key-anchor from a DIFFERENT slot refuses at the boundary (r3741378777)', async () => {
+    // buildPropertyPlan with an unrelated existing anchor would bind the fresh
+    // PROPERTY at a definition props.get(dataUID, key) never resolves. The
+    // plan's reuse stamps make the layered boundary verify the slot.
+    const { ctx, calls } = makeSubmitCtx()
+    const unrelated = uid(0x9999) // makeSubmitCtx serves it as a DATA attestation
+    const plan = buildPropertyPlan(SCHEMAS, DATA, KEY, VALUE, unrelated)
+    const err = await submitEdgePlan(plan, ctx).catch((e) => e)
+    expect((err as { code?: string }).code).toBe('InvalidArgument')
+    expect(calls).toHaveLength(0) // nothing broadcast — layer 1 never sent
   })
 
   it('get reads the active value the lens attester bound', async () => {

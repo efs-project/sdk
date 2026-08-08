@@ -577,7 +577,7 @@ describe('submitWriteTier1 — hardlink plan', () => {
     const { ctx, sent } = makeMockChain({ anchorParent: uid(0x999) })
     const err = await submitWriteTier1(plan, ctx).catch((e) => e)
     expect((err as { code?: string }).code).toBe('InvalidArgument')
-    expect(String((err as Error).message)).toMatch(/DIFFERENT path/)
+    expect(String((err as Error).message)).toMatch(/DIFFERENT slot/)
     expect(sent).toHaveLength(0)
   })
 
@@ -586,7 +586,7 @@ describe('submitWriteTier1 — hardlink plan', () => {
     const { ctx, sent } = makeMockChain({ anchorName: 'other.md' })
     const err = await submitWriteTier1(plan, ctx).catch((e) => e)
     expect((err as { code?: string }).code).toBe('InvalidArgument')
-    expect(String((err as Error).message)).toMatch(/DIFFERENT file/)
+    expect(String((err as Error).message)).toMatch(/DIFFERENT slot/)
     expect(sent).toHaveLength(0)
   })
 
