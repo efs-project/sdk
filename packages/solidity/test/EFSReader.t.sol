@@ -672,11 +672,13 @@ contract EFSReaderTest is Test {
 
     // followKind — only sameAs/supersededBy/symlink auto-follow.
     function test_FollowKind_OnlyEnforcedKindsFollow() public pure {
-        assertTrue(EFSReader.followKind(EFSReader.REDIRECT_KIND_SAME_AS), "sameAs follows");
-        assertTrue(
-            EFSReader.followKind(EFSReader.REDIRECT_KIND_SUPERSEDED_BY), "supersededBy follows"
+        assertFalse(
+            EFSReader.followKind(EFSReader.REDIRECT_KIND_SAME_AS), "sameAs never (canonicalization)"
         );
-        assertTrue(EFSReader.followKind(EFSReader.REDIRECT_KIND_SYMLINK), "symlink follows");
+        assertFalse(
+            EFSReader.followKind(EFSReader.REDIRECT_KIND_SUPERSEDED_BY), "supersededBy never (history)"
+        );
+        assertTrue(EFSReader.followKind(EFSReader.REDIRECT_KIND_SYMLINK), "symlink is the ONLY follow");
         assertFalse(
             EFSReader.followKind(EFSReader.REDIRECT_KIND_RELATED_VERSION), "relatedVersion never"
         );
@@ -748,7 +750,7 @@ contract EFSReaderTest is Test {
         bytes32 src = keccak256("dataDup");
         bytes32 canon = keccak256("dataCanon");
         bytes32 rUID = keccak256("r1");
-        _redirect(rUID, src, canon, EFSReader.REDIRECT_KIND_SAME_AS, ALICE);
+        _redirect(rUID, src, canon, EFSReader.REDIRECT_KIND_SYMLINK, ALICE);
 
         bytes32[] memory chain = new bytes32[](1);
         chain[0] = rUID;
@@ -763,8 +765,8 @@ contract EFSReaderTest is Test {
         bytes32 a = keccak256("A");
         bytes32 b = keccak256("B");
         bytes32 c = keccak256("C");
-        _redirect(keccak256("rAB"), a, b, EFSReader.REDIRECT_KIND_SUPERSEDED_BY, ALICE);
-        _redirect(keccak256("rBC"), b, c, EFSReader.REDIRECT_KIND_SUPERSEDED_BY, ALICE);
+        _redirect(keccak256("rAB"), a, b, EFSReader.REDIRECT_KIND_SYMLINK, ALICE);
+        _redirect(keccak256("rBC"), b, c, EFSReader.REDIRECT_KIND_SYMLINK, ALICE);
 
         bytes32[] memory chain = new bytes32[](2);
         chain[0] = keccak256("rAB");
@@ -804,10 +806,11 @@ contract EFSReaderTest is Test {
         bytes32 a = keccak256("A");
         bytes32 b = keccak256("B");
         bytes32 c = keccak256("C");
-        _redirect(keccak256("rAB"), a, b, EFSReader.REDIRECT_KIND_SAME_AS, ALICE);
-        // Second hop is REVOKED — walk should stop at B, not error, not reach C.
+        _redirect(keccak256("rAB"), a, b, EFSReader.REDIRECT_KIND_SYMLINK, ALICE);
+        // Second hop is REVOKED — walk should stop at B, not error, not reach C. Kind is
+        // symlink (the ONLY followable kind) so REVOCATION is what this test isolates.
         eas.setRedirectAttestation(
-            keccak256("rBC"), REDIRECT_SCHEMA, b, ALICE, 999, abi.encode(c, uint16(0))
+            keccak256("rBC"), REDIRECT_SCHEMA, b, ALICE, 999, abi.encode(c, uint16(2))
         );
 
         bytes32[] memory chain = new bytes32[](2);
@@ -817,6 +820,21 @@ contract EFSReaderTest is Test {
             EFSReader.resolveWithRedirects(_eas(), REDIRECT_SCHEMA, a, chain, ALICE, 0);
         assertEq(terminal, b, "stops at B (second hop inactive)");
         assertEq(hops, 1, "only first hop followed");
+    }
+
+    // resolveWithRedirects — the RATIFIED rule: sameAs is a non-followed terminal (specs/09 §2);
+    // canonicalization is a separate deliberate operation, never navigation.
+    function test_ResolveWithRedirects_SameAs_IsTerminal() public {
+        bytes32 a = keccak256("A");
+        bytes32 b = keccak256("B");
+        _redirect(keccak256("rAB"), a, b, EFSReader.REDIRECT_KIND_SAME_AS, ALICE);
+
+        bytes32[] memory chain = new bytes32[](1);
+        chain[0] = keccak256("rAB");
+        (bytes32 terminal, uint256 hops) =
+            EFSReader.resolveWithRedirects(_eas(), REDIRECT_SCHEMA, a, chain, ALICE, 0);
+        assertEq(terminal, a, "sameAs never navigates (no silent revision)");
+        assertEq(hops, 0, "zero hops followed");
     }
 
     // resolveWithRedirects — a non-followable kind (relatedVersion) stops without following.
@@ -837,8 +855,8 @@ contract EFSReaderTest is Test {
     function test_ResolveWithRedirects_Cycle_Reverts() public {
         bytes32 a = keccak256("A");
         bytes32 b = keccak256("B");
-        _redirect(keccak256("rAB"), a, b, EFSReader.REDIRECT_KIND_SAME_AS, ALICE);
-        _redirect(keccak256("rBA"), b, a, EFSReader.REDIRECT_KIND_SAME_AS, ALICE);
+        _redirect(keccak256("rAB"), a, b, EFSReader.REDIRECT_KIND_SYMLINK, ALICE);
+        _redirect(keccak256("rBA"), b, a, EFSReader.REDIRECT_KIND_SYMLINK, ALICE);
 
         bytes32[] memory chain = new bytes32[](2);
         chain[0] = keccak256("rAB");
@@ -852,8 +870,8 @@ contract EFSReaderTest is Test {
         bytes32 a = keccak256("A");
         bytes32 b = keccak256("B");
         bytes32 c = keccak256("C");
-        _redirect(keccak256("rAB"), a, b, EFSReader.REDIRECT_KIND_SAME_AS, ALICE);
-        _redirect(keccak256("rBC"), b, c, EFSReader.REDIRECT_KIND_SAME_AS, ALICE);
+        _redirect(keccak256("rAB"), a, b, EFSReader.REDIRECT_KIND_SYMLINK, ALICE);
+        _redirect(keccak256("rBC"), b, c, EFSReader.REDIRECT_KIND_SYMLINK, ALICE);
 
         bytes32[] memory chain = new bytes32[](2);
         chain[0] = keccak256("rAB");
@@ -869,9 +887,9 @@ contract EFSReaderTest is Test {
         bytes32 b = keccak256("B");
         bytes32 x = keccak256("X"); // unrelated source
         bytes32 c = keccak256("C");
-        _redirect(keccak256("rAB"), a, b, EFSReader.REDIRECT_KIND_SAME_AS, ALICE);
+        _redirect(keccak256("rAB"), a, b, EFSReader.REDIRECT_KIND_SYMLINK, ALICE);
         // Second redirect's source is X, not B — does not connect to the cursor at B.
-        _redirect(keccak256("rXC"), x, c, EFSReader.REDIRECT_KIND_SAME_AS, ALICE);
+        _redirect(keccak256("rXC"), x, c, EFSReader.REDIRECT_KIND_SYMLINK, ALICE);
 
         bytes32[] memory chain = new bytes32[](2);
         chain[0] = keccak256("rAB");
@@ -887,7 +905,7 @@ contract EFSReaderTest is Test {
         bytes32 src = keccak256("dataDup");
         bytes32 canon = keccak256("dataCanon");
         bytes32 rUID = keccak256("r1");
-        _redirect(rUID, src, canon, EFSReader.REDIRECT_KIND_SAME_AS, ALICE);
+        _redirect(rUID, src, canon, EFSReader.REDIRECT_KIND_SYMLINK, ALICE);
 
         bytes32[] memory chain = new bytes32[](1);
         chain[0] = rUID;

@@ -166,22 +166,25 @@ library EFSReader {
     // ── REDIRECT (ADR-0050) ──────────────────────────────────────────────────────────────────
     //
     // Frozen REDIRECT kind discriminators (taxonomy is resolver + client convention, NOT part of
-    // the schema UID — ADR-0050; mirrored from `AliasResolver`). Read-time *follow* rules:
-    // sameAs / supersededBy / symlink are auto-followed; `relatedVersion` (3) and any other
-    // reserved kind are NEVER auto-followed (the SKOS guard against "sameAs explosion").
+    // the schema UID — ADR-0050; mirrored from `AliasResolver`). Read-time *follow* rules per the
+    // RATIFIED resolution spec (specs/09 / ADR-0067): ONLY `symlink` (2) is auto-followed;
+    // `sameAs` (0) is canonicalization data, `supersededBy` (1) is version-history breadcrumb,
+    // `relatedVersion` (3) and every reserved kind are discovery hints — none of them navigate
+    // ("no silent revision": an exact DATA identity never advances under a reader's feet).
     uint16 internal constant REDIRECT_KIND_SAME_AS = 0;
     uint16 internal constant REDIRECT_KIND_SUPERSEDED_BY = 1;
     uint16 internal constant REDIRECT_KIND_SYMLINK = 2;
     uint16 internal constant REDIRECT_KIND_RELATED_VERSION = 3;
 
-    /// @dev Default hop cap for {resolveWithRedirects} when a caller passes `0` — the soft ceiling
-    ///      `D_MAX ≈ 8` from ADR-0050 §"Write-time guards vs read-time resolution". The hard
-    ///      ceiling is `MAX_ANCHOR_DEPTH` (32, ADR-0021); callers may pass any explicit cap up to
-    ///      that, but the on-chain follower never loops unbounded (see {RedirectHopLimit}).
-    uint256 internal constant REDIRECT_DEFAULT_MAX_HOPS = 8;
+    /// @dev Default hop cap for {resolveWithRedirects} when a caller passes `0` — the RATIFIED
+    ///      `D_MAX = 16` (specs/09 §3, James 2026-06-20), matching the TS reader's default so
+    ///      identical redirect data resolves identically in both published SDKs. The hard ceiling
+    ///      is 32; the on-chain follower never loops unbounded (see {RedirectHopLimit}).
+    uint256 internal constant REDIRECT_DEFAULT_MAX_HOPS = 16;
 
-    /// @dev Hard ceiling on the redirect hop cap (MAX_ANCHOR_DEPTH, 32; ADR-0021), matching the
-    ///      TS reader. {resolveWithRedirects} CLAMPS `maxHops` to this so a hostile/huge value
+    /// @dev Hard ceiling on the redirect hop cap (specs/09 §3: 32 — the walk's own structural
+    ///      bound; the anchor-depth budget is independent), matching the TS reader.
+    ///      {resolveWithRedirects} CLAMPS `maxHops` to this so a hostile/huge value
     ///      can't overflow `cap + 1` or force an enormous `visited` allocation.
     uint256 internal constant REDIRECT_MAX_HOPS = 32;
 
@@ -346,15 +349,16 @@ library EFSReader {
     // detection and a bounded hop cap. {redirectTarget} is the single-redirect read; {followKind}
     // gates which kinds auto-follow; {resolveWithRedirects} is the safe multi-hop walk.
 
-    /// @notice Whether a REDIRECT `kind` is auto-followed at read time (ADR-0050): `sameAs` (0),
-    ///         `supersededBy` (1), and `symlink` (2) are followed; everything else — including
-    ///         `relatedVersion` (3) and all reserved kinds (≥3) — is a discovery hint that is
-    ///         NEVER auto-followed (guards against identity-rerouting "sameAs explosion").
+    /// @notice Whether a REDIRECT `kind` is auto-followed at read time — per the RATIFIED
+    ///         resolution spec (specs/09 §2 / ADR-0067), ONLY `symlink` (2) navigates. `sameAs`
+    ///         (0) canonicalization and `supersededBy` (1) version history are separate,
+    ///         deliberate operations (the off-chain SDK's `redirects.canonical`/`history`), and
+    ///         `relatedVersion` (3) plus all reserved kinds (≥3) are discovery hints — following
+    ///         any of them would silently advance an exact identity ("no silent revision").
     /// @param  kind The REDIRECT `kind` discriminator.
     /// @return Whether the resolver should follow this kind.
     function followKind(uint16 kind) internal pure returns (bool) {
-        return kind == REDIRECT_KIND_SAME_AS || kind == REDIRECT_KIND_SUPERSEDED_BY
-            || kind == REDIRECT_KIND_SYMLINK;
+        return kind == REDIRECT_KIND_SYMLINK;
     }
 
     /// @notice Authoritatively read one REDIRECT attestation, lens-scoped: returns its decoded
@@ -412,8 +416,9 @@ library EFSReader {
     ///           - Each hop is decoded via {redirectTarget} (schema + lens + revocation guards).
     ///           - A hop whose decoded `source` is not the current cursor reverts {RedirectChainBroken}
     ///             (a malformed chain), so a caller cannot smuggle in an unrelated redirect.
-    ///           - A non-followable kind (`relatedVersion`/reserved, ADR-0050) STOPS the walk at the
-    ///             current cursor — it is not followed and not an error.
+    ///           - A non-followable kind — anything but `symlink` (specs/09 §2: `sameAs` is
+    ///             canonicalization data, `supersededBy` a history breadcrumb, `relatedVersion`/
+    ///             reserved discovery hints) — STOPS the walk at the current cursor; not an error.
     ///           - A hop that does not apply to the lens (revoked / wrong schema / foreign attester /
     ///             absent) STOPS the walk at the current cursor (terminal reached).
     ///           - **Cycle detection:** every visited source is recorded; revisiting one reverts
@@ -466,8 +471,8 @@ library EFSReader {
             if (tgt == EMPTY_UID) break;
             // The supplied redirect must actually start where the walk currently sits.
             if (src != visited[hops]) revert RedirectChainBroken(visited[hops], redirectUIDs[i]);
-            // A non-followable kind (relatedVersion / reserved) is a discovery hint, not a hop:
-            // stop at the current cursor without following or erroring (ADR-0050).
+            // A non-followable kind (anything but symlink, specs/09 §2) is data, not a hop:
+            // stop at the current cursor without following or erroring.
             if (!followKind(kind)) break;
             // About to follow one more hop — enforce the bounded cap BEFORE advancing.
             if (hops == cap) revert RedirectHopLimit(cap);

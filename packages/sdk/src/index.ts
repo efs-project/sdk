@@ -896,6 +896,13 @@ export function createEfsV1Client(config: EfsClientConfig): EfsClient {
     return hash
   }
   const waitForReceipt = async (txHash: Hex): Promise<void> => {
+    // Re-assert the LIVE chain immediately before the wait: a mutable provider
+    // that drifts after broadcast would poll ANOTHER chain for this hash — a
+    // landed index could read as absent (surfacing a false IndexingIncomplete),
+    // or a landed revoke could abort remove() before its required
+    // indexRevocation leg, leaving redirect discovery stale. Same fail-closed
+    // rule as the layered submitter's receipt wait (submit.ts).
+    await assertChainMatches(publicClient, getDeployment().chainId)
     const receipt = (await (
       publicClient as unknown as {
         waitForTransactionReceipt: (args: { hash: Hex }) => Promise<{ status?: string }>
