@@ -366,3 +366,42 @@ describe('Tier1Submitter receipt', () => {
     expect(receipt.data?.resolvedBy).toBe(ATTESTER)
   })
 })
+
+describe('capability-probe cache honesty (review r3740620189)', () => {
+  it('a TRANSIENT getCapabilities failure is not cached; an UnsupportedMethod one is', async () => {
+    const { detectAccount } = await import('../src/writes/detect.js')
+    const addr = `0x${'0b'.repeat(20)}` as never
+    // Transient failure: first call falls back (no caps), second call re-probes
+    // and sees the real capabilities.
+    let calls = 0
+    const flaky = {
+      getCode: async () => undefined,
+      getCapabilities: async () => {
+        calls += 1
+        if (calls === 1) throw Object.assign(new Error('boom'), { code: -32000 })
+        return { '0xaa36a7': { atomic: { status: 'supported' } } }
+      },
+    } as never
+    const scopeA = {}
+    const p1 = await detectAccount(flaky, addr, 11155111, scopeA)
+    expect(p1.sponsorable).toBe(false)
+    const p2 = await detectAccount(flaky, addr, 11155111, scopeA)
+    expect(calls).toBe(2) // re-probed — the fallback was NOT cached
+    void p2
+    // Unsupported method: cached — no re-probe.
+    let calls2 = 0
+    const unsupported = {
+      getCode: async () => undefined,
+      getCapabilities: async () => {
+        calls2 += 1
+        throw Object.assign(new Error('the method wallet_getCapabilities does not exist'), {
+          code: 4200,
+        })
+      },
+    } as never
+    const scopeB = {}
+    await detectAccount(unsupported, addr, 11155111, scopeB)
+    await detectAccount(unsupported, addr, 11155111, scopeB)
+    expect(calls2).toBe(1) // durable answer — cached
+  })
+})

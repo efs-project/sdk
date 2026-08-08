@@ -153,6 +153,15 @@ function parseEnvelope(json: string, artifact: ArtifactHeader['artifact']): Enve
   if (typeof env.data !== 'object' || env.data === null) {
     throw new MalformedArtifact('missing the data payload')
   }
+  // `ext`, when present, must be a plain record — the signature promises
+  // `Record<string, unknown>`, and returning `null`/an array through the spread
+  // would fail consumers past the documented MalformedArtifact boundary.
+  if (
+    'ext' in (raw as object) &&
+    (typeof env.ext !== 'object' || env.ext === null || Array.isArray(env.ext))
+  ) {
+    throw new MalformedArtifact('ext is not a plain object')
+  }
   return env
 }
 
@@ -313,6 +322,25 @@ export function parseWriteReceipt(json: string): WriteReceipt & { ext?: Record<s
       typeof r.why !== 'string'
     ) {
       throw new MalformedArtifact('WriteReceipt reason is not { selected, why } strings')
+    }
+    // `why` is a CLOSED union on the public type — branding an unknown literal
+    // through would break exhaustive switches; and `selected` documents itself
+    // as mirroring `mechanism`, so an inconsistent pair is corruption.
+    const WHYS = [
+      'in-account-routine',
+      'no-in-account-adapter',
+      'dependent-dag-needs-sequential',
+      'fell-back-from-5792',
+    ] as const
+    if (!(WHYS as readonly string[]).includes(r.why)) {
+      throw new MalformedArtifact(
+        `WriteReceipt reason.why is not one of the closed literals (${r.why})`,
+      )
+    }
+    if (r.selected !== d.mechanism) {
+      throw new MalformedArtifact(
+        `WriteReceipt reason.selected (${r.selected}) does not mirror mechanism (${String(d.mechanism)})`,
+      )
     }
   }
   return {

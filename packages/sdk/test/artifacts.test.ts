@@ -266,7 +266,7 @@ describe('optional typed receipt fields validate when present (review r374056398
         chainId: 1,
         resolvedBy: C,
       },
-      reason: { selected: 'direct', why: 'only-option' },
+      reason: { selected: 'direct', why: 'no-in-account-adapter' },
       someUnknownExtension: { anything: true }, // must survive untouched
     } as never
     const json = serializeWriteReceipt(receipt)
@@ -276,7 +276,7 @@ describe('optional typed receipt fields validate when present (review r374056398
     for (const [from, to] of [
       [`"uid":"0x${'55'.repeat(32)}"`, '"uid":"x"'], // fake DataRef
       [`"contentHash":"f1220${'ab'.repeat(32)}"`, '"contentHash":"deadbeef"'], // non-canonical
-      ['"reason":{"selected":"direct","why":"only-option"}', '"reason":{"selected":7}'],
+      ['"reason":{"selected":"direct","why":"no-in-account-adapter"}', '"reason":{"selected":7}'],
       ['"gasless":', '"gasless":'], // no-op guard: skip if absent
     ] as [string, string][]) {
       if (!json.includes(from)) continue
@@ -287,6 +287,61 @@ describe('optional typed receipt fields validate when present (review r374056398
         .then(() => undefined)
         .catch((e) => e)
       expect(err, to).toBeInstanceOf(MalformedArtifact)
+    }
+  })
+})
+
+describe('reason discriminant + ext shape (reviews r3740620191 / r3740620193)', () => {
+  it('rejects an unknown reason.why literal and a selected↔mechanism mismatch', async () => {
+    const { parseWriteReceipt, serializeWriteReceipt, MalformedArtifact } = await import(
+      '../src/artifacts.js'
+    )
+    const D = `0x${'06'.repeat(20)}`
+    const receipt = {
+      profile: 'efs/v1',
+      roles: { author: D, signer: D, payer: D },
+      steps: [],
+      signatureCount: 1,
+      mechanism: 'sequential',
+      reason: { selected: 'sequential', why: 'dependent-dag-needs-sequential' },
+    } as never
+    const json = serializeWriteReceipt(receipt)
+    expect(parseWriteReceipt(json).reason?.why).toBe('dependent-dag-needs-sequential')
+    for (const [from, to] of [
+      ['"why":"dependent-dag-needs-sequential"', '"why":"bogus"'],
+      ['"selected":"sequential"', '"selected":"erc4337"'], // inconsistent with mechanism
+    ] as [string, string][]) {
+      const tampered = json.replace(from, to)
+      expect(tampered).not.toBe(json)
+      const err = await Promise.resolve()
+        .then(() => parseWriteReceipt(tampered))
+        .then(() => undefined)
+        .catch((e) => e)
+      expect(err, to).toBeInstanceOf(MalformedArtifact)
+    }
+  })
+
+  it('rejects ext that is null or an array (the signature promises a record)', async () => {
+    const { parseDataRef, serializeDataRef, MalformedArtifact } = await import(
+      '../src/artifacts.js'
+    )
+    const ref = {
+      __brand: 'DataRef',
+      profile: 'efs/v1',
+      uid: `0x${'66'.repeat(32)}`,
+      chainId: 1,
+      resolvedBy: `0x${'07'.repeat(20)}`,
+    } as never
+    const json = serializeDataRef(ref, { ok: true })
+    expect(parseDataRef(json).ext).toEqual({ ok: true })
+    for (const bad of ['null', '[1,2]', '"str"', '7']) {
+      const tampered = json.replace('"ext":{"ok":true}', `"ext":${bad}`)
+      expect(tampered).not.toBe(json)
+      const err = await Promise.resolve()
+        .then(() => parseDataRef(tampered))
+        .then(() => undefined)
+        .catch((e) => e)
+      expect(err, bad).toBeInstanceOf(MalformedArtifact)
     }
   })
 })

@@ -26,6 +26,7 @@
  */
 
 import type { Address, Hex } from 'viem'
+import { classifyError } from '../errors.js'
 import type { AccountCapabilities, AccountProfile } from '../types.js'
 
 /** The EIP-7702 delegation-designator prefix: code is `0xef0100‖impl` for a
@@ -157,10 +158,18 @@ export function detectAccount(
   const cached = cache.get(key)
   if (cached !== undefined) return cached
 
-  const pending = computeProfile(client, address, chainId)
+  const computed = computeProfile(client, address, chainId)
+  const pending = computed.then((r) => r.profile)
   cache.set(key, pending)
-  // On failure, evict so a later call retries rather than caching a rejection.
-  pending.catch(() => cache.delete(key))
+  // Evict on failure — AND on a non-cacheable fallback (a transient
+  // capability-probe error): a later call re-probes instead of a rejection or
+  // a frozen no-capabilities answer being served forever.
+  computed.then(
+    (r) => {
+      if (!r.cacheable) cache.delete(key)
+    },
+    () => cache.delete(key),
+  )
   return pending
 }
 
@@ -168,31 +177,41 @@ async function computeProfile(
   client: DetectClient,
   address: Address,
   chainId: number,
-): Promise<AccountProfile> {
+): Promise<{ profile: AccountProfile; cacheable: boolean }> {
   const code = await client.getCode({ address })
   const kind = kindFromCode(code)
 
   let raw: unknown
+  let cacheable = true
   if (client.getCapabilities !== undefined) {
     try {
       raw = await client.getCapabilities({ account: address, chainId })
-    } catch {
-      // A wallet that advertises the method but rejects (a plain EOA, an
-      // unsupported chain) is treated as having no capabilities — never fatal.
+    } catch (err) {
+      // No capabilities — never fatal. But only a rejection KNOWN to mean
+      // "this method/chain is unsupported" (EIP-1193 4200 / JSON-RPC method
+      // not found, via the classifier) is a durable answer worth CACHING. A
+      // transient RPC/wallet failure must not freeze a fulfilled
+      // no-capabilities profile into the connector cache — that would report
+      // gasless:false forever with the rejection-eviction path never firing.
+      // Unknown failures fall back for THIS call and re-probe on the next.
       raw = undefined
+      cacheable = classifyError(err).code === 'UnsupportedMethod'
     }
   }
 
   const { batchExecution, sponsorable } = unwrapCapabilities(raw, chainId)
 
   return {
-    address,
-    kind,
-    ...(batchExecution !== undefined ? { batchExecution } : {}),
-    sponsorable,
-    // No in-account adapter exists yet — the AA slice flips this.
-    canRunInAccountRoutine: false,
-    ...(raw !== undefined ? { raw } : {}),
+    cacheable,
+    profile: {
+      address,
+      kind,
+      ...(batchExecution !== undefined ? { batchExecution } : {}),
+      sponsorable,
+      // No in-account adapter exists yet — the AA slice flips this.
+      canRunInAccountRoutine: false,
+      ...(raw !== undefined ? { raw } : {}),
+    },
   }
 }
 
