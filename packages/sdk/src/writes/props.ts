@@ -221,11 +221,17 @@ export function makePropsNs(deps: PropsNsDeps): PropsNs {
       const limit = rawCount < scanCap ? rawCount : scanCap
       const anchorUIDs: Hex[] = []
       for (let start = 0n; start < limit; start += PAGE) {
+        // The WINDOW LENGTH is clamped to the remaining budget, not just the
+        // start (r3741928263): asking for a full PAGE on the final window would
+        // enumerate — and then decode + value-read — up to 255 rows past the
+        // caller's `maxKeys`, defeating the bound it was supposed to enforce.
+        const remaining = limit - start
+        const window = remaining < PAGE ? remaining : PAGE
         const page = await read<readonly Hex[]>(pc, {
           address: dep.contracts.indexer,
           abi: indexerAbi,
           functionName: 'getAnchorsBySchema',
-          args: [dataUID, dep.schemas.property, start, PAGE, false, false],
+          args: [dataUID, dep.schemas.property, start, window, false, false],
         })
         anchorUIDs.push(...page)
       }

@@ -882,14 +882,16 @@ describe('makePropsNs', () => {
     expect(out).toEqual([{ key: KEY, value: VALUE, propertyUID: PROP_UID }])
   })
 
-  it('honors a caller-supplied maxKeys below the default cap', async () => {
+  it('honors a caller-supplied maxKeys — including the WINDOW length (r3741928263)', async () => {
     let pageCalls = 0
+    const windows: bigint[] = []
     const props = makePropsNs({
       getDeployment: () => deployment,
       publicClient: makeReadClient((fn, args) => {
         if (fn === 'getChildCountBySchema') return 10_000n
         if (fn === 'getAnchorsBySchema') {
           pageCalls += 1
+          windows.push(args[3] as bigint) // the REQUESTED window length
           return (args[2] as bigint) === 0n ? [KEY_ANCHOR] : []
         }
         if (fn === 'resolveAnchor') return args[1] === KEY ? KEY_ANCHOR : uid(0)
@@ -906,7 +908,34 @@ describe('makePropsNs', () => {
     })
     const out = await props.list(DATA, { maxKeys: 10 })
     expect(pageCalls).toBe(1) // one window covers the 10-row bound
+    expect(windows).toEqual([10n]) // …and it asks for 10 rows, not a full PAGE
     expect(out).toEqual([{ key: KEY, value: VALUE, propertyUID: PROP_UID }])
+  })
+
+  it('clamps only the FINAL window of a non-page-aligned budget', async () => {
+    const windows: bigint[] = []
+    const props = makePropsNs({
+      getDeployment: () => deployment,
+      publicClient: makeReadClient((fn, args) => {
+        if (fn === 'getChildCountBySchema') return 10_000n
+        if (fn === 'getAnchorsBySchema') {
+          windows.push(args[3] as bigint)
+          return (args[2] as bigint) === 0n ? [KEY_ANCHOR] : []
+        }
+        if (fn === 'resolveAnchor') return args[1] === KEY ? KEY_ANCHOR : uid(0)
+        if (fn === 'getActivePinTarget') return args[0] === KEY_ANCHOR ? PROP_UID : uid(0)
+        if (fn === 'getAttestation') {
+          if (args[0] === KEY_ANCHOR) return { data: anchorEnc.encodeData([KEY, SCHEMAS.property]) }
+          return { data: propEnc.encodeData([VALUE]) }
+        }
+        return uid(0)
+      }) as never,
+      readContext,
+      submitContext: () => makeSubmitCtx().ctx,
+      attester: () => ATTESTER,
+    })
+    await props.list(DATA, { maxKeys: 300 })
+    expect(windows).toEqual([256n, 44n]) // full page, then the 44-row remainder
   })
 
   it('list stops AT the raw count — an exact page multiple sends no reverting extra probe (r3741115239)', async () => {
