@@ -396,6 +396,35 @@ describe('writeFileTier1 — full Tier-1 path with on-chain (web3://) default st
     await writeFileTier1('/docs/readme.md', CONTENT, ctx) // no opts.contentType
     expect(deploys.find((d) => d.kind === 'manager')?.managerContentType).toBe('')
   })
+
+  it('REFUSES a malformed contentType BEFORE the paid deploys (r3742578037)', async () => {
+    // specs/future-proofing.md §8: the attested contentType is authoritative and
+    // validated on write. Unchecked, this baked nonsense into the deployed
+    // ERC-5219 store AND the contentType PROPERTY, and fs.overview() then reads
+    // plainly textual content as binary. Nothing may deploy.
+    for (const bad of ['not-a-media-type', 'text/', '/plain', 'text plain', 'text/plain;']) {
+      const { ctx, deploys } = makeCtx()
+      const err = await writeFileTier1('/docs/readme.md', CONTENT, ctx, {
+        contentType: bad,
+      }).catch((e) => e)
+      expect((err as { code?: string }).code).toBe('InvalidArgument')
+      expect(String((err as Error).message)).toMatch(/not an IANA media type/)
+      expect(deploys).toHaveLength(0) // nothing paid for
+    }
+  })
+
+  it('ACCEPTS real media types, with and without parameters (r3742578037)', async () => {
+    for (const good of [
+      'text/plain',
+      'text/plain; charset=utf-8',
+      'application/vnd.api+json',
+      'image/svg+xml',
+    ]) {
+      const { ctx, deploys } = makeCtx()
+      await writeFileTier1('/docs/readme.md', CONTENT, ctx, { contentType: good })
+      expect(deploys.find((d) => d.kind === 'manager')?.managerContentType).toBe(good)
+    }
+  })
 })
 
 describe('transport gate before paid storage (review r3741715493)', () => {

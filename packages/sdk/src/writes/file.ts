@@ -151,10 +151,43 @@ async function transportDefinitionFor(
  *  3. No mirrors, over the cap, no override → throw {@link PayloadTooLarge}.
  *
  * @throws {EfsError} `InvalidArgument` when `opts.mirrors` is supplied but empty.
+ * @throws {EfsError} `InvalidArgument` when `opts.contentType` is not a media type.
  * @throws {EfsError} `MissingTransport` when no transport-definition anchor exists.
  * @throws {PayloadTooLarge} no mirrors + over the auto-cap + no `storage` override.
  * @throws {MultiChunkUnsupported} on-chain payload exceeds one SSTORE2 chunk.
  */
+/** RFC 9110 `token` — the character set both halves of a media type and every
+ * parameter name draw from. */
+const MEDIA_TOKEN = String.raw`[!#$%&'*+\-.^_\`|~0-9A-Za-z]+`
+/** `type/subtype` plus optional `; name=value` parameters (value bare or quoted). */
+const MEDIA_TYPE_RE = new RegExp(
+  `^${MEDIA_TOKEN}/${MEDIA_TOKEN}(?:\\s*;\\s*${MEDIA_TOKEN}=(?:${MEDIA_TOKEN}|"[^"]*"))*$`,
+)
+
+/**
+ * Refuse a `contentType` that is not an IANA media type (r3742578037).
+ *
+ * specs/future-proofing.md §8 makes the ATTESTED `contentType` authoritative —
+ * readers must never fall back to the transport header or a file extension — and
+ * requires it be validated on write. Unvalidated, a value like
+ * `'not-a-media-type'` rode into two places that cannot be taken back: the paid
+ * `EFSBytesStore` deploy (an ERC-5219 store that then reports nonsense to every
+ * gateway) and the authoritative `contentType` PROPERTY, where it makes
+ * `fs.overview()` classify plainly textual content as binary.
+ *
+ * Runs before the deploys for the same reason `assertTransportAnchors` does:
+ * past that line the gas is spent and the store exists, so a late throw leaves
+ * orphaned storage behind a write that can never complete.
+ */
+function assertContentType(contentType: string | undefined): void {
+  if (contentType === undefined) return
+  if (MEDIA_TYPE_RE.test(contentType)) return
+  throw new EfsError(
+    `EFS write: \`contentType\` ${JSON.stringify(contentType)} is not an IANA media type (expected \`type/subtype\`, optionally \`; charset=utf-8\`). The attested contentType is AUTHORITATIVE — readers never fall back to the transport header or the file extension — so a malformed value would be minted into the on-chain store and the contentType PROPERTY, and fs.overview() would read the file as binary. Pass a real media type (e.g. 'text/plain; charset=utf-8'), or omit it to leave the file undeclared.`,
+    { code: 'InvalidArgument' },
+  )
+}
+
 export async function resolveMirrors(
   bytes: Uint8Array,
   ctx: FileWriteContext,
@@ -171,6 +204,10 @@ export async function resolveMirrors(
   storage?: CompletedOnchainStorage
 }> {
   const { deployment } = ctx
+
+  // Before ANY irreversible step — the on-chain store bakes this MIME into the
+  // deployed ERC-5219 contract (r3742578037).
+  assertContentType(opts?.contentType)
 
   // An explicitly-supplied `mirrors` list means "the bytes already live at these URIs;
   // do NOT store them" — so an EMPTY explicit list is a caller error, not an omission.
