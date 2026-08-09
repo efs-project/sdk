@@ -413,6 +413,19 @@ describe('writeFileTier1 — full Tier-1 path with on-chain (web3://) default st
     }
   })
 
+  it('REFUSES an oversized but syntactically valid contentType before deploying (r3742696134)', async () => {
+    // The store's constructor ABI-encodes this string, and on the default path
+    // the SSTORE2 chunk is deployed FIRST — so an initcode-breaking value would
+    // strand storage the caller already paid for.
+    const { ctx, deploys } = makeCtx()
+    const err = await writeFileTier1('/docs/readme.md', CONTENT, ctx, {
+      contentType: `text/plain; x=${'a'.repeat(40_000)}`,
+    }).catch((e) => e)
+    expect((err as { code?: string }).code).toBe('InvalidArgument')
+    expect(String((err as Error).message)).toMatch(/over the 255-byte limit/)
+    expect(deploys).toHaveLength(0) // nothing paid for
+  })
+
   it('ACCEPTS real media types, with and without parameters (r3742578037)', async () => {
     for (const good of [
       'text/plain',

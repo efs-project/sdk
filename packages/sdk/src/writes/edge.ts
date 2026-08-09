@@ -197,6 +197,13 @@ export function buildPropertyPlan(
   value: string,
   existingKeyAnchorUID?: Hex,
 ): FileWriteGraph {
+  // The reserved `contentType` key is the AUTHORITATIVE binding readers trust, and
+  // `efs.props.set` reaches it without passing through fs.write's preflight — so the
+  // check belongs on the shared builder, where every caller (including direct ones)
+  // goes through it (r3742696130). `contentType` is plain ASCII, so its canonical
+  // encoding is itself.
+  if (key === 'contentType') assertContentType(value, 'EFS property write')
+
   // PROPERTY — the interned value (refUID 0, non-revocable). Always minted fresh (new
   // content), whether the key-anchor is reused or not.
   const property: PlannedAttestation = {
@@ -644,6 +651,58 @@ export function validateAddTarget(
 /** MirrorResolver's `MAX_URI_LENGTH` (MirrorResolver.sol): the UTF-8 BYTE cap on a MIRROR
  * URI. The resolver checks `bytes(uri).length` — UTF-8 bytes, not JS UTF-16 code units. */
 export const MAX_MIRROR_URI_BYTES = 8192
+
+/** RFC 9110 `token` — the character set both halves of a media type and every
+ * parameter name draw from. */
+const MEDIA_TOKEN = String.raw`[!#$%&'*+\-.^_\`|~0-9A-Za-z]+`
+/** `type/subtype` plus optional `; name=value` parameters (value bare or quoted). */
+const MEDIA_TYPE_RE = new RegExp(
+  `^${MEDIA_TOKEN}/${MEDIA_TOKEN}(?:\\s*;\\s*${MEDIA_TOKEN}=(?:${MEDIA_TOKEN}|"[^"]*"))*$`,
+)
+
+/**
+ * UTF-8 byte ceiling on `contentType` (r3742696134). RFC 6838 §4.2 caps a type
+ * and a subtype name at 127 characters each, so 255 covers any registered
+ * `type/subtype` outright and leaves room for parameters — roughly 3× the
+ * longest media type in real use.
+ *
+ * A ceiling is required, not merely tidy: a syntactically VALID but enormous
+ * value is ABI-encoded into the `EFSBytesStore` creation transaction, and on the
+ * default no-mirror path the SSTORE2 chunk is deployed FIRST. An oversized
+ * string makes that second initcode undeployable, stranding the caller with
+ * storage they already paid for and a write that cannot complete.
+ */
+export const MAX_CONTENT_TYPE_BYTES = 255
+
+/**
+ * Refuse a `contentType` that is not an IANA media type, or is too large to
+ * deploy (r3742578037, r3742696134).
+ *
+ * specs/future-proofing.md §8 makes the ATTESTED `contentType` authoritative —
+ * readers never fall back to the transport header or a file extension — and
+ * requires it be validated on write. Lives HERE, beside {@link buildPropertyPlan}
+ * and {@link validateMirrorUri}, because `contentType` reaches the chain through
+ * more than one door: `fs.write`'s `opts.contentType`, and `efs.props.set`
+ * writing the reserved key directly. Validating only the first left the second
+ * free to replace the authoritative binding with garbage (r3742696130).
+ *
+ * @param verb A label for the error message (e.g. `'EFS write'`, `'efs.props.set'`).
+ */
+export function assertContentType(contentType: string | undefined, verb: string): void {
+  if (contentType === undefined) return
+  const byteLength = new TextEncoder().encode(contentType).length
+  if (byteLength > MAX_CONTENT_TYPE_BYTES) {
+    throw new EfsError(
+      `${verb}: \`contentType\` is ${byteLength} bytes, over the ${MAX_CONTENT_TYPE_BYTES}-byte limit. A media type this large cannot be deployed into the on-chain store's constructor — and on the default write path the content chunk is deployed FIRST, so the write would strand storage you already paid for. Pass a real media type (e.g. 'text/plain; charset=utf-8').`,
+      { code: 'InvalidArgument' },
+    )
+  }
+  if (MEDIA_TYPE_RE.test(contentType)) return
+  throw new EfsError(
+    `${verb}: \`contentType\` ${JSON.stringify(contentType)} is not an IANA media type (expected \`type/subtype\`, optionally \`; charset=utf-8\`). The attested contentType is AUTHORITATIVE — readers never fall back to the transport header or the file extension — so a malformed value would be minted into the on-chain store and the contentType PROPERTY, and fs.overview() would read the file as binary. Pass a real media type, or omit it to leave the file undeclared.`,
+    { code: 'InvalidArgument' },
+  )
+}
 
 /**
  * Validate a mirror URI BEFORE it is planned/submitted, throwing a typed

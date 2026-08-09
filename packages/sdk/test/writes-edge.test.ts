@@ -136,6 +136,31 @@ describe('buildPropertyPlan', () => {
     expect(pin?.dataRefs).toEqual([{ field: 'definition', ref: { ref: EDGE_REF.KEY_ANCHOR } }])
   })
 
+  it('validates the reserved contentType key on the BUILDER, so props.set cannot bypass it (r3742696130)', () => {
+    // efs.props.set writes the authoritative contentType binding directly —
+    // it never passes through fs.write's preflight. Validating only there left
+    // this door open to replace the binding with garbage, after which readers
+    // expose it and fs.overview() misclassifies textual content as binary.
+    for (const bad of ['not-a-media-type', 'text/', 'text plain']) {
+      expect(() => buildPropertyPlan(SCHEMAS, DATA, 'contentType', bad)).toThrowError(
+        /not an IANA media type/,
+      )
+    }
+    // r3742696134 — syntactically valid but far too large to deploy.
+    expect(() =>
+      buildPropertyPlan(SCHEMAS, DATA, 'contentType', `text/plain; x=${'a'.repeat(300)}`),
+    ).toThrowError(/over the 255-byte limit/)
+
+    // Real media types still build, and OTHER keys stay unconstrained — this is
+    // a reserved-key rule, not a value policy for every property.
+    expect(
+      buildPropertyPlan(SCHEMAS, DATA, 'contentType', 'text/plain; charset=utf-8').attestations,
+    ).toHaveLength(3)
+    expect(
+      buildPropertyPlan(SCHEMAS, DATA, 'author', 'not-a-media-type').attestations,
+    ).toHaveLength(3)
+  })
+
   it('with an existing key anchor (Bug-2): emits ONLY PROPERTY + binding-PIN (no key-ANCHOR)', () => {
     const EXISTING = uid(0x7aa)
     const plan = buildPropertyPlan(SCHEMAS, DATA, 'author', 'bob', EXISTING)
