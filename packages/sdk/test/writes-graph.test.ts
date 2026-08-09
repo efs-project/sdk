@@ -669,6 +669,11 @@ describe('byte-plan builder preflight (reviews r3741586928 / r3741586938)', () =
       // with the unpadded routine and accepted it, while strict multibase
       // implementations reject it. Unusable either way — the padding our own
       // ipfs:// reader refuses is the padding multibase demands.
+      // r3742724225 — a NON-CANONICAL varint. `81 00` and `01` both decode to
+      // version 1, but unsigned-varint demands the shortest form, so this CID
+      // (a valid one with a spare byte spliced into the version) cleared the
+      // whole preflight while strict parsers and gateways reject it.
+      'ipfs://f81005512209e7fd40918c93c86e01be3043703dd882bddb5ccd5466addc1e7969a27f93da8',
       'ipfs://cafkreie6p7kasggjhsdoag7daq3qhxmifpo3ltgvizvn3qphs2ncp6j5va',
       'ipfs://CAFKREIE6P7KASGGJHSDOAG7DAQ3QHXMIFPO3LTGVIZVN3QPHS2NCP6J5VA',
       'ipfs://t05512209e7fd40918c93c86e01be3043703dd882bddb5ccd5466addc1e79',

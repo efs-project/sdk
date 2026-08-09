@@ -349,7 +349,15 @@ function readVarint(b: Uint8Array, i: number): { value: number; next: number } |
     if (byte === undefined) return undefined
     value |= (byte & 0x7f) << shift
     idx += 1
-    if ((byte & 0x80) === 0) return { value: value >>> 0, next: idx }
+    if ((byte & 0x80) === 0) {
+      // MINIMALITY (r3742724225). unsigned-varint requires the shortest
+      // encoding, so a terminal group of zero after a continuation byte carries
+      // no information: `81 00` and `01` both mean 1. Accepting the redundant
+      // form let a CID with a spare byte spliced in clear the whole preflight
+      // while strict CID parsers and gateways reject the locator outright.
+      if (n > 0 && byte === 0) return undefined
+      return { value: value >>> 0, next: idx }
+    }
     shift += 7
   }
   return undefined

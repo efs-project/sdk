@@ -655,9 +655,26 @@ export const MAX_MIRROR_URI_BYTES = 8192
 /** RFC 9110 `token` — the character set both halves of a media type and every
  * parameter name draw from. */
 const MEDIA_TOKEN = String.raw`[!#$%&'*+\-.^_\`|~0-9A-Za-z]+`
-/** `type/subtype` plus optional `; name=value` parameters (value bare or quoted). */
+/** RFC 9110 `OWS` — SP/HTAB only. Emphatically NOT `\s`, which admits CR and LF
+ * (r3742724228). */
+const MEDIA_OWS = String.raw`[ \t]*`
+/** RFC 9110 `qdtext` — HTAB, SP, and the printable ASCII range excluding `"`
+ * (0x22) and `\` (0x5C). Controls are absent by construction. */
+const MEDIA_QDTEXT = String.raw`[\t \x21\x23-\x5B\x5D-\x7E]`
+/** RFC 9110 `quoted-pair` — a backslash escaping HTAB, SP, or any VCHAR. */
+const MEDIA_QUOTED_PAIR = String.raw`\\[\t \x21-\x7E]`
+/**
+ * `type/subtype` plus optional `; name=value` parameters (value a bare token or
+ * a quoted-string).
+ *
+ * The quoted branch spells out the real grammar rather than `"[^"]*"`, which
+ * accepted RAW CONTROLS — a `contentType` of `text/plain; note="a<CR><LF>b"`
+ * passed, and that string is persisted as the authoritative PROPERTY and served
+ * as the ERC-5219 store's reported MIME, i.e. a CRLF that any gateway echoing
+ * the header would emit verbatim (r3742724228).
+ */
 const MEDIA_TYPE_RE = new RegExp(
-  `^${MEDIA_TOKEN}/${MEDIA_TOKEN}(?:\\s*;\\s*${MEDIA_TOKEN}=(?:${MEDIA_TOKEN}|"[^"]*"))*$`,
+  `^${MEDIA_TOKEN}/${MEDIA_TOKEN}(?:${MEDIA_OWS};${MEDIA_OWS}${MEDIA_TOKEN}=(?:${MEDIA_TOKEN}|"(?:${MEDIA_QDTEXT}|${MEDIA_QUOTED_PAIR})*"))*$`,
 )
 
 /**

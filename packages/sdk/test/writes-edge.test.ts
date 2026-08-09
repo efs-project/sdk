@@ -146,6 +146,31 @@ describe('buildPropertyPlan', () => {
         /not an IANA media type/,
       )
     }
+    // r3742724228 — RAW CONTROLS inside a quoted parameter, and CR/LF between
+    // parameters. This value is served as the ERC-5219 store's reported MIME,
+    // so a CRLF is a header the gateway would emit verbatim.
+    const CR = String.fromCharCode(13)
+    const LF = String.fromCharCode(10)
+    const NUL = String.fromCharCode(0)
+    for (const bad of [
+      `text/plain; note="a${CR}${LF}b"`,
+      `text/plain;${LF}x=y`,
+      `text/plain; note="a${NUL}b"`,
+      'text/plain; note="unterminated',
+    ]) {
+      expect(() => buildPropertyPlan(SCHEMAS, DATA, 'contentType', bad)).toThrowError(
+        /not an IANA media type/,
+      )
+    }
+    // Legitimate quoted parameters — including an escaped quote — still build.
+    for (const good of [
+      'text/plain; note="a b"',
+      'multipart/form-data; boundary="a b"',
+      String.raw`text/plain; note="say \"hi\""`,
+    ]) {
+      expect(buildPropertyPlan(SCHEMAS, DATA, 'contentType', good).attestations).toHaveLength(3)
+    }
+
     // r3742696134 — syntactically valid but far too large to deploy.
     expect(() =>
       buildPropertyPlan(SCHEMAS, DATA, 'contentType', `text/plain; x=${'a'.repeat(300)}`),
