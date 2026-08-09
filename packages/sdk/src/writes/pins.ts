@@ -20,16 +20,13 @@
 import type { Address, Hex } from 'viem'
 import { decodeAbiParameters } from 'viem'
 import { edgeResolverAbi } from '../chain/abi/edgeResolver.js'
-import {
-  getReferencingBySchemaAndAttesterAbi,
-  getReferencingBySchemaAndAttesterCountAbi,
-} from '../chain/abi/indexer.js'
 import type { EfsDeployment } from '../chain/deployments.js'
 import { getAttestationAbi } from '../eas/abi.js'
 import { EfsError } from '../errors.js'
 import { read } from '../reads/context.js'
 import type { ReadPublicClient } from '../reads/context.js'
 import { ZERO_UID } from '../reads/context.js'
+import { hasActiveMirror } from '../reads/mirror-scan.js'
 import type { WriteReceipt } from '../types.js'
 import { type EdgeSubmitContext, submitEdgePlan } from './edge-submit.js'
 import { buildPlacementPinPlan } from './edge.js'
@@ -149,24 +146,13 @@ export function makePinsNs(deps: PinsNsDeps): PinsNs {
       // authored by the connected account, scanning raw-count-bounded filtered
       // windows (the reads/mirror-scan.ts InvalidOffset boundary) with a
       // first-hit exit.
-      const rawCount = await read<bigint>(pc, {
-        address: dep.contracts.indexer,
-        abi: getReferencingBySchemaAndAttesterCountAbi,
-        functionName: 'getReferencingBySchemaAndAttesterCount',
-        args: [dataUID, dep.schemas.mirror, ctx.attester],
-      })
-      let hasActiveMirror = false
-      const total = Math.min(Number(rawCount), 500)
-      for (let start = 0; start < total && !hasActiveMirror; start += 50) {
-        const page = await read<readonly Hex[]>(pc, {
-          address: dep.contracts.indexer,
-          abi: getReferencingBySchemaAndAttesterAbi,
-          functionName: 'getReferencingBySchemaAndAttester',
-          args: [dataUID, dep.schemas.mirror, ctx.attester, BigInt(start), 50n, false, false],
-        })
-        hasActiveMirror = page.length > 0
-      }
-      if (!hasActiveMirror) {
+      const mirrored = await hasActiveMirror(
+        pc,
+        { indexer: dep.contracts.indexer, mirrorSchema: dep.schemas.mirror },
+        dataUID,
+        ctx.attester,
+      )
+      if (!mirrored) {
         throw new EfsError(
           `efs.graph.pins.place: the DATA ${dataUID} has NO active mirror authored by ${ctx.attester} — the placement would confirm but every read() fails AllMirrorsFailed. Attest a mirror via efs.mirrors.add (or publish via fs.write), then place.`,
           { code: 'InvalidArgument' },

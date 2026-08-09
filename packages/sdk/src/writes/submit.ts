@@ -70,16 +70,12 @@
 
 import type { Address, Hex, Log, TransactionReceipt } from 'viem'
 import { decodeAbiParameters, parseEventLogs } from 'viem'
-import {
-  getReferencingBySchemaAndAttesterAbi,
-  getReferencingBySchemaAndAttesterCountAbi,
-} from '../chain/abi/indexer.js'
 import { easAbi, getAttestationAbi } from '../eas/abi.js'
 import { buildMultiAttest } from '../eas/attest.js'
 import { SchemaEncoder } from '../eas/schema-encoder.js'
 import { EFS_SCHEMA_FIELDS } from '../eas/schemas.js'
 import { EfsError, classifyError, isDefiniteSendRefusal } from '../errors.js'
-import { MIRROR_PAGE, mirrorWindowStart } from '../reads/mirror-scan.js'
+import { type MirrorScanClient, hasActiveMirror } from '../reads/mirror-scan.js'
 import {
   type FileWriteGraph,
   type PlannedAttestation,
@@ -486,32 +482,16 @@ async function assertHardlinkSelfAuthored(plan: FileWriteGraph, ctx: SubmitConte
       { code: 'InvalidArgument' },
     )
   }
-  const rawCount = (await ctx.publicClient.readContract({
-    address: ctx.indexerAddress,
-    abi: getReferencingBySchemaAndAttesterCountAbi,
-    functionName: 'getReferencingBySchemaAndAttesterCount',
-    args: [dataUID, mirrorSchema, submitter],
-  })) as bigint
-  let hasActiveMirror = false
-  // Windowed on the NEWEST MAX_MIRRORS raw slots, not the oldest — the gate
-  // must agree with what the reader/router will actually see (r3742144271,
-  // reads/mirror-scan.ts).
-  const total = Number(rawCount)
-  for (
-    let start = mirrorWindowStart(total);
-    start < total && !hasActiveMirror;
-    start += MIRROR_PAGE
-  ) {
-    const page = (await ctx.publicClient.readContract({
-      address: ctx.indexerAddress,
-      abi: getReferencingBySchemaAndAttesterAbi,
-      functionName: 'getReferencingBySchemaAndAttester',
-      // (target, MIRROR, submitter, start, len, reverseOrder=false, showRevoked=false)
-      args: [dataUID, mirrorSchema, submitter, BigInt(start), BigInt(MIRROR_PAGE), false, false],
-    })) as readonly Hex[]
-    hasActiveMirror = page.length > 0
-  }
-  if (!hasActiveMirror) {
+  // The SHARED readability predicate (reads/mirror-scan.ts) — a gate must ask
+  // exactly what the reader asks, over exactly the window the reader (and the
+  // router) can see (r3742238093).
+  const mirrored = await hasActiveMirror(
+    ctx.publicClient as MirrorScanClient,
+    { indexer: ctx.indexerAddress, mirrorSchema },
+    dataUID,
+    submitter,
+  )
+  if (!mirrored) {
     throw new EfsError(
       `EFS write: the hardlink target ${dataUID} has NO active mirror authored by ${submitter} — the placement would confirm but every read() fails AllMirrorsFailed (the hardlink builder emits no retrieval metadata; the self-dedup contract presumes yours already exists). Publish the bytes with fs.write first, or attest a mirror via efs.mirrors.add, then hardlink.`,
       { code: 'InvalidArgument' },
@@ -658,29 +638,13 @@ async function assertSymlinkTargetReadable(
       { code: 'InvalidArgument' },
     )
   }
-  const rawCount = (await ctx.publicClient.readContract({
-    address: ctx.indexerAddress,
-    abi: getReferencingBySchemaAndAttesterCountAbi,
-    functionName: 'getReferencingBySchemaAndAttesterCount',
-    args: [target, mirrorSchema, submitter],
-  })) as bigint
-  let hasActiveMirror = false
-  // Newest-MAX_MIRRORS window, same as the hardlink gate (r3742144271).
-  const total = Number(rawCount)
-  for (
-    let start = mirrorWindowStart(total);
-    start < total && !hasActiveMirror;
-    start += MIRROR_PAGE
-  ) {
-    const page = (await ctx.publicClient.readContract({
-      address: ctx.indexerAddress,
-      abi: getReferencingBySchemaAndAttesterAbi,
-      functionName: 'getReferencingBySchemaAndAttester',
-      args: [target, mirrorSchema, submitter, BigInt(start), BigInt(MIRROR_PAGE), false, false],
-    })) as readonly Hex[]
-    hasActiveMirror = page.length > 0
-  }
-  if (!hasActiveMirror) {
+  const mirrored = await hasActiveMirror(
+    ctx.publicClient as MirrorScanClient,
+    { indexer: ctx.indexerAddress, mirrorSchema },
+    target,
+    submitter,
+  )
+  if (!mirrored) {
     throw new EfsError(
       `EFS write: the symlink target ${target} is a DATA with NO active mirror authored by ${submitter} — the link would resolve but never be readable (resolvedBy is the symlink author). Attest a mirror via efs.mirrors.add first, or symlink to the file's ANCHOR instead.`,
       { code: 'InvalidArgument' },

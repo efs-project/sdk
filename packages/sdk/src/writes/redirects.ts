@@ -31,10 +31,6 @@
  */
 
 import type { Hex } from 'viem'
-import {
-  getReferencingBySchemaAndAttesterAbi,
-  getReferencingBySchemaAndAttesterCountAbi,
-} from '../chain/abi/indexer.js'
 import type { EfsDeployment } from '../chain/deployments.js'
 import { getAttestationAbi } from '../eas/abi.js'
 import {
@@ -50,6 +46,7 @@ import {
   read,
   resolveAttesters,
 } from '../reads/context.js'
+import { hasActiveMirror } from '../reads/mirror-scan.js'
 import {
   canonicalizeSameAs,
   listLensRedirects,
@@ -238,24 +235,13 @@ export function makeRedirectsNs(deps: RedirectsNsDeps): RedirectsNs {
             args: [to],
           })
           if (att.schema.toLowerCase() === dep.schemas.data.toLowerCase()) {
-            const rawCount = await read<bigint>(pc, {
-              address: dep.contracts.indexer,
-              abi: getReferencingBySchemaAndAttesterCountAbi,
-              functionName: 'getReferencingBySchemaAndAttesterCount',
-              args: [to, dep.schemas.mirror, ctx.attester],
-            })
-            let hasActiveMirror = false
-            const total = Math.min(Number(rawCount), 500)
-            for (let start = 0; start < total && !hasActiveMirror; start += 50) {
-              const page = await read<readonly Hex[]>(pc, {
-                address: dep.contracts.indexer,
-                abi: getReferencingBySchemaAndAttesterAbi,
-                functionName: 'getReferencingBySchemaAndAttester',
-                args: [to, dep.schemas.mirror, ctx.attester, BigInt(start), 50n, false, false],
-              })
-              hasActiveMirror = page.length > 0
-            }
-            if (!hasActiveMirror) {
+            const mirrored = await hasActiveMirror(
+              pc,
+              { indexer: dep.contracts.indexer, mirrorSchema: dep.schemas.mirror },
+              to,
+              ctx.attester,
+            )
+            if (!mirrored) {
               throw new EfsError(
                 `efs.redirects.set: a symlink pointing DIRECTLY at DATA ${to} requires YOUR OWN active mirror on it — reads scope retrieval metadata to the symlink author (resolvedBy), so this link would resolve but never be readable. Attest a mirror via efs.mirrors.add first, or symlink to the file's ANCHOR instead (the walk then uses the placement winner's metadata).`,
                 { code: 'InvalidArgument' },

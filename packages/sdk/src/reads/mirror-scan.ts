@@ -27,8 +27,15 @@
 
 import type { Address, Hex } from 'viem'
 import { fileViewAbi } from '../chain/abi/fileView.js'
-import { getReferencingBySchemaAndAttesterCountAbi } from '../chain/abi/indexer.js'
+import {
+  getReferencingBySchemaAndAttesterAbi,
+  getReferencingBySchemaAndAttesterCountAbi,
+} from '../chain/abi/indexer.js'
 import { type ReadContext, read } from './context.js'
+
+/** The read surface the mirror scans need — the submit path holds a wider
+ * client type, so it casts to this rather than the whole {@link ReadContext}. */
+export type MirrorScanClient = ReadContext['publicClient']
 
 /** How many mirrors to read per `getDataMirrors` window. */
 export const MIRROR_PAGE = 50
@@ -79,4 +86,55 @@ export async function scanActiveMirrors(
     out.push(...rows)
   }
   return out
+}
+
+/**
+ * Whether `attester` holds at least ONE active mirror on `dataUID` — the
+ * READABILITY predicate every write gate asks before minting a placement,
+ * symlink or hardlink that would otherwise confirm and then fail every read
+ * with `AllMirrorsFailed`.
+ *
+ * Shared deliberately (r3742238093): this check had been re-derived at five
+ * call sites, and the copies drifted — some kept scanning raw slots `[0, 500)`
+ * after {@link scanActiveMirrors} moved to the newest-{@link MAX_MIRRORS}
+ * window, so a gate could refuse a file the reader and the router can both
+ * serve. A gate that disagrees with the reader is worse than no gate.
+ *
+ * Cheaper than {@link scanActiveMirrors}: reads UIDs (not decoded rows) and
+ * exits on the first active hit, so the healthy case costs one count read plus
+ * one window.
+ */
+export async function hasActiveMirror(
+  publicClient: ReadContext['publicClient'],
+  where: { indexer: Address; mirrorSchema: Hex },
+  dataUID: Hex,
+  attester: Address,
+): Promise<boolean> {
+  const raw = Number(
+    await read<bigint>(publicClient, {
+      address: where.indexer,
+      abi: getReferencingBySchemaAndAttesterCountAbi,
+      functionName: 'getReferencingBySchemaAndAttesterCount',
+      args: [dataUID, where.mirrorSchema, attester],
+    }),
+  )
+  for (let start = mirrorWindowStart(raw); start < raw; start += MIRROR_PAGE) {
+    const page = await read<readonly Hex[]>(publicClient, {
+      address: where.indexer,
+      abi: getReferencingBySchemaAndAttesterAbi,
+      functionName: 'getReferencingBySchemaAndAttester',
+      // (data, MIRROR, attester, start, len, reverseOrder=false, showRevoked=false)
+      args: [
+        dataUID,
+        where.mirrorSchema,
+        attester,
+        BigInt(start),
+        BigInt(MIRROR_PAGE),
+        false,
+        false,
+      ],
+    })
+    if (page.length > 0) return true
+  }
+  return false
 }

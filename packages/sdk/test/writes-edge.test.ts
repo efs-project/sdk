@@ -1048,6 +1048,8 @@ describe('makePinsNs', () => {
     anchorSchema?: Hex
     anchorBucket?: Hex
     mirrors?: bigint
+    /** Physical offset of the ONE active MIRROR row (revoked slots keep theirs). */
+    activeSlot?: number
   }) =>
     makeReadClient((fn, args) => {
       if (fn === 'getAttestation') {
@@ -1067,6 +1069,11 @@ describe('makePinsNs', () => {
       // The readability proof's active-mirror scan.
       if (fn === 'getReferencingBySchemaAndAttesterCount') return over?.mirrors ?? 1n
       if (fn === 'getReferencingBySchemaAndAttester') {
+        if (over?.activeSlot !== undefined) {
+          const start = Number(args[3] as bigint)
+          const len = Number(args[4] as bigint)
+          return over.activeSlot >= start && over.activeSlot < start + len ? [uid(0x3141)] : []
+        }
         return (over?.mirrors ?? 1n) > 0n ? [uid(0x3141)] : []
       }
       return uid(0)
@@ -1125,6 +1132,40 @@ describe('makePinsNs', () => {
     const pins = makePinsNs({
       getDeployment: () => deployment,
       publicClient: gateClient({ mirrors: 0n }) as never,
+      submitContext: () => ctx,
+      attester: () => ATTESTER,
+      revoke: async () => uid(0),
+    })
+    const err = await pins.place(ANCHOR, DATA).catch((e) => e)
+    expect((err as { code?: string }).code).toBe('InvalidArgument')
+    expect(String((err as Error).message)).toMatch(/NO active mirror/)
+    expect(calls).toHaveLength(0)
+  })
+
+  it('place scans the NEWEST mirror window, so a fresh mirror past slot 500 is seen (r3742238093)', async () => {
+    // 700 raw slots, only #650 active. The gate used its own [0,500) scan while
+    // scanActiveMirrors and EFSRouter read the newest 500 — so place() refused a
+    // file both of them can serve. Both now use the shared predicate.
+    const { ctx, calls } = makeSubmitCtx()
+    const pins = makePinsNs({
+      getDeployment: () => deployment,
+      publicClient: gateClient({ mirrors: 700n, activeSlot: 650 }) as never,
+      submitContext: () => ctx,
+      attester: () => ATTESTER,
+      revoke: async () => uid(0),
+    })
+    const receipt = await pins.place(ANCHOR, DATA)
+    expect(receipt.signatureCount).toBe(1)
+    expect(calls).toHaveLength(1)
+  })
+
+  it('place REFUSES a mirror stranded BELOW the readable window (r3742238093)', async () => {
+    // The converse: 700 raw slots with the only active row at #10 — no reader
+    // reaches it, so the placement would confirm and never resolve.
+    const { ctx, calls } = makeSubmitCtx()
+    const pins = makePinsNs({
+      getDeployment: () => deployment,
+      publicClient: gateClient({ mirrors: 700n, activeSlot: 10 }) as never,
       submitContext: () => ctx,
       attester: () => ATTESTER,
       revoke: async () => uid(0),
