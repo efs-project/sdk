@@ -651,6 +651,43 @@ contract EFSWriterTest is Test {
         }
     }
 
+    /// @notice RFC 6838 caps EACH of type/subtype at 127 characters. A total-length cap alone
+    ///         let this path persist a contentType the TypeScript validator rejects — the two
+    ///         rules are hand-mirrored across languages, so they drift clause by clause
+    ///         (r3743014611).
+    function test_WriteFile_RevertsOnOverlongMediaTypeHalf() public {
+        string memory longType = string(abi.encodePacked(_repeat("a", 128), "/x"));
+        string memory longSub = string(abi.encodePacked("x/", _repeat("a", 128)));
+        string[2] memory bad = [longType, longSub];
+        for (uint256 i = 0; i < bad.length; ++i) {
+            EFSLib.FileWrite memory w = _minimalWrite();
+            w.reservedKeys = new EFSLib.ReservedKey[](1);
+            w.reservedKeys[0] = EFSLib.ReservedKey({key: "contentType", value: bad[i]});
+            vm.prank(ALICE);
+            vm.expectRevert(
+                abi.encodeWithSelector(EFSLib.InvalidReservedValue.selector, "contentType", bad[i])
+            );
+            consumer.writeFile(w);
+        }
+
+        // Exactly 127 per half is the LIMIT, not one past it — must still write.
+        EFSLib.FileWrite memory ok = _minimalWrite();
+        ok.reservedKeys = new EFSLib.ReservedKey[](1);
+        ok.reservedKeys[0] = EFSLib.ReservedKey({
+            key: "contentType",
+            value: string(abi.encodePacked(_repeat("a", 127), "/", _repeat("b", 127)))
+        });
+        vm.prank(ALICE);
+        consumer.writeFile(ok);
+    }
+
+    /// @dev Repeat `s` `n` times (test-local helper; Solidity has no string multiply).
+    function _repeat(string memory s, uint256 n) private pure returns (string memory out) {
+        for (uint256 i = 0; i < n; ++i) {
+            out = string(abi.encodePacked(out, s));
+        }
+    }
+
     /// @notice The canonical forms still write, and a NON-reserved key stays unconstrained —
     ///         this is a reserved-key contract, not a value policy for every property.
     function test_WriteFile_AcceptsCanonicalReservedValuesAndFreeCustomKeys() public {

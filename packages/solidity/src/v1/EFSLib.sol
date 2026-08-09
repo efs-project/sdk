@@ -1009,8 +1009,13 @@ library EFSLib {
                 slash = i;
             }
         }
-        // `type` and `subtype` must both exist and be non-empty.
+        // `type` and `subtype` must both exist and be non-empty, and EACH is capped at 127
+        // characters by RFC 6838 §4.2 — the TypeScript validator's `restricted-name` enforces
+        // that per half, so a total-length cap alone let this path persist a value the SDK's
+        // other write doors reject (r3743014611). The two rules are hand-mirrored across
+        // languages; they have to be compared per clause, not in spirit.
         if (slash == type(uint256).max || slash == 0 || slash + 1 >= semi) return false;
+        if (slash > 127 || semi - slash - 1 > 127) return false;
         for (uint256 i = 0; i < semi; ++i) {
             if (i == slash) continue;
             bytes1 c = v[i];
