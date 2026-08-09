@@ -242,17 +242,28 @@ export function resolveTransport(
 }
 
 const BASE58_ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
+const BASE58_FLICKR_ALPHABET = '123456789abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ'
 const BASE32_ALPHABET = 'abcdefghijklmnopqrstuvwxyz234567'
+const BASE32_HEX_ALPHABET = '0123456789abcdefghijklmnopqrstuv'
+const BASE32_Z_ALPHABET = 'ybndrfg8ejkmcpqxot1uwisza345h769'
+const BASE36_ALPHABET = '0123456789abcdefghijklmnopqrstuvwxyz'
+const BASE16_ALPHABET = '0123456789abcdef'
 
-/** Decode base58btc, or `undefined` when a character is outside the alphabet. */
-function decodeBase58(s: string): Uint8Array | undefined {
+/**
+ * Decode a big-endian radix-N string (base10/base36/base58/…), or `undefined`
+ * when a character falls outside `alphabet`. Leading `alphabet[0]` characters
+ * are leading ZERO BYTES — the base58btc `1` convention, which multibase
+ * generalizes to every radix encoding.
+ */
+function decodeRadix(s: string, alphabet: string): Uint8Array | undefined {
+  const base = alphabet.length
   const bytes: number[] = [0]
   for (const ch of s) {
-    const v = BASE58_ALPHABET.indexOf(ch)
+    const v = alphabet.indexOf(ch)
     if (v < 0) return undefined
     let carry = v
     for (let i = 0; i < bytes.length; i++) {
-      carry += (bytes[i] as number) * 58
+      carry += (bytes[i] as number) * base
       bytes[i] = carry & 0xff
       carry >>= 8
     }
@@ -261,30 +272,44 @@ function decodeBase58(s: string): Uint8Array | undefined {
       carry >>= 8
     }
   }
-  // Leading '1's are leading zero bytes.
   for (const ch of s) {
-    if (ch !== '1') break
+    if (ch !== alphabet[0]) break
     bytes.push(0)
   }
   return new Uint8Array(bytes.reverse())
 }
 
-/** Decode RFC 4648 lowercase base32 (no padding), or `undefined` if malformed. */
-function decodeBase32Lower(s: string): Uint8Array | undefined {
-  let bits = 0
-  let value = 0
+/**
+ * Decode a bit-packed alphabet (the base2/base8/base16/base32 families) at
+ * `bits` per character, dropping the trailing partial byte as RFC 4648 does.
+ * `undefined` when a character falls outside `alphabet`.
+ */
+function decodeBits(s: string, alphabet: string, bits: number): Uint8Array | undefined {
+  let acc = 0
+  let n = 0
   const out: number[] = []
   for (const ch of s) {
-    const v = BASE32_ALPHABET.indexOf(ch)
+    const v = alphabet.indexOf(ch)
     if (v < 0) return undefined
-    value = (value << 5) | v
-    bits += 5
-    if (bits >= 8) {
-      bits -= 8
-      out.push((value >> bits) & 0xff)
+    acc = (acc << bits) | v
+    n += bits
+    if (n >= 8) {
+      n -= 8
+      out.push((acc >> n) & 0xff)
+      acc &= (1 << n) - 1 // keep `acc` small — `<<` is a 32-bit signed op
     }
   }
   return new Uint8Array(out)
+}
+
+/** Decode lowercase RFC 4648 base32 (no padding) — the common CIDv1 case. */
+function decodeBase32Lower(s: string): Uint8Array | undefined {
+  return decodeBits(s, BASE32_ALPHABET, 5)
+}
+
+/** Decode base58btc — the CIDv0 case. */
+function decodeBase58(s: string): Uint8Array | undefined {
+  return decodeRadix(s, BASE58_ALPHABET)
 }
 
 /** Read an unsigned varint at `i`; `undefined` when truncated/oversized. */
@@ -303,44 +328,78 @@ function readVarint(b: Uint8Array, i: number): { value: number; next: number } |
   return undefined
 }
 
-/**
- * The ASSIGNED multibase prefixes {@link cidStructureError} does not decode,
- * with the alphabet each one permits. Restricted to the ALPHANUMERIC bases —
- * `resolveIpfs` refuses any other character in a CID, so admitting (say) a
- * base64url CID at write time would mint a mirror our own reader rejects. The
- * padded variants appear without their `=` for the same reason.
- */
-const UNDECODED_MULTIBASE: Record<string, RegExp> = {
-  '0': /^[01]+$/, // base2
-  '7': /^[0-7]+$/, // base8
-  '9': /^[0-9]+$/, // base10
-  c: /^[a-z2-7]+$/, // base32pad
-  C: /^[A-Z2-7]+$/, // base32padupper
-  h: /^[ybndrfg8ejkmcpqxot1uwisza345h769]+$/, // base32z
-  k: /^[0-9a-z]+$/, // base36
-  K: /^[0-9A-Z]+$/, // base36upper
-  t: /^[0-9a-v]+$/, // base32hexpad
-  T: /^[0-9A-V]+$/, // base32hexpadupper
-  v: /^[0-9a-v]+$/, // base32hex
-  V: /^[0-9A-V]+$/, // base32hexupper
-  Z: /^[1-9A-HJ-NP-Za-km-z]+$/, // base58flickr
+/** How one multibase encodes bytes: the alphabet, and whether the body must be
+ * lower/upper case (multibase is case-significant — `f`/`F` and `k`/`K` are
+ * distinct codes, not spellings of one). `mixed` bases have no case variant. */
+type Multibase = {
+  readonly name: string
+  readonly decode: (body: string) => Uint8Array | undefined
 }
 
-/** Human names for {@link UNDECODED_MULTIBASE}, for the rejection message. */
-const MULTIBASE_NAME: Record<string, string> = {
-  '0': 'base2',
-  '7': 'base8',
-  '9': 'base10',
-  c: 'base32pad',
-  C: 'base32padupper',
-  h: 'base32z',
-  k: 'base36',
-  K: 'base36upper',
-  t: 'base32hexpad',
-  T: 'base32hexpadupper',
-  v: 'base32hex',
-  V: 'base32hexupper',
-  Z: 'base58flickr',
+const bitsBase = (
+  name: string,
+  alphabet: string,
+  bits: number,
+  casing: 'lower' | 'upper' | 'mixed',
+): Multibase => ({
+  name,
+  decode: (body) => {
+    if (casing === 'upper') {
+      if (body !== body.toUpperCase()) return undefined
+      return decodeBits(body.toLowerCase(), alphabet, bits)
+    }
+    if (casing === 'lower' && body !== body.toLowerCase()) return undefined
+    return decodeBits(body, alphabet, bits)
+  },
+})
+
+const radixBase = (
+  name: string,
+  alphabet: string,
+  casing: 'lower' | 'upper' | 'mixed',
+): Multibase => ({
+  name,
+  decode: (body) => {
+    if (casing === 'upper') {
+      if (body !== body.toUpperCase()) return undefined
+      return decodeRadix(body.toLowerCase(), alphabet)
+    }
+    if (casing === 'lower' && body !== body.toLowerCase()) return undefined
+    return decodeRadix(body, alphabet)
+  },
+})
+
+/**
+ * The multibase codes a CID may carry here, each with a real decoder — an
+ * alphabet screen is not enough (`ipfs://k0000000000` is valid base36 and not
+ * a CID at all, r3742184824), so every prefix below decodes to bytes that then
+ * face the SAME version/codec/multihash parse.
+ *
+ * Restricted to the ALPHANUMERIC bases: {@link resolveIpfs} refuses any other
+ * character so a crafted CID cannot smuggle path/host characters into a
+ * gateway URL, and the write preflight must not admit a locator our own reader
+ * would reject. The padded variants (`c`/`C`/`t`/`T`) are therefore accepted
+ * only in their unpadded spelling.
+ */
+const MULTIBASE: Record<string, Multibase> = {
+  '0': bitsBase('base2', '01', 1, 'mixed'),
+  '7': bitsBase('base8', '01234567', 3, 'mixed'),
+  '9': radixBase('base10', '0123456789', 'mixed'),
+  b: bitsBase('base32', BASE32_ALPHABET, 5, 'lower'),
+  B: bitsBase('base32upper', BASE32_ALPHABET, 5, 'upper'),
+  c: bitsBase('base32pad', BASE32_ALPHABET, 5, 'lower'),
+  C: bitsBase('base32padupper', BASE32_ALPHABET, 5, 'upper'),
+  f: bitsBase('base16', BASE16_ALPHABET, 4, 'lower'),
+  F: bitsBase('base16upper', BASE16_ALPHABET, 4, 'upper'),
+  h: bitsBase('base32z', BASE32_Z_ALPHABET, 5, 'mixed'),
+  k: radixBase('base36', BASE36_ALPHABET, 'lower'),
+  K: radixBase('base36upper', BASE36_ALPHABET, 'upper'),
+  t: bitsBase('base32hexpad', BASE32_HEX_ALPHABET, 5, 'lower'),
+  T: bitsBase('base32hexpadupper', BASE32_HEX_ALPHABET, 5, 'upper'),
+  v: bitsBase('base32hex', BASE32_HEX_ALPHABET, 5, 'lower'),
+  V: bitsBase('base32hexupper', BASE32_HEX_ALPHABET, 5, 'upper'),
+  z: radixBase('base58btc', BASE58_ALPHABET, 'mixed'),
+  Z: radixBase('base58flickr', BASE58_FLICKR_ALPHABET, 'mixed'),
 }
 
 /**
@@ -348,21 +407,14 @@ const MULTIBASE_NAME: Record<string, string> = {
  * itself. Returns a short reason when invalid, `undefined` when it parses.
  *
  *  - CIDv0 — bare base58btc `Qm…`: a raw sha2-256 multihash (0x12 0x20 + 32B).
- *  - CIDv1 — multibase-prefixed (`b` base32, `f` base16, `z` base58btc):
- *    version varint (1) + codec varint + multihash (code, length, digest of
- *    exactly that length), with NO trailing bytes.
+ *  - CIDv1 — a {@link MULTIBASE} prefix over: version varint (1) + codec
+ *    varint + multihash (code, length, digest of exactly that length), with NO
+ *    trailing bytes.
  *
- * Other ASSIGNED multibases (base36 `k`, base32hex `v`, …) are legal CIDs the
- * gateways accept but this parser does not decode; they get that base's own
- * alphabet screen instead of being rejected, so the check never refuses a CID
- * that would actually resolve. An UNASSIGNED prefix is refused outright
- * (r3742144268) — `ipfs://notavalidcid` is not a CID under any multibase, and
- * a bare alphanumeric screen would have minted it.
- *
- * Only the alphanumeric multibases are admitted: {@link resolveIpfs} refuses
- * anything else so a crafted CID cannot smuggle path/host characters into a
- * gateway URL, and the write preflight must not admit a locator our own reader
- * would then reject.
+ * EVERY accepted prefix is really decoded — there is no alphabet-only path, so
+ * a well-formed string in a real base that is not a CID (`k0000000000` is
+ * valid base36 and decodes to zero bytes) is refused like any other garbage
+ * (r3742184824). An UNASSIGNED prefix is refused by name (r3742144268).
  */
 export function cidStructureError(cid: string): string | undefined {
   const parseV1 = (bytes: Uint8Array | undefined): string | undefined => {
@@ -395,34 +447,13 @@ export function cidStructureError(cid: string): string | undefined {
   const prefix = cid[0]
   const body = cid.slice(1)
   if (body.length === 0) return 'missing CID body'
-  // `B`/`F` are the UPPERCASE variants of base32/base16 — the same bytes, so
-  // case-fold and take the strict decode rather than the alphabet screen. The
-  // case must MATCH the prefix: multibase is case-significant, so `fABC…` is
-  // not a CID any gateway resolves.
-  if (prefix === 'b' || prefix === 'B') {
-    const want = prefix === 'b' ? body.toLowerCase() : body.toUpperCase()
-    if (body !== want) return `base32 body must be ${prefix === 'b' ? 'lower' : 'upper'}case`
-    return parseV1(decodeBase32Lower(body.toLowerCase()))
-  }
-  if (prefix === 'f' || prefix === 'F') {
-    const pattern = prefix === 'f' ? /^[0-9a-f]+$/ : /^[0-9A-F]+$/
-    if (!pattern.test(body) || body.length % 2 !== 0) return 'malformed base16'
-    const hex = body.toLowerCase()
-    const raw = new Uint8Array(hex.length / 2)
-    for (let i = 0; i < raw.length; i++) raw[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16)
-    return parseV1(raw)
-  }
-  if (prefix === 'z') return parseV1(decodeBase58(body))
-  // An ASSIGNED multibase this parser does not decode: screen the body against
-  // that base's own alphabet so a legitimate (e.g. base36 `k…`) CID is not
-  // refused, while garbage in a real base still fails.
-  const alphabet = prefix === undefined ? undefined : UNDECODED_MULTIBASE[prefix]
-  if (alphabet === undefined) {
+  const base = prefix === undefined ? undefined : MULTIBASE[prefix]
+  if (base === undefined) {
     return `unknown multibase prefix '${prefix}' (an IPFS CID starts with 'Qm', or a multibase code such as 'b', 'f', 'z' or 'k')`
   }
-  if (!alphabet.test(body)) return `body is not valid ${MULTIBASE_NAME[prefix as string]}`
-  if (cid.length < 10) return 'implausibly short CID'
-  return undefined
+  const bytes = base.decode(body)
+  if (bytes === undefined) return `body is not valid ${base.name}`
+  return parseV1(bytes)
 }
 
 /** `ipfs://<cid>[/<path>]` to gateway path-style URLs (`/ipfs/<cid>/<path>`),

@@ -164,6 +164,14 @@ library EFSLib {
     ///      physical windows (a window may be short WITHOUT being the end — revoked entries
     ///      filter within it), stopping at the first active row; the healthy case costs one
     ///      count read plus one window scan.
+    ///
+    ///      WHICH 500: the referencing array is append-only — revoking a mirror keeps its
+    ///      slot — so past the 500-row ceiling the window decides what is readable at all.
+    ///      `EFSRouter._bestMirrorUri` caps at 500 walking `reverseOrder = true`, i.e. the
+    ///      NEWEST 500 slots, and the TypeScript reader matches it. Anchoring at 0 would let
+    ///      this gate approve a placement whose only active mirror sits in the OLD tail that
+    ///      no reader ever reaches (and reject DATA that is in fact readable), so the scan
+    ///      starts at `raw - min(raw, 500)`.
     function _requireActiveMirror(
         IEFSIndexerWrite indexer,
         SchemaUIDs memory schemas,
@@ -172,8 +180,7 @@ library EFSLib {
         uint256 raw = indexer.getReferencingBySchemaAndAttesterCount(
             dataUID, schemas.mirror, address(this)
         );
-        uint256 total = raw > 500 ? 500 : raw;
-        for (uint256 start = 0; start < total; start += 50) {
+        for (uint256 start = raw > 500 ? raw - 500 : 0; start < raw; start += 50) {
             bytes32[] memory page = indexer.getReferencingBySchemaAndAttester(
                 dataUID, schemas.mirror, address(this), start, 50, false, false
             );

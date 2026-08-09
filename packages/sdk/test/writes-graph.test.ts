@@ -653,6 +653,11 @@ describe('byte-plan builder preflight (reviews r3741586928 / r3741586938)', () =
       'ipfs://ecafebabecafebabe', // 'e' unassigned: alphanumeric but not a CID
       'ipfs://kNOTLOWERBASE36', // base36 is lowercase; 'K' is the upper variant
       'ipfs://fZZZZZZZZZZZZZZZZ', // base16 body outside the hex alphabet
+      // r3742184824 — well-formed in a REAL base, but not a CID: base36 zeros
+      // decode to a zero version varint, and `v`/`Z` bodies to short garbage.
+      'ipfs://k0000000000',
+      'ipfs://v00000000000000',
+      'ipfs://Z111111111111111',
     ]) {
       expect(() =>
         buildFileWriteGraph({
@@ -667,9 +672,11 @@ describe('byte-plan builder preflight (reviews r3741586928 / r3741586938)', () =
     for (const good_ of [
       'ipfs://QmZ1NBGCY8gyX929hs2JWv1QTUjV4wLK4eS77ddhBVoy3d', // CIDv0 base58btc
       'ipfs://bafkreie6p7kasggjhsdoag7daq3qhxmifpo3ltgvizvn3qphs2ncp6j5va', // CIDv1 base32
-      // A multibase the parser does not decode still passes on its OWN
-      // alphabet — never refuse a CID the gateways would resolve (r3742144268).
-      'ipfs://k2jmtxwoyrpfzn0hp3fj9qgczmqmoo6cvfoyhq4mhjmpa8xk9smmm1n5', // CIDv1 base36
+      // The SAME CID in the other multibases the table decodes — a real CID
+      // must never be refused just because of its encoding (r3742144268).
+      'ipfs://k2cwueclmaxjj26pzh1gquu5du775hvmcng5yy8bcbglnxii9rw7n1d4', // base36
+      'ipfs://zb2rhhJzfKQmywzUKshgxnbCpPsDkSynRf3yREBRJXGwmn9FM', // base58btc
+      'ipfs://f015512209e7fd40918c93c86e01be3043703dd882bddb5ccd5466addc1e7969a27f93da8', // base16
     ]) {
       const g = buildFileWriteGraph({
         ...good,

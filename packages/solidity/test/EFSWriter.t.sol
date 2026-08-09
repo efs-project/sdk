@@ -204,13 +204,28 @@ contract MockIndexer {
     bytes32[] public indexedUIDs;
     bytes32[] public revocationMirroredUIDs;
 
-    /// @dev Seeded ACTIVE mirror counts per DATA UID — the placement readability proof
-    ///      reads the raw count then scans a filtered window; this simple mock treats
-    ///      raw == active and serves a single-element first window when nonzero.
+    /// @dev Seeded mirror state per DATA UID — the placement readability proof reads the
+    ///      RAW slot count then scans filtered physical windows. `activeMirrors` is the raw
+    ///      count (revoked slots included, since the array is append-only) and
+    ///      `activeMirrorSlot` is the physical offset of the ONE active row, so a test can
+    ///      place that row inside or outside the scanned window.
     mapping(bytes32 => uint256) public activeMirrors;
+    mapping(bytes32 => uint256) public activeMirrorSlot;
+    mapping(bytes32 => bool) public hasActiveMirror;
 
+    /// @dev `n` raw slots, the active row at offset 0 (raw == active — the healthy case).
     function seedActiveMirrors(bytes32 uid, uint256 n) external {
         activeMirrors[uid] = n;
+        activeMirrorSlot[uid] = 0;
+        hasActiveMirror[uid] = n > 0;
+    }
+
+    /// @dev `raw` slots of which only physical offset `slot` is active — everything else
+    ///      is revoked but still occupies its slot.
+    function seedMirrorAtSlot(bytes32 uid, uint256 raw, uint256 slot) external {
+        activeMirrors[uid] = raw;
+        activeMirrorSlot[uid] = slot;
+        hasActiveMirror[uid] = true;
     }
 
     function getReferencingBySchemaAndAttesterCount(bytes32 targetUID, bytes32, address)
@@ -226,11 +241,12 @@ contract MockIndexer {
         bytes32,
         address,
         uint256 start,
-        uint256,
+        uint256 length,
         bool,
         bool
     ) external view returns (bytes32[] memory page) {
-        if (start == 0 && activeMirrors[targetUID] > 0) {
+        uint256 slot = activeMirrorSlot[targetUID];
+        if (hasActiveMirror[targetUID] && slot >= start && slot < start + length) {
             page = new bytes32[](1);
             page[0] = keccak256(abi.encodePacked("MIRROR_OF", targetUID));
         } else {

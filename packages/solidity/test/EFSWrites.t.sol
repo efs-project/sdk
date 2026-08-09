@@ -394,6 +394,41 @@ contract EFSWritesTest is Test {
         consumer.place(IEFSIndexerWrite(address(indexer)), schemas, a, bareData);
     }
 
+    /// @notice The readability scan windows the NEWEST 500 raw slots, matching
+    ///         `EFSRouter._bestMirrorUri` (which caps at 500 walking reverseOrder) and the
+    ///         TypeScript reader (r3742184822). An active row stranded in the OLD tail is
+    ///         unreachable by every reader, so the gate must NOT approve on it.
+    function test_Place_RevertsOnActiveMirrorBelowTheReadableWindow() public {
+        bytes32 oldOnly = keccak256("DATA_WITH_ONLY_AN_OLD_MIRROR");
+        eas.seedAuthor(oldOnly, address(consumer));
+        eas.seedSchema(oldOnly, schemas.data);
+        indexer.seedMirrorAtSlot(oldOnly, 700, 10); // 700 raw slots; the only active one is #10
+        bytes32 a = keccak256("A_OLD");
+        eas.seedSchema(a, schemas.anchor);
+        eas.seedAnchorSlot(a, keccak256("P"), "f.txt", schemas.data);
+        vm.prank(ALICE);
+        vm.expectRevert(
+            abi.encodeWithSelector(EFSLib.NoActiveMirror.selector, oldOnly, address(consumer))
+        );
+        consumer.place(IEFSIndexerWrite(address(indexer)), schemas, a, oldOnly);
+    }
+
+    /// @notice The converse of {test_Place_RevertsOnActiveMirrorBelowTheReadableWindow}: an
+    ///         active row past the 500th slot is READABLE (the router reads the newest 500),
+    ///         and a scan anchored at 0 would have wrongly refused it.
+    function test_Place_AcceptsActiveMirrorInsideTheNewestWindow() public {
+        bytes32 newMirror = keccak256("DATA_WITH_A_NEW_MIRROR");
+        eas.seedAuthor(newMirror, address(consumer));
+        eas.seedSchema(newMirror, schemas.data);
+        indexer.seedMirrorAtSlot(newMirror, 700, 650); // only slot #650 is active
+        bytes32 a = keccak256("A_NEW");
+        eas.seedSchema(a, schemas.anchor);
+        eas.seedAnchorSlot(a, keccak256("P"), "f.txt", schemas.data);
+        vm.prank(ALICE);
+        bytes32 pinUID = consumer.place(IEFSIndexerWrite(address(indexer)), schemas, a, newMirror);
+        assertTrue(pinUID != bytes32(0), "placement should confirm: the mirror is in view");
+    }
+
     /// @notice place() rejects an ANCHOR outside the DATA file bucket (r3741358639's
     ///         Solidity twin): a generic-folder/PROPERTY-key anchor is undiscoverable
     ///         by file resolution even though it IS an ANCHOR.
