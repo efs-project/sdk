@@ -541,6 +541,44 @@ describe('makeMirrorsNs', () => {
     expect(starts).toEqual([0n, 50n]) // disjoint physical windows over the raw count
   })
 
+  it('list windows the NEWEST 500 raw slots, so a freshly added mirror is in view (r3742144271)', async () => {
+    // 620 raw slots (revoked ones keep theirs — the array only grows). Scanning
+    // [0,500) would pin us to the OLDEST 500 and hide every mirror added after
+    // the 500th, while EFSRouter._bestMirrorUri reads its 500 in REVERSE and
+    // serves them fine. The window must start at 620-500=120.
+    const reads: { fn: string; args: readonly unknown[] }[] = []
+    const newest = {
+      uid: uid(0xbeef),
+      transportDefinition: IPFS_TRANSPORT,
+      uri: 'ipfs://QmZ1NBGCY8gyX929hs2JWv1QTUjV4wLK4eS77ddhBVoy3d',
+      attester: ATTESTER,
+      timestamp: 9n,
+    }
+    const mirrors = makeMirrorsNs({
+      getDeployment: () => deployment,
+      publicClient: makeReadClient((fn, args) => {
+        reads.push({ fn, args })
+        if (fn === 'getReferencingBySchemaAndAttesterCount') return 620n
+        if (fn === 'getDataMirrors') {
+          const start = args[2] as bigint
+          if (start >= 620n) throw new Error(`InvalidOffset: start ${start} past the raw end`)
+          return start === 570n ? [newest] : [] // everything older is revoked
+        }
+        return uid(0)
+      }) as never,
+      submitContext: () => makeSubmitCtx().ctx,
+      attester: () => ATTESTER,
+      revoke: async () => uid(0),
+    })
+    const out = await mirrors.list(DATA)
+    expect(out).toHaveLength(1)
+    expect(out[0]?.uid).toBe(newest.uid) // the newly appended mirror, not lost
+    const starts = reads.filter((r) => r.fn === 'getDataMirrors').map((r) => r.args[2])
+    expect(starts[0]).toBe(120n) // 620 - MAX_MIRRORS, not 0
+    expect(starts.at(-1)).toBe(570n)
+    expect(starts).toHaveLength(10) // still capped at MAX_MIRRORS/MIRROR_PAGE reads
+  })
+
   it('list stops AT the raw count — an exact page multiple sends no reverting extra read', async () => {
     // 50 raw slots exactly: the old loop followed a full window with a second
     // read at start=50, which the contract REVERTS (InvalidOffset).

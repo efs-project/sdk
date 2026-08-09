@@ -79,6 +79,7 @@ import { buildMultiAttest } from '../eas/attest.js'
 import { SchemaEncoder } from '../eas/schema-encoder.js'
 import { EFS_SCHEMA_FIELDS } from '../eas/schemas.js'
 import { EfsError, classifyError, isDefiniteSendRefusal } from '../errors.js'
+import { MIRROR_PAGE, mirrorWindowStart } from '../reads/mirror-scan.js'
 import {
   type FileWriteGraph,
   type PlannedAttestation,
@@ -492,23 +493,21 @@ async function assertHardlinkSelfAuthored(plan: FileWriteGraph, ctx: SubmitConte
     args: [dataUID, mirrorSchema, submitter],
   })) as bigint
   let hasActiveMirror = false
-  const MIRROR_SCAN_PAGE = 50
-  const total = Math.min(Number(rawCount), 500)
-  for (let start = 0; start < total && !hasActiveMirror; start += MIRROR_SCAN_PAGE) {
+  // Windowed on the NEWEST MAX_MIRRORS raw slots, not the oldest — the gate
+  // must agree with what the reader/router will actually see (r3742144271,
+  // reads/mirror-scan.ts).
+  const total = Number(rawCount)
+  for (
+    let start = mirrorWindowStart(total);
+    start < total && !hasActiveMirror;
+    start += MIRROR_PAGE
+  ) {
     const page = (await ctx.publicClient.readContract({
       address: ctx.indexerAddress,
       abi: getReferencingBySchemaAndAttesterAbi,
       functionName: 'getReferencingBySchemaAndAttester',
       // (target, MIRROR, submitter, start, len, reverseOrder=false, showRevoked=false)
-      args: [
-        dataUID,
-        mirrorSchema,
-        submitter,
-        BigInt(start),
-        BigInt(MIRROR_SCAN_PAGE),
-        false,
-        false,
-      ],
+      args: [dataUID, mirrorSchema, submitter, BigInt(start), BigInt(MIRROR_PAGE), false, false],
     })) as readonly Hex[]
     hasActiveMirror = page.length > 0
   }
@@ -666,13 +665,18 @@ async function assertSymlinkTargetReadable(
     args: [target, mirrorSchema, submitter],
   })) as bigint
   let hasActiveMirror = false
-  const total = Math.min(Number(rawCount), 500)
-  for (let start = 0; start < total && !hasActiveMirror; start += 50) {
+  // Newest-MAX_MIRRORS window, same as the hardlink gate (r3742144271).
+  const total = Number(rawCount)
+  for (
+    let start = mirrorWindowStart(total);
+    start < total && !hasActiveMirror;
+    start += MIRROR_PAGE
+  ) {
     const page = (await ctx.publicClient.readContract({
       address: ctx.indexerAddress,
       abi: getReferencingBySchemaAndAttesterAbi,
       functionName: 'getReferencingBySchemaAndAttester',
-      args: [target, mirrorSchema, submitter, BigInt(start), 50n, false, false],
+      args: [target, mirrorSchema, submitter, BigInt(start), BigInt(MIRROR_PAGE), false, false],
     })) as readonly Hex[]
     hasActiveMirror = page.length > 0
   }

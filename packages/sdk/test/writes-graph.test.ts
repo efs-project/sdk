@@ -645,7 +645,15 @@ describe('byte-plan builder preflight (reviews r3741586928 / r3741586938)', () =
   it('REJECTS a structurally invalid IPFS CID at write time (r3742105028)', () => {
     // The chain accepts any nonempty string and the READ parser stays
     // gateway-tolerant, so the write path decodes the CID properly.
-    for (const bad of ['ipfs://x', 'ipfs://Qmshort', 'ipfs://bnotbase32!!']) {
+    for (const bad of [
+      'ipfs://x',
+      'ipfs://Qmshort',
+      'ipfs://bnotbase32!!',
+      'ipfs://notavalidcid', // r3742144268 — 'n' is not an assigned multibase
+      'ipfs://ecafebabecafebabe', // 'e' unassigned: alphanumeric but not a CID
+      'ipfs://kNOTLOWERBASE36', // base36 is lowercase; 'K' is the upper variant
+      'ipfs://fZZZZZZZZZZZZZZZZ', // base16 body outside the hex alphabet
+    ]) {
       expect(() =>
         buildFileWriteGraph({
           ...good,
@@ -659,6 +667,9 @@ describe('byte-plan builder preflight (reviews r3741586928 / r3741586938)', () =
     for (const good_ of [
       'ipfs://QmZ1NBGCY8gyX929hs2JWv1QTUjV4wLK4eS77ddhBVoy3d', // CIDv0 base58btc
       'ipfs://bafkreie6p7kasggjhsdoag7daq3qhxmifpo3ltgvizvn3qphs2ncp6j5va', // CIDv1 base32
+      // A multibase the parser does not decode still passes on its OWN
+      // alphabet — never refuse a CID the gateways would resolve (r3742144268).
+      'ipfs://k2jmtxwoyrpfzn0hp3fj9qgczmqmoo6cvfoyhq4mhjmpa8xk9smmm1n5', // CIDv1 base36
     ]) {
       const g = buildFileWriteGraph({
         ...good,
