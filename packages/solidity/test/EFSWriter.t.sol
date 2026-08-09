@@ -428,7 +428,10 @@ contract EFSWriterTest is Test {
         w.mirrors[0] = EFSLib.Mirror({transportDefinition: TRANSPORT, uri: "ipfs://Qm123"});
 
         w.reservedKeys = new EFSLib.ReservedKey[](2);
-        w.reservedKeys[0] = EFSLib.ReservedKey({key: "contentHash", value: "0xdeadbeef"});
+        w.reservedKeys[0] = EFSLib.ReservedKey({
+            key: "contentHash",
+            value: "f1220abababababababababababababababababababababababababababababababab"
+        });
         w.reservedKeys[1] = EFSLib.ReservedKey({key: "size", value: "1024"});
 
         (bytes32 dataUID, bytes32 fileAnchorUID, bytes32 pinUID) = consumer.writeFile(w);
@@ -450,7 +453,12 @@ contract EFSWriterTest is Test {
         assertEq(mir.data, abi.encode(TRANSPORT, "ipfs://Qm123"), "MIRROR data");
 
         // Reserved key #0 (contentHash): calls 3 (key-ANCHOR), 4 (PROPERTY), 5 (binding-PIN)
-        _assertReservedTriplet(3, dataUID, "contentHash", "0xdeadbeef");
+        _assertReservedTriplet(
+            3,
+            dataUID,
+            "contentHash",
+            "f1220abababababababababababababababababababababababababababababababab"
+        );
         // Reserved key #1 (size): calls 6, 7, 8
         _assertReservedTriplet(6, dataUID, "size", "1024");
 
@@ -587,6 +595,78 @@ contract EFSWriterTest is Test {
         vm.expectRevert(EFSLib.EmptyMirrorSet.selector);
         consumer.writeFile(w);
         // nothing minted — the gate runs before the DATA attest
+    }
+
+    /// @notice The Solidity write path is a SEPARATE public door onto the same authoritative
+    ///         metadata as the TypeScript one, so it enforces the reserved-value contract itself
+    ///         (r3742980317). Without this, `{key:"contentHash", value:"0xdeadbeef"}` wrote
+    ///         successfully and every TypeScript read then threw `malformed-claim` — with the
+    ///         mirror bytes perfectly intact.
+    function test_WriteFile_RevertsOnMalformedReservedValues() public {
+        // contentHash: must be the canonical f1220…/f1b20… + 64 lowercase hex.
+        string[3] memory badHashes = [
+            "0xdeadbeef",
+            "f1220ABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB",
+            "f1220ab"
+        ];
+        for (uint256 i = 0; i < badHashes.length; ++i) {
+            EFSLib.FileWrite memory w = _minimalWrite();
+            w.reservedKeys = new EFSLib.ReservedKey[](1);
+            w.reservedKeys[0] = EFSLib.ReservedKey({key: "contentHash", value: badHashes[i]});
+            vm.prank(ALICE);
+            vm.expectRevert(
+                abi.encodeWithSelector(
+                    EFSLib.InvalidReservedValue.selector, "contentHash", badHashes[i]
+                )
+            );
+            consumer.writeFile(w);
+        }
+
+        // size: non-negative decimal, no leading zeros.
+        string[3] memory badSizes = ["garbage", "007", "-1"];
+        for (uint256 i = 0; i < badSizes.length; ++i) {
+            EFSLib.FileWrite memory w = _minimalWrite();
+            w.reservedKeys = new EFSLib.ReservedKey[](1);
+            w.reservedKeys[0] = EFSLib.ReservedKey({key: "size", value: badSizes[i]});
+            vm.prank(ALICE);
+            vm.expectRevert(
+                abi.encodeWithSelector(EFSLib.InvalidReservedValue.selector, "size", badSizes[i])
+            );
+            consumer.writeFile(w);
+        }
+
+        // contentType: shape, no media RANGES, no control characters in parameters.
+        string[4] memory badTypes = ["not-a-media-type", "text/*", "text/", "text/plain;\r\nx=y"];
+        for (uint256 i = 0; i < badTypes.length; ++i) {
+            EFSLib.FileWrite memory w = _minimalWrite();
+            w.reservedKeys = new EFSLib.ReservedKey[](1);
+            w.reservedKeys[0] = EFSLib.ReservedKey({key: "contentType", value: badTypes[i]});
+            vm.prank(ALICE);
+            vm.expectRevert(
+                abi.encodeWithSelector(
+                    EFSLib.InvalidReservedValue.selector, "contentType", badTypes[i]
+                )
+            );
+            consumer.writeFile(w);
+        }
+    }
+
+    /// @notice The canonical forms still write, and a NON-reserved key stays unconstrained —
+    ///         this is a reserved-key contract, not a value policy for every property.
+    function test_WriteFile_AcceptsCanonicalReservedValuesAndFreeCustomKeys() public {
+        EFSLib.FileWrite memory w = _minimalWrite();
+        w.reservedKeys = new EFSLib.ReservedKey[](4);
+        w.reservedKeys[0] = EFSLib.ReservedKey({
+            key: "contentHash",
+            value: "f1b20abababababababababababababababababababababababababababababababab" // keccak-256 variant
+        });
+        w.reservedKeys[1] = EFSLib.ReservedKey({key: "size", value: "0"});
+        w.reservedKeys[2] = EFSLib.ReservedKey({
+            key: "contentType", value: "application/vnd.api+json; charset=utf-8"
+        });
+        w.reservedKeys[3] = EFSLib.ReservedKey({key: "xyz.efs.note", value: "anything at all */*"});
+        vm.prank(ALICE);
+        consumer.writeFile(w); // must not revert
     }
 
     /// @notice writeFile refuses a reused anchor from a DIFFERENT slot (r3741358641):

@@ -103,10 +103,21 @@ export class TransportNotImplementedError extends Error {
  * thing into an Error message or attempt record.
  */
 export function summarizeUri(uri: string): string {
-  if (/^data:/i.test(uri)) {
-    const comma = uri.indexOf(',')
-    const meta = (comma === -1 ? uri : uri.slice(0, comma)).slice(0, 80)
-    const bodyLen = comma === -1 ? 0 : uri.length - comma - 1
+  // Redaction decisions run on the TRIMMED string (r3742980319). Both tests
+  // below are anchored, so a single leading space made `" data:…"` look like a
+  // non-data URI and printed 200 characters of the inline payload — and did the
+  // same for a whitespace-prefixed credential URL. The write path rejects
+  // surrounding whitespace, but this function also serves READS: `fetchVerified`
+  // can be called directly, and the chain is append-only, so legacy or foreign
+  // mirrors carry whatever they were minted with.
+  //
+  // Normalizing HERE rather than at the call sites, deliberately: an earlier fix
+  // passed `uri.trim()` at one caller and left every other one leaking.
+  const trimmed = uri.trim()
+  if (/^data:/i.test(trimmed)) {
+    const comma = trimmed.indexOf(',')
+    const meta = (comma === -1 ? trimmed : trimmed.slice(0, comma)).slice(0, 80)
+    const bodyLen = comma === -1 ? 0 : trimmed.length - comma - 1
     return `${meta},<${bodyLen} chars elided>`
   }
   // Strip a `user:password@` userinfo component (r3742879885). The write path
@@ -121,7 +132,10 @@ export function summarizeUri(uri: string): string {
   // is legal, and `https://alice:p@ss@host/f` parses as password `p@ss`; a
   // first-`@` match would redact only `alice:p` and print `ss@` to the log.
   // Excluding `/?#` keeps an `@` in a path, query or fragment untouched.
-  const safe = uri.replace(/^([A-Za-z][A-Za-z0-9+.-]*:\/\/)[^/?#]*@/, '$1<credentials redacted>@')
+  const safe = trimmed.replace(
+    /^([A-Za-z][A-Za-z0-9+.-]*:\/\/)[^/?#]*@/,
+    '$1<credentials redacted>@',
+  )
   return safe.length > 200 ? `${safe.slice(0, 200)}… (${safe.length} chars)` : safe
 }
 

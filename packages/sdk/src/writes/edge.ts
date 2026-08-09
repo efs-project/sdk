@@ -806,13 +806,11 @@ export function validateMirrorUri(uri: string, verb: string): void {
   // would spill up to the full 8 KiB of file content into an error that
   // applications routinely ship to logs and telemetry (r3742660068).
   //
-  // Summarize the TRIMMED string: `summarizeUri` detects an inline payload with
-  // `/^data:/`, which the very whitespace being reported here would defeat —
-  // the URI would fall through to the generic branch and still leak the first
-  // 200 characters of the body.
+  // `summarizeUri` now normalizes leading/trailing whitespace itself, so the
+  // redaction holds for every caller rather than just this one (r3742980319).
   if (uri !== uri.trim()) {
     throw new EfsError(
-      `${verb}: the mirror URI has leading or trailing whitespace ("${summarizeUri(uri.trim())}", shown trimmed). The URI is stored on-chain VERBATIM, so the whitespace would ride along and every read would fail to parse a scheme. Pass the trimmed URI.`,
+      `${verb}: the mirror URI has leading or trailing whitespace ("${summarizeUri(uri)}", shown trimmed). The URI is stored on-chain VERBATIM, so the whitespace would ride along and every read would fail to parse a scheme. Pass the trimmed URI.`,
       { code: 'InvalidArgument' },
     )
   }

@@ -10,6 +10,7 @@ import {
   checkSsrf,
   fetchVerified,
   resolveTransport,
+  summarizeUri,
 } from '../src/mirror/index.js'
 
 const enc = (s: string) => new TextEncoder().encode(s)
@@ -124,6 +125,28 @@ describe('resolveTransport - URI parsing (TRANSPORT allowlist)', () => {
     const urls = r.httpUrls()
     expect(urls).toHaveLength(DEFAULT_ARWEAVE_GATEWAYS.length)
     expect(urls[0]!.href).toBe(`https://arweave.net/${tx}`)
+  })
+
+  it('summarizeUri redacts even when the URI is whitespace-prefixed (r3742980319)', () => {
+    // Both redaction tests are ANCHORED, so a single leading space defeated
+    // them. This function also serves READS — fetchVerified can be called
+    // directly, and the chain is append-only, so a legacy or foreign mirror
+    // carries whatever it was minted with.
+    const payload = 'SUPERSECRETPAYLOAD'.repeat(40)
+    expect(summarizeUri(` data:text/plain,${payload}`)).not.toContain('SUPERSECRET')
+    expect(summarizeUri(` data:text/plain,${payload}`)).toMatch(/chars elided/)
+    expect(summarizeUri('\t data:text/plain;base64,AAAA')).toMatch(/chars elided/)
+
+    const cred = summarizeUri('  https://alice:hunter2@example.com/file')
+    expect(cred).not.toContain('hunter2')
+    expect(cred).not.toContain('alice')
+    expect(cred).toBe('https://<credentials redacted>@example.com/file')
+
+    // Unaffected shapes stay byte-identical.
+    expect(summarizeUri('ipfs://QmZ1NBGCY8gyX929hs2JWv1QTUjV4wLK4eS77ddhBVoy3d')).toBe(
+      'ipfs://QmZ1NBGCY8gyX929hs2JWv1QTUjV4wLK4eS77ddhBVoy3d',
+    )
+    expect(summarizeUri('https://example.com/a@b/file')).toBe('https://example.com/a@b/file')
   })
 
   it('rejects an https mirror carrying credentials, and never echoes them (r3742879885)', () => {

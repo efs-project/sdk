@@ -138,6 +138,14 @@ library EFSLib {
     ///         invariant the placement helpers enforce ({NoActiveMirror}).
     error EmptyMirrorSet();
 
+    /// @notice A RESERVED property key was given a value outside its canonical format.
+    /// @dev    The reserved keys carry authoritative metadata that readers trust without
+    ///         re-deriving. A malformed one costs a full, successful write and then breaks reads:
+    ///         a bad `contentHash` makes every default TypeScript read throw `malformed-claim`
+    ///         even when the mirror bytes are intact. The Solidity boundary is a SEPARATE public
+    ///         write path from the TypeScript one, so it enforces the same contract itself.
+    error InvalidReservedValue(string key, string value);
+
     /// @dev The reused-anchor SLOT-BINDING gate shared by {writeFile} and the 6-arg
     ///      {placeExisting}: beyond being an ANCHOR, the reused UID must name EXACTLY
     ///      the requested `(parent, fileName, DATA)` slot.
@@ -398,6 +406,7 @@ library EFSLib {
             // L2 PROPERTY + L3 binding-PIN: the interned value (refUID 0, non-revocable) plus the
             // cardinality-1 PIN(definition = key-ANCHOR, refUID = PROPERTY) — same triple
             // {setProperty} composes, shared via {_bindProperty}.
+            _assertReservedValue(rk.key, rk.value);
             _bindProperty(eas, w.schemas, keyAnchorUID, rk.value);
         }
 
@@ -606,6 +615,7 @@ library EFSLib {
         // third key of the EFSIndexer anchor directory (:432/:527), so it MUST be schemas.property —
         // a generic forSchema files the property under a different slot, invisible to spec-conformant
         // readers (EFSRouter, graph.ts/props.get). Generic forSchema is for folder/file nodes only.
+        _assertReservedValue(keyName, value);
         keyAnchorUID = _attestAnchor(eas, schemas.anchor, keyName, schemas.property, dataUID);
         (propertyUID, bindingPinUID) = _bindProperty(eas, schemas, keyAnchorUID, value);
     }
@@ -632,10 +642,13 @@ library EFSLib {
         // stamps and checks that too; here callers resolve the anchor themselves.)
         Attestation memory ka = eas.getAttestation(keyAnchorUID);
         if (ka.schema != schemas.anchor) revert NotAnchorUID(keyAnchorUID, ka.schema);
-        (, bytes32 kFor) = abi.decode(ka.data, (string, bytes32));
+        (string memory kName, bytes32 kFor) = abi.decode(ka.data, (string, bytes32));
         if (kFor != schemas.property) {
             revert NotPropertyKeyAnchor(keyAnchorUID, ka.schema, kFor);
         }
+        // The anchor names the key, so this door is checkable too — it was the one
+        // that took a UID rather than a key string (r3742980317).
+        _assertReservedValue(kName, value);
         (propertyUID, bindingPinUID) = _bindProperty(eas, schemas, keyAnchorUID, value);
     }
 
@@ -930,6 +943,92 @@ library EFSLib {
                 })
             })
         );
+    }
+
+    /// @dev Enforce the canonical format of a RESERVED property value; non-reserved keys pass
+    ///      through untouched (this is a reserved-key contract, not a policy for every property).
+    ///      Mirrors `writes/edge.ts`'s `assertReservedPropertyValue` — the TypeScript and Solidity
+    ///      write paths are separate public doors onto the SAME authoritative metadata, and a
+    ///      guard on one does nothing for the other.
+    function _assertReservedValue(string memory key, string memory value) private pure {
+        bytes32 k = keccak256(bytes(key));
+        if (k == keccak256("contentHash")) {
+            if (!_isCanonicalContentHash(bytes(value))) revert InvalidReservedValue(key, value);
+        } else if (k == keccak256("size")) {
+            if (!_isCanonicalSize(bytes(value))) revert InvalidReservedValue(key, value);
+        } else if (k == keccak256("contentType")) {
+            if (!_isPlausibleMediaType(bytes(value))) revert InvalidReservedValue(key, value);
+        }
+    }
+
+    /// @dev The canonical multibase-base16 multihash: `f1220…` (sha2-256) or `f1b20…` (keccak-256)
+    ///      plus 64 LOWERCASE hex digits — exactly `/^f1(?:2|b)20[0-9a-f]{64}$/` (ADR-0016,
+    ///      specs/10 §2.3). Accepted-on-read forms (base32 `b…`) are deliberately NOT canonical.
+    function _isCanonicalContentHash(bytes memory v) private pure returns (bool) {
+        if (v.length != 69) return false;
+        if (v[0] != "f" || v[1] != "1" || v[3] != "2" || v[4] != "0") return false;
+        if (v[2] != "2" && v[2] != "b") return false; // sha2-256 | keccak-256
+        for (uint256 i = 5; i < 69; ++i) {
+            bytes1 c = v[i];
+            bool hex_ = (c >= "0" && c <= "9") || (c >= "a" && c <= "f");
+            if (!hex_) return false;
+        }
+        return true;
+    }
+
+    /// @dev A non-negative decimal byte count with no leading zeros — what `size.toString()`
+    ///      emits. Readers parse this strictly and treat anything else as ABSENT, which silently
+    ///      disables the reader's pre-fetch too-large guard.
+    function _isCanonicalSize(bytes memory v) private pure returns (bool) {
+        if (v.length == 0) return false;
+        if (v[0] == "0") return v.length == 1; // "0" alone; "007" is not canonical
+        for (uint256 i = 0; i < v.length; ++i) {
+            if (v[i] < "0" || v[i] > "9") return false;
+        }
+        return true;
+    }
+
+    /// @dev A BOUNDED structural check on an IANA media type, deliberately not the full RFC 9110
+    ///      grammar: on-chain string parsing costs the caller gas on every write, so this enforces
+    ///      what actually protects readers — `type/subtype` shape, RFC 6838 restricted-name
+    ///      characters (which excludes the `*` of a media RANGE, since `text/*` reads as
+    ///      displayable text), a 255-byte ceiling, and printable-ASCII-only parameters so a CR/LF
+    ///      cannot ride into a served `Content-Type` header. The TypeScript path validates the
+    ///      full parameter grammar; this is the subset worth paying gas for.
+    function _isPlausibleMediaType(bytes memory v) private pure returns (bool) {
+        if (v.length == 0 || v.length > 255) return false;
+        uint256 slash = type(uint256).max;
+        uint256 semi = v.length;
+        for (uint256 i = 0; i < v.length; ++i) {
+            if (v[i] == ";") {
+                semi = i;
+                break;
+            }
+            if (v[i] == "/") {
+                if (slash != type(uint256).max) return false; // a second '/' in the name
+                slash = i;
+            }
+        }
+        // `type` and `subtype` must both exist and be non-empty.
+        if (slash == type(uint256).max || slash == 0 || slash + 1 >= semi) return false;
+        for (uint256 i = 0; i < semi; ++i) {
+            if (i == slash) continue;
+            bytes1 c = v[i];
+            bool alnum = (c >= "0" && c <= "9") || (c >= "a" && c <= "z") || (c >= "A" && c <= "Z");
+            // First character of each half must be alphanumeric (RFC 6838 restricted-name-first).
+            if (i == 0 || i == slash + 1) {
+                if (!alnum) return false;
+                continue;
+            }
+            bool ok = alnum || c == "!" || c == "#" || c == "$" || c == "&" || c == "-" || c == "^"
+                || c == "_" || c == "." || c == "+";
+            if (!ok) return false;
+        }
+        // Parameters: printable ASCII only — blocks CR/LF/NUL and other controls.
+        for (uint256 i = semi; i < v.length; ++i) {
+            if (v[i] < 0x20 || v[i] > 0x7E) return false;
+        }
+        return true;
     }
 
     /// @dev Mint the value half of a PROPERTY triple against an existing key-ANCHOR: a free-floating
