@@ -32,6 +32,7 @@
 import type { Address, Hex } from 'viem'
 import type { EfsDeployment } from '../chain/deployments.js'
 import { EfsError } from '../errors.js'
+import { summarizeUri } from '../mirror/transport.js'
 import { read } from '../reads/context.js'
 import type { ReadPublicClient } from '../reads/context.js'
 import { scanActiveMirrors } from '../reads/mirror-scan.js'
@@ -129,7 +130,7 @@ export async function resolveMirrorTransport(
   const scheme = schemeOf(uri)
   if (scheme === undefined) {
     throw new EfsError(
-      `efs.mirrors.add: the URI '${uri}' has no 'scheme:' prefix, so the transport cannot be derived. Pass an explicit \`transport\` (the /transports/<scheme> anchor UID).`,
+      `efs.mirrors.add: the URI '${summarizeUri(uri)}' has no 'scheme:' prefix, so the transport cannot be derived. Pass an explicit \`transport\` (the /transports/<scheme> anchor UID).`,
       { code: 'MissingTransport' },
     )
   }

@@ -875,7 +875,7 @@ export function validateMirrorUri(uri: string, verb: string): void {
         const cidError = cidStructureError(cid)
         if (cidError !== undefined) {
           throw new EfsError(
-            `${verb}: the mirror URI '${uri}' does not carry a valid IPFS CID (${cidError}). MirrorResolver would accept it, but no gateway could resolve it.`,
+            `${verb}: the mirror URI '${summarizeUri(uri)}' does not carry a valid IPFS CID (${cidError}). MirrorResolver would accept it, but no gateway could resolve it.`,
             { code: 'InvalidArgument' },
           )
         }
@@ -888,13 +888,13 @@ export function validateMirrorUri(uri: string, verb: string): void {
     } catch (err) {
       if (err instanceof Web3ReadError) {
         throw new EfsError(
-          `${verb}: the mirror URI '${uri}' is not a valid web3: locator (${err.message}). MirrorResolver would accept it, but every read would fail to resolve it — pass \`web3://<20-byte-address>\`.`,
+          `${verb}: the mirror URI '${summarizeUri(uri)}' is not a valid web3: locator (${err.message}). MirrorResolver would accept it, but every read would fail to resolve it — pass \`web3://<20-byte-address>\`.`,
           { code: 'InvalidArgument', cause: err },
         )
       }
       if (err instanceof UnsupportedUriError) {
         throw new EfsError(
-          `${verb}: the mirror URI '${uri}' is not a valid ${scheme}: locator (${err.message}). MirrorResolver would accept it, but every read would fail to resolve it — fix the URI, or use a custom scheme if this transport is not one the SDK resolves.`,
+          `${verb}: the mirror URI '${summarizeUri(uri)}' is not a valid ${scheme}: locator (${err.message}). MirrorResolver would accept it, but every read would fail to resolve it — fix the URI, or use a custom scheme if this transport is not one the SDK resolves.`,
           { code: 'InvalidArgument', cause: err },
         )
       }

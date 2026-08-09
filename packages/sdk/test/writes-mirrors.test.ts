@@ -23,7 +23,7 @@ import { attestedEventAbi } from '../src/eas/abi.js'
 import { SchemaEncoder } from '../src/eas/schema-encoder.js'
 import { EFS_SCHEMA_FIELDS } from '../src/eas/schemas.js'
 import type { EdgeSubmitContext } from '../src/writes/edge-submit.js'
-import { EDGE_REF, buildMirrorPlan } from '../src/writes/edge.js'
+import { EDGE_REF, buildMirrorPlan, validateMirrorUri } from '../src/writes/edge.js'
 import { makeMirrorsNs, resolveMirrorTransport } from '../src/writes/mirrors.js'
 
 const uid = (n: number): Hex => `0x${n.toString(16).padStart(64, '0')}` as Hex
@@ -224,6 +224,38 @@ describe('resolveMirrorTransport', () => {
       uid(0xe5b1), // explicit transport present
     ).catch((e) => e)
     expect((err as { code?: string }).code).toBe('InvalidArgument')
+  })
+
+  it('never echoes a secret when WRAPPING a parser failure (r3742930210)', () => {
+    // UnsupportedUriError already redacts, but the outer wrapper rebuilt the
+    // message from the RAW uri, reintroducing the secret one layer up. Four
+    // wrapper sites had this shape, not just the one reported.
+    const cred = 'https://alice:hunter2@example.com/file'
+    const err = (() => {
+      try {
+        validateMirrorUri(cred, 'EFS write')
+      } catch (e) {
+        return e as Error
+      }
+      throw new Error('expected rejection')
+    })()
+    expect(err.message).not.toContain('hunter2')
+    expect(err.message).not.toContain('alice')
+    expect(err.message).toContain('<credentials redacted>')
+
+    // The same wrapper carries `data:` payloads. A malformed one must not copy
+    // its inline body into the error either.
+    const secret = 'SUPERSECRETPAYLOAD'.repeat(40)
+    const badData = `data:text/plain;base64,${secret}%%%`
+    const dataErr = (() => {
+      try {
+        validateMirrorUri(badData, 'EFS write')
+      } catch (e) {
+        return e as Error
+      }
+      return undefined
+    })()
+    if (dataErr !== undefined) expect(dataErr.message).not.toContain(secret)
   })
 
   it('rejects a whitespace-padded URI instead of minting it as "custom" (r3742636237)', async () => {
