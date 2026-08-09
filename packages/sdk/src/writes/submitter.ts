@@ -31,6 +31,7 @@
 
 import type { Address } from 'viem'
 import type { ContentHash } from '../content/hash.js'
+import { EfsError } from '../errors.js'
 import type { DataRef, DataUID, WriteMechanism, WriteReceipt, WriteRoles } from '../types.js'
 import type { FileWriteGraph } from './graph.js'
 import {
@@ -57,11 +58,11 @@ export interface SubmitterContext extends SubmitContext {
   readonly chainId: number
   /** The attester the receipt records (lenses key on it). */
   readonly attester: Address
-  /** Role overrides for the receipt's {@link WriteRoles} (ADR-0019/R4). The
-   * deferred AA/relay submitters (mechanism 'gateway'/'erc4337') record
-   * payer/submitter divergence here; absent fields default to `attester` (the
-   * v1 Tier-1 self-submit reality). `author` overrides are NOT honored on
-   * Tier-1 (the attest is signed by the wallet — see the write's author guard). */
+  /** Role overrides for the receipt's {@link WriteRoles} (ADR-0019/R4), for the
+   * deferred AA/relay submitters (mechanism 'gateway'/'erc4337') to record
+   * payer/submitter divergence. {@link Tier1Submitter} honors NONE of them: it
+   * is self-submitted, so every role is `attester`, and it REFUSES a context
+   * whose overrides say otherwise rather than stamping a false receipt. */
   readonly roles?: Partial<WriteRoles>
   /** Wallet transactions the on-chain storage step sent BEFORE the EAS layers (chunk +
    * manager deploys on the default `fs.write(path, bytes)` path; `0`/omitted when the
@@ -103,13 +104,15 @@ function toReceipt(result: Tier1WriteResult, ctx: SubmitterContext): WriteReceip
         }
       : undefined
 
-  // Separated roles (ADR-0019/R4): one EOA fills every role on Tier-1; the
-  // seam records divergence when an AA/relay submitter supplies overrides.
+  // Separated roles (ADR-0019/R4). On Tier-1 they are DERIVED, never taken from
+  // the caller: `assertTier1Roles` has already established that `ctx.attester`
+  // is the wallet that signs, and a self-submitted wallet write is also the one
+  // that pays and broadcasts. `submitter` stays ABSENT — its whole meaning is
+  // "a relay stood in for the author", and there is none here.
   const roles: WriteRoles = {
-    author: ctx.roles?.author ?? ctx.attester,
-    signer: ctx.roles?.signer ?? ctx.attester,
-    payer: ctx.roles?.payer ?? ctx.attester,
-    ...(ctx.roles?.submitter !== undefined ? { submitter: ctx.roles.submitter } : {}),
+    author: ctx.attester,
+    signer: ctx.attester,
+    payer: ctx.attester,
   }
 
   const steps = [...result.uids.entries()].map(([id, uid]) => ({
@@ -136,6 +139,30 @@ function toReceipt(result: Tier1WriteResult, ctx: SubmitterContext): WriteReceip
 }
 
 /**
+ * Refuse a Tier-1 submission whose `ctx.roles` claims a role the transaction
+ * will not actually have (r3742238097).
+ *
+ * Tier-1 is self-submitted by definition — one wallet signs, pays and
+ * broadcasts — so every role IS `ctx.attester`. Honoring an override would put
+ * a false author/signer/payer/relay on a CONFIRMED receipt, and the receipt is
+ * the durable artifact third parties trust. Rejecting rather than silently
+ * dropping the override: a caller who set it holds a wrong model of what this
+ * path does, and the deferred AA/relay submitters — which legitimately diverge
+ * `payer`/`submitter` — are where those overrides belong.
+ */
+function assertTier1Roles(ctx: SubmitterContext): void {
+  const wrong = Object.entries(ctx.roles ?? {}).filter(
+    ([, addr]) => typeof addr === 'string' && addr.toLowerCase() !== ctx.attester.toLowerCase(),
+  )
+  if (wrong.length === 0) return
+  const named = wrong.map(([role, addr]) => `${role}=${String(addr)}`).join(', ')
+  throw new EfsError(
+    `EFS write: this Tier-1 submission declares roles that diverge from the signing account ${ctx.attester} (${named}). Tier-1 is self-submitted — the wallet that signs also pays and broadcasts — so the receipt would claim a transaction that did not happen. Drop the override, or use an AA/relay submitter (mechanism 'gateway'/'erc4337'), which is where payer/submitter divergence is real.`,
+    { code: 'InvalidArgument' },
+  )
+}
+
+/**
  * The Tier-1 (any-wallet, multi-signature) submitter — the only live strategy.
  * Wraps {@link submitWriteTier1} (one `multiAttest` per DAG layer) and the receipt
  * mapping. A single file's dependent DAG can't be statically batched, so 5792
@@ -148,6 +175,7 @@ export const Tier1Submitter: Submitter = {
     // receipt's roles AND `DataRef.resolvedBy`, so a mismatch yields refs that
     // read under the wrong lens.
     assertAttesterIsSigner(ctx, ctx.attester)
+    assertTier1Roles(ctx)
     // Propagates `WriteRevertedError` verbatim at the partial-write boundary —
     // Tier-1's existing return-vs-throw contract (see module doc).
     const result = await submitWriteTier1(plan, ctx)

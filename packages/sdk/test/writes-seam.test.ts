@@ -391,6 +391,47 @@ describe('Tier1Submitter receipt', () => {
     // The DATA ref carries the chain + attester from the context.
     expect(receipt.data?.chainId).toBe(11155111)
     expect(receipt.data?.resolvedBy).toBe(ATTESTER)
+    // Roles are DERIVED from the signing account, never carried in.
+    expect(receipt.roles).toEqual({ author: ATTESTER, signer: ATTESTER, payer: ATTESTER })
+  })
+
+  it('REFUSES a role that diverges from the signing account (r3742238097)', async () => {
+    // Tier-1 is self-submitted; an override could only put a false
+    // author/signer/payer/relay on a CONFIRMED receipt.
+    const plan = buildFileWriteGraph({
+      path: '/docs/readme.md',
+      content: { kind: 'bytes', bytes: new Uint8Array([1, 2, 3]) },
+      mirrors: [
+        {
+          uri: 'ipfs://QmZ1NBGCY8gyX929hs2JWv1QTUjV4wLK4eS77ddhBVoy3d',
+          transportDefinition: uid(0x200),
+        },
+      ],
+      contentHash: hashContent(new Uint8Array([1, 2, 3])),
+      size: 3n,
+      schemas: SCHEMAS,
+      parentAnchorUID: uid(0x100),
+      fileName: 'readme.md',
+    })
+    const IMPOSTOR = addr(0xbad)
+
+    for (const roles of [
+      { author: IMPOSTOR },
+      { signer: IMPOSTOR },
+      { payer: IMPOSTOR },
+      { submitter: IMPOSTOR },
+    ]) {
+      const err = await Tier1Submitter.submit(plan, { ...makeCtx(), roles }).catch((e) => e)
+      expect((err as { code?: string }).code).toBe('InvalidArgument')
+      expect(String((err as Error).message)).toMatch(/diverge from the signing account/)
+    }
+
+    // Redundant-but-true overrides are harmless — the receipt still derives.
+    const ok = await Tier1Submitter.submit(plan, {
+      ...makeCtx(),
+      roles: { author: ATTESTER, payer: ATTESTER },
+    })
+    expect(ok.roles).toEqual({ author: ATTESTER, signer: ATTESTER, payer: ATTESTER })
   })
 })
 
