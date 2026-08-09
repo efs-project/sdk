@@ -226,6 +226,27 @@ describe('resolveMirrorTransport', () => {
     expect((err as { code?: string }).code).toBe('InvalidArgument')
   })
 
+  it('rejects a whitespace-padded URI instead of minting it as "custom" (r3742636237)', async () => {
+    // The scheme regex is ANCHORED, so a leading space makes a known scheme
+    // invisible: `" https://…"` falls out of the known-scheme branch, mints as
+    // a custom transport, and then resolveTransport rejects the unchanged
+    // string at read time — an only-mirror that can never be read. Rejected
+    // rather than trimmed: the chain stores the URI verbatim, so trimming would
+    // mint a locator the caller never wrote.
+    for (const padded of [' https://cdn.example/file', 'ipfs://bafytest\n', '\tar://x']) {
+      const err = await resolveMirrorTransport(
+        makeReadClient(() => {
+          throw new Error('should not read — rejected before any resolution')
+        }) as never,
+        deployment,
+        padded,
+        uid(0xe5b1), // explicit transport present — must not smuggle it through
+      ).catch((e) => e)
+      expect((err as { code?: string }).code).toBe('InvalidArgument')
+      expect(String((err as Error).message)).toMatch(/leading or trailing whitespace/)
+    }
+  })
+
   it('rejects a URI over the 8192-byte MirrorResolver limit (even with an explicit transport)', async () => {
     const huge = `ipfs://${'a'.repeat(8200)}` // > 8192 UTF-8 bytes
     const err = await resolveMirrorTransport(

@@ -659,6 +659,19 @@ export function validateMirrorUri(uri: string, verb: string): void {
       { code: 'InvalidArgument' },
     )
   }
+  // Surrounding whitespace is never part of a locator, and it SILENTLY steers
+  // the parse below: the scheme regex is anchored, so `" https://…"` matches
+  // nothing, falls out of the known-scheme branch, and mints as a "custom"
+  // transport — then `resolveTransport` rejects the unchanged string at read
+  // time for having no scheme, leaving an only-mirror unreadable (r3742636237).
+  // Rejected, not trimmed: the chain stores the string verbatim, so silently
+  // rewriting the caller's URI would mint a locator they never wrote.
+  if (uri !== uri.trim()) {
+    throw new EfsError(
+      `${verb}: the mirror URI has leading or trailing whitespace (${JSON.stringify(uri)}). The URI is stored on-chain VERBATIM, so the whitespace would ride along and every read would fail to parse a scheme. Pass the trimmed URI.`,
+      { code: 'InvalidArgument' },
+    )
+  }
   // UTF-8 byte length (MirrorResolver checks `bytes(uri).length`, not the JS string length).
   const byteLength = new TextEncoder().encode(uri).length
   if (byteLength > MAX_MIRROR_URI_BYTES) {
