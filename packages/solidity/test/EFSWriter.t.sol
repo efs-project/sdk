@@ -681,6 +681,40 @@ contract EFSWriterTest is Test {
         consumer.writeFile(ok);
     }
 
+    /// @notice OWS (space/HTAB) is legal before and after the `;`, and the TypeScript rule
+    ///         accepts it — so rejecting it here would revert a write that should succeed, the
+    ///         worse direction to diverge in. Found by diffing the two validators clause by
+    ///         clause rather than comparing them in spirit.
+    function test_WriteFile_AcceptsOptionalWhitespaceAroundMediaTypeParams() public {
+        string[3] memory ok = [
+            "text/plain ; charset=utf-8",
+            "text/plain\t;\tcharset=utf-8",
+            "text/plain  ;  charset=utf-8"
+        ];
+        for (uint256 i = 0; i < ok.length; ++i) {
+            EFSLib.FileWrite memory w = _minimalWrite();
+            w.reservedKeys = new EFSLib.ReservedKey[](1);
+            w.reservedKeys[0] = EFSLib.ReservedKey({key: "contentType", value: ok[i]});
+            vm.prank(ALICE);
+            consumer.writeFile(w); // must not revert
+        }
+    }
+
+    /// @notice A `;` that introduces nothing is not a media type (the TypeScript grammar
+    ///         requires a parameter after it).
+    function test_WriteFile_RevertsOnDanglingMediaTypeSemicolon() public {
+        EFSLib.FileWrite memory w = _minimalWrite();
+        w.reservedKeys = new EFSLib.ReservedKey[](1);
+        w.reservedKeys[0] = EFSLib.ReservedKey({key: "contentType", value: "text/plain;"});
+        vm.prank(ALICE);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                EFSLib.InvalidReservedValue.selector, "contentType", "text/plain;"
+            )
+        );
+        consumer.writeFile(w);
+    }
+
     /// @dev Repeat `s` `n` times (test-local helper; Solidity has no string multiply).
     function _repeat(string memory s, uint256 n) private pure returns (string memory out) {
         for (uint256 i = 0; i < n; ++i) {

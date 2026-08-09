@@ -1009,14 +1009,24 @@ library EFSLib {
                 slash = i;
             }
         }
+        // RFC 9110 allows OWS (space/HTAB) BEFORE the `;`, and the TypeScript rule accepts it,
+        // so `text/plain ; charset=utf-8` is a valid media type. Trim it off the name portion
+        // rather than feeding it to the restricted-name loop, which would reject a legal value
+        // — the worse direction to diverge in, since it reverts a write that should succeed.
+        uint256 nameEnd = semi;
+        while (nameEnd > 0 && (v[nameEnd - 1] == 0x20 || v[nameEnd - 1] == 0x09)) {
+            --nameEnd;
+        }
+        // A `;` must actually introduce a parameter — a dangling one is not a media type.
+        if (semi < v.length && semi + 1 >= v.length) return false;
         // `type` and `subtype` must both exist and be non-empty, and EACH is capped at 127
         // characters by RFC 6838 §4.2 — the TypeScript validator's `restricted-name` enforces
         // that per half, so a total-length cap alone let this path persist a value the SDK's
         // other write doors reject (r3743014611). The two rules are hand-mirrored across
         // languages; they have to be compared per clause, not in spirit.
-        if (slash == type(uint256).max || slash == 0 || slash + 1 >= semi) return false;
-        if (slash > 127 || semi - slash - 1 > 127) return false;
-        for (uint256 i = 0; i < semi; ++i) {
+        if (slash == type(uint256).max || slash == 0 || slash + 1 >= nameEnd) return false;
+        if (slash > 127 || nameEnd - slash - 1 > 127) return false;
+        for (uint256 i = 0; i < nameEnd; ++i) {
             if (i == slash) continue;
             bytes1 c = v[i];
             bool alnum = (c >= "0" && c <= "9") || (c >= "a" && c <= "z") || (c >= "A" && c <= "Z");
@@ -1029,8 +1039,12 @@ library EFSLib {
                 || c == "_" || c == "." || c == "+";
             if (!ok) return false;
         }
-        // Parameters: printable ASCII only — blocks CR/LF/NUL and other controls.
+        // Parameters: printable ASCII, plus HTAB — which is legal OWS inside the parameter
+        // section (`text/plain\t;\tcharset=utf-8` is a valid media type the TypeScript rule
+        // accepts). CR, LF, NUL and every other control stay blocked, which is the property
+        // that matters: this value is served as a `Content-Type` header.
         for (uint256 i = semi; i < v.length; ++i) {
+            if (v[i] == 0x09) continue;
             if (v[i] < 0x20 || v[i] > 0x7E) return false;
         }
         return true;
