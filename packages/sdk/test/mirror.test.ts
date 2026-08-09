@@ -151,6 +151,25 @@ describe('resolveTransport - URI parsing (TRANSPORT allowlist)', () => {
       expect(err.message).not.toContain('alice')
       expect(err.message).toContain('<credentials redacted>')
     }
+    // r3742898918 — a RAW `@` inside the password. WHATWG treats the LAST `@`
+    // of the authority as the delimiter, so this parses as password `p@ss`; a
+    // first-`@` redaction would print `ss@` to the log.
+    {
+      const err = (() => {
+        try {
+          resolveTransport('https://alice:p@sswordy@example.com/file')
+        } catch (e) {
+          return e as Error
+        }
+        throw new Error('expected rejection')
+      })()
+      expect(err.message).not.toContain('sswordy')
+      expect(err.message).not.toContain('alice')
+      expect(err.message).toBe(
+        'unsupported mirror URI "https://<credentials redacted>@example.com/file": URL carries credentials (user:password@), which fetch refuses to request — publish a URL without embedded credentials',
+      )
+    }
+
     // An `@` in the PATH or QUERY is not userinfo — those URLs stay usable.
     expect(resolveTransport('https://example.com/a@b/file').httpUrls()[0]?.href).toBe(
       'https://example.com/a@b/file',

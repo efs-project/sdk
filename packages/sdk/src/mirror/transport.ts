@@ -115,7 +115,13 @@ export function summarizeUri(uri: string): string {
   // the chain is append-only, so a credential-bearing mirror minted before this
   // guard still reaches readers. String surgery, not `new URL`: the input here
   // is arbitrary and may not parse at all.
-  const safe = uri.replace(/^([A-Za-z][A-Za-z0-9+.-]*:\/\/)[^/?#@]*@/, '$1<credentials redacted>@')
+  //
+  // `[^/?#]*` is GREEDY on purpose, so it runs to the LAST `@` of the authority
+  // — WHATWG's own delimiter rule (r3742898918). A raw `@` inside the password
+  // is legal, and `https://alice:p@ss@host/f` parses as password `p@ss`; a
+  // first-`@` match would redact only `alice:p` and print `ss@` to the log.
+  // Excluding `/?#` keeps an `@` in a path, query or fragment untouched.
+  const safe = uri.replace(/^([A-Za-z][A-Za-z0-9+.-]*:\/\/)[^/?#]*@/, '$1<credentials redacted>@')
   return safe.length > 200 ? `${safe.slice(0, 200)}… (${safe.length} chars)` : safe
 }
 
