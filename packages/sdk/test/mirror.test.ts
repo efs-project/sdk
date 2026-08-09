@@ -64,8 +64,10 @@ describe('resolveTransport - URI parsing (TRANSPORT allowlist)', () => {
     )
   })
 
-  it('parses ipfs://CID to the default gateway list with ?format=raw', () => {
-    const cid = 'bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi'
+  it('parses ipfs://CID to the default gateway list, ?format=raw on a RAW block', () => {
+    // Raw codec (0x55): the block IS the file bytes, so IPIP-402 raw is exactly
+    // what we want to re-hash.
+    const cid = 'bafkreie6p7kasggjhsdoag7daq3qhxmifpo3ltgvizvn3qphs2ncp6j5va'
     const r = resolveTransport(`ipfs://${cid}`)
     expect(r.scheme).toBe(TRANSPORT.ipfs)
     const urls = r.httpUrls()
@@ -74,12 +76,29 @@ describe('resolveTransport - URI parsing (TRANSPORT allowlist)', () => {
     expect(urls[1]!.href).toBe(`https://dweb.link/ipfs/${cid}?format=raw`)
   })
 
-  it('honors overridden ipfs gateways and a subpath', () => {
+  it('does NOT force ?format=raw on UnixFS/dag-pb CIDs (r3742636236)', () => {
+    // dag-pb (0x70) and every CIDv0: the raw block is a protobuf node WRAPPING
+    // the payload (links only, for a multi-block file). Asking for it would
+    // re-hash to a digest that can never match contentHash, so a valid mirror
+    // would read back as verification:'mismatch' and readBytes would throw.
+    for (const cid of [
+      'bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi', // CIDv1 dag-pb
+      'QmZ1NBGCY8gyX929hs2JWv1QTUjV4wLK4eS77ddhBVoy3d', // CIDv0 — always dag-pb
+    ]) {
+      const urls = resolveTransport(`ipfs://${cid}`).httpUrls()
+      expect(urls[0]!.href).toBe(`https://ipfs.io/ipfs/${cid}`)
+      expect(urls[0]!.searchParams.has('format')).toBe(false)
+    }
+  })
+
+  it('honors overridden ipfs gateways and a subpath (no raw on a path walk)', () => {
+    // A subpath is a UnixFS directory walk — its result is a file, never the
+    // root block, so `format=raw` never applies however the CID is encoded.
     const cid = 'bafytest'
     const r = resolveTransport(`ipfs://${cid}/dir/a.txt`)
     const urls = r.httpUrls({ ipfsGateways: ['https://my.gw/'] })
     expect(urls).toHaveLength(1)
-    expect(urls[0]!.href).toBe(`https://my.gw/ipfs/${cid}/dir/a.txt?format=raw`)
+    expect(urls[0]!.href).toBe(`https://my.gw/ipfs/${cid}/dir/a.txt`)
   })
 
   it('rejects path traversal in ipfs/arweave subpaths (literal and %2e-encoded)', () => {
@@ -303,7 +322,7 @@ describe('fetchVerified - happy paths per transport', () => {
     const fetchImpl = vi.fn(async () => mockResponse(bytes)) as unknown as typeof fetch
     const res = await fetchVerified(['ipfs://bafytest'], hash, { fetchImpl })
     expect(res.verification).toBe('matches-author')
-    expect(res.urlUsed).toBe('https://ipfs.io/ipfs/bafytest?format=raw')
+    expect(res.urlUsed).toBe('https://ipfs.io/ipfs/bafytest')
   })
 
   it('rejects an http:// gateway URL unless allowInsecureHttp (no network call)', async () => {
@@ -421,7 +440,7 @@ describe('fetchVerified - failover', () => {
       .mockResolvedValueOnce(mockResponse(bytes)) as unknown as typeof fetch
     const res = await fetchVerified(['ipfs://bafytest'], hash, { fetchImpl })
     expect(res.verification).toBe('matches-author')
-    expect(res.urlUsed).toBe('https://dweb.link/ipfs/bafytest?format=raw')
+    expect(res.urlUsed).toBe('https://dweb.link/ipfs/bafytest')
     expect(res.attempts).toHaveLength(1)
     expect(res.attempts[0]!.reason).toContain('502')
   })

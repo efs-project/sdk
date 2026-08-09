@@ -32,11 +32,13 @@ export const TRANSPORT = {
   data: 'data',
 } as const satisfies Record<string, TransportName>
 
-/** Default IPFS gateways, tried in order. Trustless-friendly: we request
- * `?format=raw` (IPIP-402) so a gateway returns the raw block bytes rather than
- * a UnixFS-unwrapped/transcoded representation — but note CID is not sha256
- * regardless, so the gateway is never trusted; the fetch engine re-hashes every
- * byte. Overridable via `ResolveOptions.ipfsGateways`. */
+/** Default IPFS gateways, tried in order. Trustless-friendly: for a bare
+ * RAW-block CID we request `?format=raw` (IPIP-402) so the gateway returns the
+ * block bytes rather than a transcoded representation. UnixFS/dag-pb CIDs and
+ * subpaths take the gateway's normal file response instead — their raw block is
+ * a protobuf wrapper, not the payload. Either way the gateway is never trusted:
+ * the fetch engine re-hashes every byte against the attested `contentHash`.
+ * Overridable via `ResolveOptions.ipfsGateways`. */
 export const DEFAULT_IPFS_GATEWAYS: readonly string[] = [
   'https://ipfs.io',
   'https://dweb.link',
@@ -493,8 +495,35 @@ export function cidStructureError(cid: string): string | undefined {
   return parseV1(bytes)
 }
 
-/** `ipfs://<cid>[/<path>]` to gateway path-style URLs (`/ipfs/<cid>/<path>`),
- * each carrying `?format=raw` to prefer the raw block over a transcoded one. */
+/**
+ * Whether `cid` names a RAW block — the only case where a gateway's raw-block
+ * response is the file's own bytes (r3742636236).
+ *
+ * `?format=raw` (IPIP-402) returns the serialized BLOCK. For a raw-codec
+ * (`0x55`) CID that block IS the content, so the response re-hashes to
+ * `contentHash`. For dag-pb/UnixFS (`0x70`) — every CIDv0 `Qm…`, and the
+ * `bafybei…` CIDv1s — the block is a protobuf node WRAPPING the payload, and
+ * for multi-block files it holds only links. Re-hashing that yields a digest
+ * that cannot match, so a perfectly valid mirror reads back as
+ * `verification: 'mismatch'` and `readBytes`/`readText` throw.
+ *
+ * Conservative by construction: anything we cannot positively prove to be a raw
+ * block returns `false`, because the cost of guessing wrong is a file that
+ * never reads, while the cost of omitting `format=raw` is only that the gateway
+ * picks its own (correct) representation.
+ */
+function isRawBlockCid(cid: string): boolean {
+  if (cid.startsWith('Qm')) return false // CIDv0 is always dag-pb
+  const base = MULTIBASE[cid[0] ?? '']
+  const bytes = base?.decode(cid.slice(1))
+  if (bytes === undefined) return false
+  const version = readVarint(bytes, 0)
+  if (version?.value !== 1) return false
+  return readVarint(bytes, version.next)?.value === 0x55
+}
+
+/** `ipfs://<cid>[/<path>]` to gateway path-style URLs (`/ipfs/<cid>/<path>`).
+ * `?format=raw` rides ONLY on bare raw-block CIDs — see {@link isRawBlockCid}. */
 function resolveIpfs(uri: string): ResolvedTransport {
   // Tolerate `ipfs://ipfs/<cid>` and bare `ipfs://<cid>`.
   let rest = uri.slice('ipfs://'.length)
@@ -522,9 +551,13 @@ function resolveIpfs(uri: string): ResolvedTransport {
       const gateways = opts?.ipfsGateways ?? DEFAULT_IPFS_GATEWAYS
       return gateways.map((g) => {
         const u = buildGatewayUrl(g, `ipfs/${cid}`, subpath, uri)
-        // IPIP-402: ask the gateway for the verifiable raw block. Harmless on
-        // gateways that ignore it; we re-hash regardless.
-        if (!u.searchParams.has('format')) u.searchParams.set('format', 'raw')
+        // IPIP-402: ask for the verifiable raw block — but ONLY when the block
+        // is the content itself. A subpath is a UnixFS directory walk whose
+        // result is a file, never the root block, so it never qualifies
+        // (r3742636236). We re-hash whatever comes back regardless.
+        if (subpath === '' && isRawBlockCid(cid) && !u.searchParams.has('format')) {
+          u.searchParams.set('format', 'raw')
+        }
         return u
       })
     },
