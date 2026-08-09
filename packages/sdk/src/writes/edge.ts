@@ -42,6 +42,7 @@
 
 import type { Address, Hex } from 'viem'
 import type { EfsSchemaUIDs } from '../chain/deployments.js'
+import { asContentHash } from '../content/hash.js'
 import { SchemaEncoder } from '../eas/schema-encoder.js'
 import { EFS_SCHEMA_FIELDS } from '../eas/schemas.js'
 import { EfsError, InvalidListConfig } from '../errors.js'
@@ -203,6 +204,18 @@ export function buildPropertyPlan(
   // goes through it (r3742696130). `contentType` is plain ASCII, so its canonical
   // encoding is itself.
   if (key === 'contentType') assertContentType(value, 'EFS property write')
+  // The other authoritative reserved key (r3742750216). A malformed hash claim
+  // is WORSE than a malformed contentType: readText/readBytes/readJson report
+  // `malformed-claim` and THROW even when the mirror bytes are perfectly good,
+  // so one bad props.set makes a healthy file unreadable by default. File
+  // writes already persist only canonical `ContentHash`; this routes props.set
+  // through the same boundary.
+  if (key === 'contentHash' && asContentHash(value) === undefined) {
+    throw new EfsError(
+      `EFS property write: \`contentHash\` ${JSON.stringify(value)} is not a canonical content hash (expected the multibase-multihash form, e.g. \`f1220\` + 64 lowercase hex for sha2-256 — ADR-0016/specs 10 §2.3). This value is the AUTHORITATIVE claim readers verify against, so a malformed one makes every default read throw \`malformed-claim\` even when the bytes are intact. Use \`hashContent(bytes)\`, or \`decodeContentHash(s).canonical\` for an accepted-on-read form.`,
+      { code: 'InvalidArgument' },
+    )
+  }
 
   // PROPERTY — the interned value (refUID 0, non-revocable). Always minted fresh (new
   // content), whether the key-anchor is reused or not.

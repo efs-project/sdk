@@ -186,6 +186,26 @@ describe('buildPropertyPlan', () => {
     ).toHaveLength(3)
   })
 
+  it('validates the reserved contentHash key too, not just contentType (r3742750216)', () => {
+    // Worse than a bad contentType: readText/readBytes/readJson report
+    // `malformed-claim` and THROW even when the mirror bytes are intact, so one
+    // props.set makes a healthy file unreadable by default.
+    for (const bad of [
+      'garbage',
+      '0x1220aabb', // 0x-prefixed digest, not the multibase form
+      'f1220AABB', // uppercase hex is not canonical
+      `f1220${'a'.repeat(63)}`, // one hex digit short
+    ]) {
+      expect(() => buildPropertyPlan(SCHEMAS, DATA, 'contentHash', bad)).toThrowError(
+        /not a canonical content hash/,
+      )
+    }
+    // The canonical form file writes already persist still builds.
+    expect(
+      buildPropertyPlan(SCHEMAS, DATA, 'contentHash', `f1220${'a'.repeat(64)}`).attestations,
+    ).toHaveLength(3)
+  })
+
   it('with an existing key anchor (Bug-2): emits ONLY PROPERTY + binding-PIN (no key-ANCHOR)', () => {
     const EXISTING = uid(0x7aa)
     const plan = buildPropertyPlan(SCHEMAS, DATA, 'author', 'bob', EXISTING)

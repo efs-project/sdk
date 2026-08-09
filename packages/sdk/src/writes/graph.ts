@@ -353,6 +353,14 @@ export interface FileWriteGraph {
    * only after the DATA, anchor, metadata and placement have mined
    * (r3742072004). */
   readonly ancestorTagUIDs?: readonly Hex[]
+  /** The CONCRETE `/tags/system` definition the Overview visibility TAG points
+   * at, stamped for the same reason as {@link ancestorTagUIDs}: the TAG sits at
+   * `m + 3`, so a well-shaped but nonexistent definition is rejected by the
+   * resolver only AFTER the DATA, file anchor, mirrors and metadata have mined
+   * — a paid, half-applied write (r3742750213). `writes/overview.ts` resolves
+   * this from the path and refuses ZERO, but `buildFileWriteGraph` is exported,
+   * so a direct caller can supply anything. */
+  readonly overviewSystemTagDefUID?: Hex
   /** The DISTINCT `/transports/<scheme>` anchor UIDs the plan's MIRRORs
    * reference, stamped so the boundary can verify each IS an ANCHOR under
    * `/transports/` before layer 1 broadcasts — MirrorResolver only rejects at
@@ -553,6 +561,9 @@ export function buildFileWriteGraph(input: FileWriteGraphInput): FileWriteGraph 
       hardlinkDataUID: input.content.dataUID,
       ...(input.existingAncestorTagUIDs !== undefined && input.existingAncestorTagUIDs.length > 0
         ? { ancestorTagUIDs: input.existingAncestorTagUIDs }
+        : {}),
+      ...(input.overviewSystemTagDef !== undefined
+        ? { overviewSystemTagDefUID: input.overviewSystemTagDef }
         : {}),
       ...(existingFileAnchorUID !== undefined
         ? {
@@ -781,6 +792,9 @@ export function buildFileWriteGraph(input: FileWriteGraphInput): FileWriteGraph 
     mirrorTransportUIDs: [...new Set(input.mirrors.map((m) => m.transportDefinition))],
     ...(input.existingAncestorTagUIDs !== undefined && input.existingAncestorTagUIDs.length > 0
       ? { ancestorTagUIDs: input.existingAncestorTagUIDs }
+      : {}),
+    ...(input.overviewSystemTagDef !== undefined
+      ? { overviewSystemTagDefUID: input.overviewSystemTagDef }
       : {}),
     ...(existingFileAnchorUID !== undefined
       ? {

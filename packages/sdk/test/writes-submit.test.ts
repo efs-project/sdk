@@ -724,6 +724,36 @@ describe('submitWriteTier1 — hardlink plan', () => {
     expect(sent).toHaveLength(0)
   })
 
+  it('REFUSES a non-ANCHOR Overview system TAG definition BEFORE layer 1 (r3742750213)', async () => {
+    // The Overview TAG sits at m+3 — after DATA, the file anchor, mirrors and
+    // metadata. writes/overview.ts resolves this definition from the path, but
+    // buildFileWriteGraph is EXPORTED, so a direct caller can hand it any
+    // well-shaped UID and only find out once the write is paid for.
+    const tagDef = uid(0x5a5)
+    const plan = buildFileWriteGraph({ ...bytesInput, overviewSystemTagDef: tagDef })
+    const { ctx, sent } = makeMockChain()
+    const bad = {
+      ...ctx,
+      publicClient: {
+        ...ctx.publicClient,
+        async readContract(a: { functionName: string; args?: readonly unknown[] }) {
+          if (a.functionName === 'getAttestation' && (a.args as [Hex])[0] === tagDef) {
+            return { schema: SCHEMAS.data } // a DATA, not the /tags/system ANCHOR
+          }
+          return (
+            ctx.publicClient as unknown as { readContract: (x: unknown) => Promise<unknown> }
+          ).readContract(a)
+        },
+      },
+    } as SubmitContext
+    const err = await submitWriteTier1(plan, bad).catch((e) => e)
+    expect((err as { code?: string }).code).toBe('InvalidArgument')
+    expect(String((err as Error).message)).toMatch(
+      /Overview system TAG definition .* is not an ANCHOR/,
+    )
+    expect(sent).toHaveLength(0) // nothing broadcast
+  })
+
   it('REFUSES a non-ANCHOR mirror transportDefinition BEFORE layer 1 (r3741671356)', async () => {
     // MirrorResolver only rejects at the layer-2 MIRROR — by then DATA +
     // file-ANCHOR have mined (a paid partial graph).

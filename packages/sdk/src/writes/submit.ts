@@ -755,6 +755,53 @@ async function assertAncestorTagTargets(plan: FileWriteGraph, ctx: SubmitContext
   }
 }
 
+/** The Overview visibility TAG's `definition` is the concrete `/tags/system`
+ * anchor. It sits at `m + 3` — after the DATA, file anchor, mirrors and metadata
+ * — so a well-shaped but nonexistent definition is rejected by the resolver only
+ * once those have mined: the same paid, half-applied write as a bad ancestor tag
+ * target (r3742750213). `writes/overview.ts` resolves this from the path and
+ * refuses ZERO, but `buildFileWriteGraph` is exported, so a direct caller can
+ * supply anything. Verified against the ANCHOR schema before layer 1; fails
+ * CLOSED when the context cannot read. */
+async function assertOverviewTagDefinition(
+  plan: FileWriteGraph,
+  ctx: SubmitContext,
+): Promise<void> {
+  const def = plan.overviewSystemTagDefUID
+  if (def === undefined) return
+  const expected = plan.anchorSchemaUID
+  if (expected === undefined) {
+    throw new EfsError(
+      'EFS write: this plan carries an Overview system TAG but no anchorSchemaUID stamp — rebuild it with buildFileWriteGraph.',
+      { code: 'InvalidArgument' },
+    )
+  }
+  if (def === ZERO_UID) {
+    throw new EfsError(
+      'EFS write: the Overview system TAG definition is the ZERO UID — resolve /tags/system before building the plan (efs.fs.overview does this), or omit the Overview TAG.',
+      { code: 'InvalidArgument' },
+    )
+  }
+  if (ctx.publicClient.readContract === undefined) {
+    throw new EfsError(
+      'EFS write: verifying the Overview system TAG definition needs a publicClient with readContract — a bad definition reverts only AFTER the DATA, anchor, mirrors and metadata have mined.',
+      { code: 'InvalidArgument' },
+    )
+  }
+  const att = (await ctx.publicClient.readContract({
+    address: ctx.easAddress,
+    abi: getAttestationAbi,
+    functionName: 'getAttestation',
+    args: [def],
+  })) as { schema?: Hex } | undefined
+  if (att?.schema === undefined || att.schema.toLowerCase() !== expected.toLowerCase()) {
+    throw new EfsError(
+      `EFS write: the Overview system TAG definition ${def} is not an ANCHOR attestation (schema ${att?.schema ?? 'unknown'}) — the TAG would revert after the file had already been written.`,
+      { code: 'InvalidArgument' },
+    )
+  }
+}
+
 /** PURE structural preflight of a plan's symbolic wiring (r3742105026): every
  * symbolic reference must name a ref minted in a STRICTLY EARLIER layer, and
  * ref ids must be unique. `buildLayerRequests` enforces this per layer while
@@ -1037,6 +1084,7 @@ export async function submitLayeredTier1(
   await assertSymlinkTargetReadable(plan, ctx)
   await assertMirrorTransportsValid(plan, ctx)
   await assertAncestorTagTargets(plan, ctx)
+  await assertOverviewTagDefinition(plan, ctx)
   // Pure structural check — costs nothing, so it runs for EVERY plan.
   assertPlanRefsResolvable(plan)
   const resolved = new Map<string, Hex>()
