@@ -430,7 +430,7 @@ describe('writeFileTier1 — caller-supplied mirrors', () => {
   it('does NOT count any storage tx (signatureCount = EAS layers only, no deploys)', async () => {
     const { ctx, sent, deploys } = makeCtx()
     const receipt = await writeFileTier1('/docs/readme.md', CONTENT, ctx, {
-      mirrors: ['ipfs://QmExample'],
+      mirrors: ['ipfs://QmZ1NBGCY8gyX929hs2JWv1QTUjV4wLK4eS77ddhBVoy3d'],
     })
     // Caller hosts the bytes → no SSTORE2 store → signatureCount is purely the EAS
     // layers (contrast the on-chain default path, which adds 2 for chunk + manager).
@@ -441,7 +441,7 @@ describe('writeFileTier1 — caller-supplied mirrors', () => {
   it('uses opts.mirrors and the per-scheme transport from the deployment map', async () => {
     const { ctx, sent } = makeCtx()
     await writeFileTier1('/docs/readme.md', CONTENT, ctx, {
-      mirrors: ['ipfs://QmExample'],
+      mirrors: ['ipfs://QmZ1NBGCY8gyX929hs2JWv1QTUjV4wLK4eS77ddhBVoy3d'],
     })
     const { SchemaEncoder } = await import('../src/eas/schema-encoder.js')
     const { EFS_SCHEMA_FIELDS } = await import('../src/eas/schemas.js')
@@ -449,14 +449,14 @@ describe('writeFileTier1 — caller-supplied mirrors', () => {
     const mirrorEntry = sent[1].entries.find((e) => e.schema === SCHEMAS.mirror)
     const [transportDef, uriValue] = mirrorEnc.decodeData(mirrorEntry!.data) as [Hex, string]
     expect(transportDef).toBe(TRANSPORT_IPFS) // keyed by the ipfs scheme
-    expect(uriValue).toBe('ipfs://QmExample')
+    expect(uriValue).toBe('ipfs://QmZ1NBGCY8gyX929hs2JWv1QTUjV4wLK4eS77ddhBVoy3d')
   })
 
   it('honors opts.transportDefinition over the deployment map', async () => {
     const override = uid(0x999)
     const { ctx, sent } = makeCtx({ transports: {} }) // empty map → must use override
     await writeFileTier1('/docs/readme.md', CONTENT, ctx, {
-      mirrors: ['ipfs://QmExample'],
+      mirrors: ['ipfs://QmZ1NBGCY8gyX929hs2JWv1QTUjV4wLK4eS77ddhBVoy3d'],
       transportDefinition: override,
     })
     const { SchemaEncoder } = await import('../src/eas/schema-encoder.js')
@@ -470,7 +470,7 @@ describe('writeFileTier1 — caller-supplied mirrors', () => {
   it('caller mirrors skip on-chain storage entirely (no deploys)', async () => {
     const { ctx, deploys } = makeCtx()
     await writeFileTier1('/docs/readme.md', CONTENT, ctx, {
-      mirrors: ['ipfs://QmExample'],
+      mirrors: ['ipfs://QmZ1NBGCY8gyX929hs2JWv1QTUjV4wLK4eS77ddhBVoy3d'],
     })
     expect(deploys).toHaveLength(0)
   })
@@ -524,7 +524,10 @@ describe('writeFileTier1 — caller-supplied mirrors', () => {
     // A common durability pair — each MIRROR must get its own transport, not the
     // first URI's (the mislabeling bug this guards).
     await writeFileTier1('/docs/readme.md', CONTENT, ctx, {
-      mirrors: ['ipfs://QmExample', 'ar://AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'],
+      mirrors: [
+        'ipfs://QmZ1NBGCY8gyX929hs2JWv1QTUjV4wLK4eS77ddhBVoy3d',
+        'ar://AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+      ],
     })
     const { SchemaEncoder } = await import('../src/eas/schema-encoder.js')
     const { EFS_SCHEMA_FIELDS } = await import('../src/eas/schemas.js')
@@ -532,7 +535,10 @@ describe('writeFileTier1 — caller-supplied mirrors', () => {
     const mirrorEntries = sent[1].entries.filter((e) => e.schema === SCHEMAS.mirror)
     expect(mirrorEntries).toHaveLength(2)
     const decoded = mirrorEntries.map((e) => mirrorEnc.decodeData(e.data) as [Hex, string])
-    expect(decoded).toContainEqual([TRANSPORT_IPFS, 'ipfs://QmExample'])
+    expect(decoded).toContainEqual([
+      TRANSPORT_IPFS,
+      'ipfs://QmZ1NBGCY8gyX929hs2JWv1QTUjV4wLK4eS77ddhBVoy3d',
+    ])
     expect(decoded).toContainEqual([ARWEAVE, 'ar://AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'])
   })
 })
@@ -1041,7 +1047,7 @@ describe('writeFileTier1 — error paths', () => {
   it('throws MissingTransport for a caller mirror whose scheme has no transport anchor', async () => {
     const { ctx } = makeCtx({ transports: { onchain: TRANSPORT_ONCHAIN } }) // ipfs missing
     const err = await writeFileTier1('/docs/readme.md', CONTENT, ctx, {
-      mirrors: ['ipfs://QmExample'],
+      mirrors: ['ipfs://QmZ1NBGCY8gyX929hs2JWv1QTUjV4wLK4eS77ddhBVoy3d'],
     }).catch((e) => e)
     expect((err as { code?: string }).code).toBe('MissingTransport')
     expect(String((err as Error).message)).toMatch(/ipfs/)
@@ -1067,7 +1073,7 @@ describe('writeFileTier1 — error paths', () => {
     // the L1 DATA landed (orphaned partial write). Reject it before any tx.
     const { ctx, deploys, sent } = makeCtx({ transports: { onchain: TRANSPORT_ONCHAIN } })
     const err = await writeFileTier1('/docs/readme.md', CONTENT, ctx, {
-      mirrors: ['', 'ipfs://QmExample'],
+      mirrors: ['', 'ipfs://QmZ1NBGCY8gyX929hs2JWv1QTUjV4wLK4eS77ddhBVoy3d'],
       transportDefinition: TRANSPORT_ONCHAIN, // explicit → would skip the scheme guard
     }).catch((e) => e)
     expect((err as { code?: string }).code).toBe('InvalidArgument')

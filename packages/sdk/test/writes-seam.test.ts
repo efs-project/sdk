@@ -228,7 +228,12 @@ describe('selectSingle', () => {
   const plan = buildFileWriteGraph({
     path: '/a.txt',
     content: { kind: 'bytes', bytes: new Uint8Array([1]) },
-    mirrors: [{ uri: 'ipfs://Qm', transportDefinition: uid(0x200) }],
+    mirrors: [
+      {
+        uri: 'ipfs://QmZ1NBGCY8gyX929hs2JWv1QTUjV4wLK4eS77ddhBVoy3d',
+        transportDefinition: uid(0x200),
+      },
+    ],
     contentHash: hashContent(new Uint8Array([1])),
     size: 1n,
     schemas: SCHEMAS,
@@ -360,7 +365,12 @@ describe('Tier1Submitter receipt', () => {
     const plan = buildFileWriteGraph({
       path: '/docs/readme.md',
       content: { kind: 'bytes', bytes: new Uint8Array([1, 2, 3]) },
-      mirrors: [{ uri: 'ipfs://Qm', transportDefinition: uid(0x200) }],
+      mirrors: [
+        {
+          uri: 'ipfs://QmZ1NBGCY8gyX929hs2JWv1QTUjV4wLK4eS77ddhBVoy3d',
+          transportDefinition: uid(0x200),
+        },
+      ],
       contentHash: hashContent(new Uint8Array([1, 2, 3])),
       size: 3n,
       schemas: SCHEMAS,

@@ -36,7 +36,12 @@ const EXISTING_DATA = uid(0x400)
 
 const baseInput = {
   path: '/docs/readme.md',
-  mirrors: [{ uri: 'ipfs://QmExample', transportDefinition: TRANSPORT }] as const,
+  mirrors: [
+    {
+      uri: 'ipfs://QmZ1NBGCY8gyX929hs2JWv1QTUjV4wLK4eS77ddhBVoy3d',
+      transportDefinition: TRANSPORT,
+    },
+  ] as const,
   contentType: 'text/markdown',
   contentHash: CONTENT_HASH,
   size: 3n, // must MATCH the bytes — the builder verifies correspondence
@@ -184,8 +189,13 @@ describe('MIRROR node', () => {
   })
 
   it('encodes (transportDefinition, uri) and round-trips', () => {
-    expect(m.data).toBe(mirrorEnc.encodeData([TRANSPORT, 'ipfs://QmExample']))
-    expect(mirrorEnc.decodeData(m.data)).toEqual([TRANSPORT, 'ipfs://QmExample'])
+    expect(m.data).toBe(
+      mirrorEnc.encodeData([TRANSPORT, 'ipfs://QmZ1NBGCY8gyX929hs2JWv1QTUjV4wLK4eS77ddhBVoy3d']),
+    )
+    expect(mirrorEnc.decodeData(m.data)).toEqual([
+      TRANSPORT,
+      'ipfs://QmZ1NBGCY8gyX929hs2JWv1QTUjV4wLK4eS77ddhBVoy3d',
+    ])
   })
 
   it('emits one MIRROR per uri, each labeled with its OWN transport (mixed-scheme)', () => {
@@ -194,14 +204,20 @@ describe('MIRROR node', () => {
     const two = buildFileWriteGraph({
       ...bytesInput,
       mirrors: [
-        { uri: 'ipfs://A', transportDefinition: IPFS_T },
+        {
+          uri: 'ipfs://QmZ1NBGCY8gyX929hs2JWv1QTUjV4wLK4eS77ddhBVoy3d',
+          transportDefinition: IPFS_T,
+        },
         { uri: 'ar://AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', transportDefinition: AR_T },
       ],
     }).attestations.filter((a) => a.kind === 'MIRROR')
     expect(two).toHaveLength(2)
     // Each MIRROR carries its own transport — the ar:// entry is NOT mislabeled
     // with the ipfs transport (the bug this guards).
-    expect(mirrorEnc.decodeData(two[0].data)).toEqual([IPFS_T, 'ipfs://A'])
+    expect(mirrorEnc.decodeData(two[0].data)).toEqual([
+      IPFS_T,
+      'ipfs://QmZ1NBGCY8gyX929hs2JWv1QTUjV4wLK4eS77ddhBVoy3d',
+    ])
     expect(mirrorEnc.decodeData(two[1].data)).toEqual([
       AR_T,
       'ar://AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
@@ -626,6 +642,32 @@ describe('byte-plan builder preflight (reviews r3741586928 / r3741586938)', () =
     expect(g.attestations.some((a) => a.kind === 'MIRROR')).toBe(true)
   })
 
+  it('REJECTS a structurally invalid IPFS CID at write time (r3742105028)', () => {
+    // The chain accepts any nonempty string and the READ parser stays
+    // gateway-tolerant, so the write path decodes the CID properly.
+    for (const bad of ['ipfs://x', 'ipfs://Qmshort', 'ipfs://bnotbase32!!']) {
+      expect(() =>
+        buildFileWriteGraph({
+          ...good,
+          mirrors: [{ uri: bad, transportDefinition: baseInput.mirrors[0]!.transportDefinition }],
+        }),
+      ).toThrowError(/valid IPFS CID|not a valid ipfs: locator/)
+    }
+  })
+
+  it('ACCEPTS real CIDv0 and CIDv1 locators', () => {
+    for (const good_ of [
+      'ipfs://QmZ1NBGCY8gyX929hs2JWv1QTUjV4wLK4eS77ddhBVoy3d', // CIDv0 base58btc
+      'ipfs://bafkreie6p7kasggjhsdoag7daq3qhxmifpo3ltgvizvn3qphs2ncp6j5va', // CIDv1 base32
+    ]) {
+      const g = buildFileWriteGraph({
+        ...good,
+        mirrors: [{ uri: good_, transportDefinition: baseInput.mirrors[0]!.transportDefinition }],
+      })
+      expect(g.attestations.some((a) => a.kind === 'MIRROR')).toBe(true)
+    }
+  })
+
   it('REJECTS a malformed ancestor tag target at build time (r3742072004)', () => {
     expect(() =>
       buildFileWriteGraph({ ...good, existingAncestorTagUIDs: ['0x01' as never] }),
@@ -639,13 +681,23 @@ describe('byte-plan builder preflight (reviews r3741586928 / r3741586938)', () =
     expect(() =>
       buildFileWriteGraph({
         ...good,
-        mirrors: [{ uri: 'ipfs://Qm', transportDefinition: '0x01' as never }],
+        mirrors: [
+          {
+            uri: 'ipfs://QmZ1NBGCY8gyX929hs2JWv1QTUjV4wLK4eS77ddhBVoy3d',
+            transportDefinition: '0x01' as never,
+          },
+        ],
       }),
     ).toThrowError(/not a nonzero bytes32 anchor UID/)
     expect(() =>
       buildFileWriteGraph({
         ...good,
-        mirrors: [{ uri: 'ipfs://Qm', transportDefinition: uid(0) }],
+        mirrors: [
+          {
+            uri: 'ipfs://QmZ1NBGCY8gyX929hs2JWv1QTUjV4wLK4eS77ddhBVoy3d',
+            transportDefinition: uid(0),
+          },
+        ],
       }),
     ).toThrowError(/not a nonzero bytes32 anchor UID/)
   })

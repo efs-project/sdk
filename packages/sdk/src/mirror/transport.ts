@@ -241,6 +241,127 @@ export function resolveTransport(
   }
 }
 
+const BASE58_ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
+const BASE32_ALPHABET = 'abcdefghijklmnopqrstuvwxyz234567'
+
+/** Decode base58btc, or `undefined` when a character is outside the alphabet. */
+function decodeBase58(s: string): Uint8Array | undefined {
+  const bytes: number[] = [0]
+  for (const ch of s) {
+    const v = BASE58_ALPHABET.indexOf(ch)
+    if (v < 0) return undefined
+    let carry = v
+    for (let i = 0; i < bytes.length; i++) {
+      carry += (bytes[i] as number) * 58
+      bytes[i] = carry & 0xff
+      carry >>= 8
+    }
+    while (carry > 0) {
+      bytes.push(carry & 0xff)
+      carry >>= 8
+    }
+  }
+  // Leading '1's are leading zero bytes.
+  for (const ch of s) {
+    if (ch !== '1') break
+    bytes.push(0)
+  }
+  return new Uint8Array(bytes.reverse())
+}
+
+/** Decode RFC 4648 lowercase base32 (no padding), or `undefined` if malformed. */
+function decodeBase32Lower(s: string): Uint8Array | undefined {
+  let bits = 0
+  let value = 0
+  const out: number[] = []
+  for (const ch of s) {
+    const v = BASE32_ALPHABET.indexOf(ch)
+    if (v < 0) return undefined
+    value = (value << 5) | v
+    bits += 5
+    if (bits >= 8) {
+      bits -= 8
+      out.push((value >> bits) & 0xff)
+    }
+  }
+  return new Uint8Array(out)
+}
+
+/** Read an unsigned varint at `i`; `undefined` when truncated/oversized. */
+function readVarint(b: Uint8Array, i: number): { value: number; next: number } | undefined {
+  let value = 0
+  let shift = 0
+  let idx = i
+  for (let n = 0; n < 5; n++) {
+    const byte = b[idx]
+    if (byte === undefined) return undefined
+    value |= (byte & 0x7f) << shift
+    idx += 1
+    if ((byte & 0x80) === 0) return { value: value >>> 0, next: idx }
+    shift += 7
+  }
+  return undefined
+}
+
+/**
+ * Structurally validate an IPFS CID: decode its multibase, then parse the CID
+ * itself. Returns a short reason when invalid, `undefined` when it parses.
+ *
+ *  - CIDv0 — bare base58btc `Qm…`: a raw sha2-256 multihash (0x12 0x20 + 32B).
+ *  - CIDv1 — multibase-prefixed (`b` base32, `f` base16, `z` base58btc):
+ *    version varint (1) + codec varint + multihash (code, length, digest of
+ *    exactly that length), with NO trailing bytes.
+ *
+ * Other multibases (base36 `k`, …) are legal CIDs the SDK's gateways accept but
+ * this parser does not decode; they pass the alphabet/shape screen rather than
+ * being rejected, so the check never refuses a CID that would actually resolve.
+ */
+export function cidStructureError(cid: string): string | undefined {
+  const parseV1 = (bytes: Uint8Array | undefined): string | undefined => {
+    if (bytes === undefined) return 'malformed multibase encoding'
+    const version = readVarint(bytes, 0)
+    if (version === undefined) return 'truncated CID'
+    if (version.value !== 1) return `unsupported CID version ${version.value}`
+    const codec = readVarint(bytes, version.next)
+    if (codec === undefined) return 'truncated codec'
+    const mhCode = readVarint(bytes, codec.next)
+    if (mhCode === undefined) return 'truncated multihash code'
+    const mhLen = readVarint(bytes, mhCode.next)
+    if (mhLen === undefined) return 'truncated multihash length'
+    const digestEnd = mhLen.next + mhLen.value
+    if (digestEnd !== bytes.length) {
+      return `multihash length ${mhLen.value} does not match the remaining ${bytes.length - mhLen.next} bytes`
+    }
+    if (mhLen.value === 0) return 'empty multihash digest'
+    return undefined
+  }
+
+  if (cid.startsWith('Qm')) {
+    const raw = decodeBase58(cid)
+    if (raw === undefined) return 'malformed base58btc'
+    if (raw.length !== 34 || raw[0] !== 0x12 || raw[1] !== 0x20) {
+      return 'not a valid CIDv0 sha2-256 multihash'
+    }
+    return undefined
+  }
+  const prefix = cid[0]
+  const body = cid.slice(1)
+  if (body.length === 0) return 'missing CID body'
+  if (prefix === 'b') return parseV1(decodeBase32Lower(body))
+  if (prefix === 'f') {
+    if (!/^[0-9a-f]+$/.test(body) || body.length % 2 !== 0) return 'malformed base16'
+    const raw = new Uint8Array(body.length / 2)
+    for (let i = 0; i < raw.length; i++) raw[i] = Number.parseInt(body.slice(i * 2, i * 2 + 2), 16)
+    return parseV1(raw)
+  }
+  if (prefix === 'z') return parseV1(decodeBase58(body))
+  // A multibase this parser does not decode: fall back to the shape screen so a
+  // legitimate (e.g. base36 `k…`) CID is not refused.
+  if (!/^[A-Za-z0-9]+$/.test(cid)) return 'non-alphanumeric CID'
+  if (cid.length < 10) return 'implausibly short CID'
+  return undefined
+}
+
 /** `ipfs://<cid>[/<path>]` to gateway path-style URLs (`/ipfs/<cid>/<path>`),
  * each carrying `?format=raw` to prefer the raw block over a transcoded one. */
 function resolveIpfs(uri: string): ResolvedTransport {
@@ -255,6 +376,11 @@ function resolveIpfs(uri: string): ResolvedTransport {
   }
   // CIDs are alphanumeric (base32/base58/base16); reject anything else so a
   // crafted CID can't smuggle path/host characters into the gateway URL.
+  // STRUCTURAL CID validation deliberately lives in the WRITE preflight
+  // (`validateMirrorUri` → {@link cidStructureError}), not here: reads stay as
+  // tolerant as the gateways themselves, so a mirror that some gateway would
+  // actually serve is never refused by our parser — the same read-tolerant /
+  // write-strict split as `web3://` (r3742105028).
   if (!/^[A-Za-z0-9]+$/.test(cid)) {
     throw new UnsupportedUriError(uri, 'invalid CID')
   }

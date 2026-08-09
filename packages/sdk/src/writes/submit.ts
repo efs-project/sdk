@@ -787,6 +787,47 @@ async function assertAncestorTagTargets(plan: FileWriteGraph, ctx: SubmitContext
   }
 }
 
+/** PURE structural preflight of a plan's symbolic wiring (r3742105026): every
+ * symbolic reference must name a ref minted in a STRICTLY EARLIER layer, and
+ * ref ids must be unique. `buildLayerRequests` enforces this per layer while
+ * submitting, which is far too late — a plan whose LATER layer is malformed
+ * broadcast (and paid for) its earlier layers first, and the resulting generic
+ * error carried none of the structured partial-write recovery state. Run over
+ * the whole plan before layer 1 so a malformed plan costs nothing. */
+function assertPlanRefsResolvable(plan: FileWriteGraph): void {
+  const layerOf = new Map<string, number>()
+  for (const att of plan.attestations) {
+    if (layerOf.has(att.ref)) {
+      throw new EfsError(
+        `EFS write: the plan defines ref '${att.ref}' more than once — ref ids must be unique (the submitter resolves symbols by name).`,
+        { code: 'InvalidArgument' },
+      )
+    }
+    layerOf.set(att.ref, att.layer)
+  }
+  const check = (r: unknown, att: PlannedAttestation, what: string): void => {
+    if (!isSymbolicRef(r as RefOrUID)) return
+    const name = (r as { ref: string }).ref
+    const at = layerOf.get(name)
+    if (at === undefined) {
+      throw new EfsError(
+        `EFS write: '${att.ref}' references '${name}' as its ${what}, but no attestation in the plan mints it — the plan is malformed.`,
+        { code: 'InvalidArgument' },
+      )
+    }
+    if (at >= att.layer) {
+      throw new EfsError(
+        `EFS write: '${att.ref}' (layer ${att.layer}) references '${name}' as its ${what}, which mints in layer ${at} — a symbolic reference must resolve in a STRICTLY earlier layer (this is a ${at === att.layer ? 'intra-layer' : 'forward'} reference).`,
+        { code: 'InvalidArgument' },
+      )
+    }
+  }
+  for (const att of plan.attestations) {
+    check(att.refUID, att, 'refUID')
+    for (const d of att.dataRefs ?? []) check(d.ref, att, 'data reference')
+  }
+}
+
 // One PIN encoder, reused to re-encode `definition` once it's resolved. The PIN
 // schema is `bytes32 definition` (EFS_SCHEMA_FIELDS.pin).
 const pinEncoder = new SchemaEncoder(EFS_SCHEMA_FIELDS.pin)
@@ -1028,6 +1069,8 @@ export async function submitLayeredTier1(
   await assertSymlinkTargetReadable(plan, ctx)
   await assertMirrorTransportsValid(plan, ctx)
   await assertAncestorTagTargets(plan, ctx)
+  // Pure structural check — costs nothing, so it runs for EVERY plan.
+  assertPlanRefsResolvable(plan)
   const resolved = new Map<string, Hex>()
   const layerTxHashes: Hex[] = []
   const layers: LayerResult[] = []

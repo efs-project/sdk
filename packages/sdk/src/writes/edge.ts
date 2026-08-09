@@ -45,7 +45,12 @@ import type { EfsSchemaUIDs } from '../chain/deployments.js'
 import { SchemaEncoder } from '../eas/schema-encoder.js'
 import { EFS_SCHEMA_FIELDS } from '../eas/schemas.js'
 import { EfsError, InvalidListConfig } from '../errors.js'
-import { TRANSPORT, UnsupportedUriError, resolveTransport } from '../mirror/transport.js'
+import {
+  TRANSPORT,
+  UnsupportedUriError,
+  cidStructureError,
+  resolveTransport,
+} from '../mirror/transport.js'
 import { Web3ReadError, parseWeb3Uri } from '../mirror/web3.js'
 import type { CanonicalName } from '../names/segment.js'
 import type { ListTargetType } from '../types.js'
@@ -682,6 +687,23 @@ export function validateMirrorUri(uri: string, verb: string): void {
       // reader that sets `allowInsecureHttp`, so preflight validates its
       // STRUCTURE without imposing the read-time policy choice on the write.
       resolveTransport(uri, scheme === 'http' ? { allowInsecureHttp: true } : {})
+      // `resolveTransport` accepts any alphanumeric CID (reads stay gateway-
+      // tolerant), so the WRITE path decodes it properly (r3742105028): an
+      // `ipfs://x` mirror mints fine and then no gateway can ever resolve it,
+      // leaving the content unreadable when it is the only mirror.
+      if (scheme === 'ipfs') {
+        let rest = uri.slice('ipfs://'.length)
+        if (rest.startsWith('ipfs/')) rest = rest.slice('ipfs/'.length)
+        const slash = rest.indexOf('/')
+        const cid = slash === -1 ? rest : rest.slice(0, slash)
+        const cidError = cidStructureError(cid)
+        if (cidError !== undefined) {
+          throw new EfsError(
+            `${verb}: the mirror URI '${uri}' does not carry a valid IPFS CID (${cidError}). MirrorResolver would accept it, but no gateway could resolve it.`,
+            { code: 'InvalidArgument' },
+          )
+        }
+      }
       // `resolveTransport`'s web3 branch defers ADDRESS parsing to the reader
       // (resolution needs a chain client), so it accepts `web3://0x1234` —
       // which then fails every read at `parseWeb3Uri` (r3741771347). Run that

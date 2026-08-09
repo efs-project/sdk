@@ -53,7 +53,12 @@ const ACCOUNT: Address = '0x00000000000000000000000000000000000acc01'
 
 const baseInput = {
   path: '/docs/readme.md',
-  mirrors: [{ uri: 'ipfs://QmExample', transportDefinition: TRANSPORT }] as const,
+  mirrors: [
+    {
+      uri: 'ipfs://QmZ1NBGCY8gyX929hs2JWv1QTUjV4wLK4eS77ddhBVoy3d',
+      transportDefinition: TRANSPORT,
+    },
+  ] as const,
   contentType: 'text/markdown',
   contentHash: CONTENT_HASH,
   size: 3n,
@@ -644,6 +649,53 @@ describe('submitWriteTier1 — hardlink plan', () => {
     expect((err as { code?: string }).code).toBe('WrongChain')
     expect(gateReads).toBe(0) // no validation read against the drifted provider
     expect(sent).toHaveLength(0)
+  })
+
+  it('REFUSES a plan with a FORWARD/intra-layer symbolic ref before layer 1 (r3742105026)', async () => {
+    // A malformed LATER layer used to broadcast (and pay for) the earlier ones
+    // before buildLayerRequests threw — and the generic error carried none of
+    // the partial-write recovery state.
+    const base = buildFileWriteGraph(bytesInput)
+    const forward = {
+      ...base,
+      attestations: [
+        ...base.attestations,
+        {
+          ref: 'bogus',
+          layer: 1, // same layer as DATA — an intra-layer reference
+          kind: 'PIN' as const,
+          schema: SCHEMAS.pin,
+          data: '0x' as Hex,
+          revocable: true,
+          refUID: { ref: 'DATA' },
+          dataRefs: [],
+        },
+      ],
+    } as typeof base
+    const { ctx, sent } = makeMockChain()
+    const err = await submitWriteTier1(forward, ctx).catch((e) => e)
+    expect((err as { code?: string }).code).toBe('InvalidArgument')
+    expect(String((err as Error).message)).toMatch(/STRICTLY earlier layer/)
+    expect(sent).toHaveLength(0) // nothing paid for
+  })
+
+  it('REFUSES a plan with a MISSING symbolic ref, and duplicate ref ids', async () => {
+    const base = buildFileWriteGraph(bytesInput)
+    const { ctx } = makeMockChain()
+    const missing = {
+      ...base,
+      attestations: base.attestations.map((a) =>
+        a.ref === 'placementPin' ? { ...a, refUID: { ref: 'nope' } } : a,
+      ),
+    } as typeof base
+    await expect(submitWriteTier1(missing, ctx)).rejects.toThrowError(
+      /no attestation in the plan mints it/,
+    )
+    const dup = {
+      ...base,
+      attestations: [...base.attestations, base.attestations[0] as never],
+    } as typeof base
+    await expect(submitWriteTier1(dup, ctx)).rejects.toThrowError(/more than once/)
   })
 
   it('REFUSES a non-ANCHOR ancestor tag target BEFORE layer 1 (r3742072004)', async () => {

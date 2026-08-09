@@ -79,7 +79,12 @@ describe('buildMirrorPlan', () => {
   const DATA = uid(0x900)
 
   it('emits one MIRROR (refUID = DATA, data = (transport, uri)) — single-layer', () => {
-    const plan = buildMirrorPlan(SCHEMAS, DATA, IPFS_TRANSPORT, 'ipfs://Qm123')
+    const plan = buildMirrorPlan(
+      SCHEMAS,
+      DATA,
+      IPFS_TRANSPORT,
+      'ipfs://QmZ1NBGCY8gyX929hs2JWv1QTUjV4wLK4eS77ddhBVoy3d',
+    )
     expect(plan.attestations).toHaveLength(1)
     const m = plan.attestations[0]
     expect(m?.kind).toBe('MIRROR')
@@ -90,7 +95,12 @@ describe('buildMirrorPlan', () => {
     expect(m?.refUID).toBe(DATA) // DATA rides in refUID (concrete)
     expect(m?.dataRefs).toEqual([]) // no fresh siblings
     // data = (transportDefinition, uri) — the exact encoder shape graph.ts emits
-    expect(m?.data).toBe(mirrorEnc.encodeData([IPFS_TRANSPORT, 'ipfs://Qm123']))
+    expect(m?.data).toBe(
+      mirrorEnc.encodeData([
+        IPFS_TRANSPORT,
+        'ipfs://QmZ1NBGCY8gyX929hs2JWv1QTUjV4wLK4eS77ddhBVoy3d',
+      ]),
+    )
   })
 })
 
@@ -248,7 +258,7 @@ describe('resolveMirrorTransport', () => {
         throw new Error('should not read when the map has the scheme')
       }) as never,
       deployment,
-      'ipfs://Qm123',
+      'ipfs://QmZ1NBGCY8gyX929hs2JWv1QTUjV4wLK4eS77ddhBVoy3d',
       undefined,
     )
     expect(out).toBe(IPFS_TRANSPORT)
@@ -329,9 +339,14 @@ describe('buildMirrorPlan URI preflight (review r3741848624)', () => {
   })
 
   it('ACCEPTS a well-formed locator and a custom scheme (ADR-0056 escape hatch)', () => {
-    expect(buildMirrorPlan(SCHEMAS, DATA, IPFS_TRANSPORT, 'ipfs://QmX').attestations).toHaveLength(
-      1,
-    )
+    expect(
+      buildMirrorPlan(
+        SCHEMAS,
+        DATA,
+        IPFS_TRANSPORT,
+        'ipfs://QmZ1NBGCY8gyX929hs2JWv1QTUjV4wLK4eS77ddhBVoy3d',
+      ).attestations,
+    ).toHaveLength(1)
     expect(
       buildMirrorPlan(SCHEMAS, DATA, IPFS_TRANSPORT, 'ftps://legacy.example/f').attestations,
     ).toHaveLength(1)
@@ -352,14 +367,19 @@ describe('makeMirrorsNs', () => {
       attester: () => ATTESTER,
       revoke: async () => uid(0xfee),
     })
-    const receipt = await mirrors.add(DATA, { uri: 'ipfs://Qm999', transport: uid(0xe5b1) })
+    const receipt = await mirrors.add(DATA, {
+      uri: 'ipfs://QmZ1NBGCY8gyX929hs2JWv1QTUjV4wLK4eS77ddhBVoy3d',
+      transport: uid(0xe5b1),
+    })
     expect(receipt.signatureCount).toBe(1) // single layer → one popup
     expect(receipt.steps).toHaveLength(1)
     expect(calls).toHaveLength(1)
     const entry = calls[0]?.[0]?.data[0]
     expect(entry?.refUID).toBe(DATA)
     expect(entry?.revocable).toBe(true)
-    expect(entry?.data).toBe(mirrorEnc.encodeData([uid(0xe5b1), 'ipfs://Qm999']))
+    expect(entry?.data).toBe(
+      mirrorEnc.encodeData([uid(0xe5b1), 'ipfs://QmZ1NBGCY8gyX929hs2JWv1QTUjV4wLK4eS77ddhBVoy3d']),
+    )
   })
 
   it('REFUSES an explicit transport outside /transports/ before broadcasting (r3741818438)', async () => {
@@ -390,7 +410,12 @@ describe('makeMirrorsNs', () => {
       attester: () => ATTESTER,
       revoke: async () => uid(0),
     })
-    const err = await mirrors.add(DATA, { uri: 'ipfs://QmX', transport: orphan }).catch((e) => e)
+    const err = await mirrors
+      .add(DATA, {
+        uri: 'ipfs://QmZ1NBGCY8gyX929hs2JWv1QTUjV4wLK4eS77ddhBVoy3d',
+        transport: orphan,
+      })
+      .catch((e) => e)
     expect((err as { code?: string }).code).toBe('InvalidArgument')
     expect(String((err as Error).message)).toMatch(/not a descendant of \/transports\//)
     expect(calls).toHaveLength(0)
@@ -407,9 +432,14 @@ describe('makeMirrorsNs', () => {
       attester: () => ATTESTER,
       revoke: async () => uid(0xfee),
     })
-    await mirrors.add(DATA, { uri: 'ipfs://QmAAA' })
+    await mirrors.add(DATA, { uri: 'ipfs://QmZ1NBGCY8gyX929hs2JWv1QTUjV4wLK4eS77ddhBVoy3d' })
     const entry = calls[0]?.[0]?.data[0]
-    expect(entry?.data).toBe(mirrorEnc.encodeData([IPFS_TRANSPORT, 'ipfs://QmAAA']))
+    expect(entry?.data).toBe(
+      mirrorEnc.encodeData([
+        IPFS_TRANSPORT,
+        'ipfs://QmZ1NBGCY8gyX929hs2JWv1QTUjV4wLK4eS77ddhBVoy3d',
+      ]),
+    )
   })
 
   it('add throws MissingTransport when the scheme cannot be resolved (no chain revert)', async () => {
@@ -556,7 +586,7 @@ describe('makeMirrorsNs', () => {
               {
                 uid: uid(0xa10),
                 transportDefinition: IPFS_TRANSPORT,
-                uri: 'ipfs://QmAAA',
+                uri: 'ipfs://QmZ1NBGCY8gyX929hs2JWv1QTUjV4wLK4eS77ddhBVoy3d',
                 attester: ATTESTER,
                 timestamp: 1n,
               },
@@ -575,7 +605,7 @@ describe('makeMirrorsNs', () => {
       {
         uid: uid(0xa10),
         transportDefinition: IPFS_TRANSPORT,
-        uri: 'ipfs://QmAAA',
+        uri: 'ipfs://QmZ1NBGCY8gyX929hs2JWv1QTUjV4wLK4eS77ddhBVoy3d',
         attester: ATTESTER,
       },
     ])
