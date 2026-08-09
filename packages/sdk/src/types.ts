@@ -404,10 +404,13 @@ export type WriteOptions = {
   /**
    * Retrieval URIs where the bytes live (one MIRROR per entry). When supplied,
    * the SDK does NOT store the content (on-chain or inline) — it publishes these
-   * as the file's mirrors. The URI scheme of the FIRST entry selects the transport
-   * definition (the on-chain `/transports/<scheme>` anchor) unless
-   * `transportDefinition` is given. Omit to fall back to on-chain SSTORE2 storage
-   * (the zero-infra default, size-capped — see `storage`).
+   * as the file's mirrors. EACH entry selects its own transport definition from
+   * its OWN URI scheme (the on-chain `/transports/<scheme>` anchor), so a
+   * mixed-scheme durability set (`ipfs://…` + `ar://…`) labels every MIRROR
+   * correctly — but the deployment must record an anchor for EVERY scheme used,
+   * or that entry throws `MissingTransport`. An explicit `transportDefinition`
+   * overrides the lookup for ALL entries. Omit to fall back to on-chain SSTORE2
+   * storage (the zero-infra default, size-capped — see `storage`).
    */
   mirrors?: readonly string[]
   /**
