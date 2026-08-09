@@ -626,6 +626,15 @@ describe('byte-plan builder preflight (reviews r3741586928 / r3741586938)', () =
     expect(g.attestations.some((a) => a.kind === 'MIRROR')).toBe(true)
   })
 
+  it('REJECTS a malformed ancestor tag target at build time (r3742072004)', () => {
+    expect(() =>
+      buildFileWriteGraph({ ...good, existingAncestorTagUIDs: ['0x01' as never] }),
+    ).toThrowError(/existingAncestorTagUIDs contains/)
+    expect(() => buildFileWriteGraph({ ...good, existingAncestorTagUIDs: [uid(0)] })).toThrowError(
+      /existingAncestorTagUIDs contains/,
+    )
+  })
+
   it('REJECTS a malformed transportDefinition (shape) at build time', () => {
     expect(() =>
       buildFileWriteGraph({

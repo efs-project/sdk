@@ -347,6 +347,12 @@ export interface FileWriteGraph {
    * layered boundary re-runs the direct-DATA readability proof (the author
    * must hold an active mirror on a DATA target — r3741562776). */
   readonly symlinkTargetUID?: Hex
+  /** The CONCRETE pre-existing ancestor folder anchors the plan's visibility
+   * TAGs target, stamped so the boundary can verify each IS an ANCHOR before
+   * layer 1 broadcasts — those TAGs sit in the LAST layer, so a bad UID reverts
+   * only after the DATA, anchor, metadata and placement have mined
+   * (r3742072004). */
+  readonly ancestorTagUIDs?: readonly Hex[]
   /** The DISTINCT `/transports/<scheme>` anchor UIDs the plan's MIRRORs
    * reference, stamped so the boundary can verify each IS an ANCHOR under
    * `/transports/` before layer 1 broadcasts — MirrorResolver only rejects at
@@ -469,6 +475,16 @@ export function buildFileWriteGraph(input: FileWriteGraphInput): FileWriteGraph 
   // *content* graph (DATA/MIRROR/PROPERTY/key-anchors) collapsing away — the
   // anchor that names the new path is inherent to placing it anywhere. Any created
   // ancestor folders still precede the anchor, in their own earliest layers.
+  // Shape-check the concrete ancestor tag targets for BOTH content kinds
+  // (r3742072004) — the hardlink branch returns before the byte-path checks.
+  for (const t of input.existingAncestorTagUIDs ?? []) {
+    if (!/^0x[0-9a-fA-F]{64}$/.test(t) || t === ZERO_UID) {
+      throw new EfsError(
+        `EFS write plan: existingAncestorTagUIDs contains "${String(t)}", which is not a nonzero bytes32 anchor UID — its visibility TAG sits in the LAST layer, so a bad target reverts only after everything else has mined.`,
+        { code: 'InvalidArgument' },
+      )
+    }
+  }
   if (isHardlinkInput(input)) {
     // JS callers are not bound by the input union — REJECT stray metadata
     // loudly instead of discarding it (r3741086780): silently dropping
@@ -535,6 +551,9 @@ export function buildFileWriteGraph(input: FileWriteGraphInput): FileWriteGraph 
       mirrorSchemaUID: schemas.mirror,
       anchorSchemaUID: schemas.anchor,
       hardlinkDataUID: input.content.dataUID,
+      ...(input.existingAncestorTagUIDs !== undefined && input.existingAncestorTagUIDs.length > 0
+        ? { ancestorTagUIDs: input.existingAncestorTagUIDs }
+        : {}),
       ...(existingFileAnchorUID !== undefined
         ? {
             existingAnchorUID: existingFileAnchorUID,
@@ -760,6 +779,9 @@ export function buildFileWriteGraph(input: FileWriteGraphInput): FileWriteGraph 
     mirrorSchemaUID: schemas.mirror,
     anchorSchemaUID: schemas.anchor,
     mirrorTransportUIDs: [...new Set(input.mirrors.map((m) => m.transportDefinition))],
+    ...(input.existingAncestorTagUIDs !== undefined && input.existingAncestorTagUIDs.length > 0
+      ? { ancestorTagUIDs: input.existingAncestorTagUIDs }
+      : {}),
     ...(existingFileAnchorUID !== undefined
       ? {
           existingAnchorUID: existingFileAnchorUID,

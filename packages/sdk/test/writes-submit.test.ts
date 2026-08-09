@@ -646,6 +646,32 @@ describe('submitWriteTier1 — hardlink plan', () => {
     expect(sent).toHaveLength(0)
   })
 
+  it('REFUSES a non-ANCHOR ancestor tag target BEFORE layer 1 (r3742072004)', async () => {
+    // Visibility TAGs for pre-existing ancestors sit in the LAST layer — a bad
+    // target reverts only after the file has already been written and paid for.
+    const ancestor = uid(0xa17)
+    const plan = buildFileWriteGraph({ ...bytesInput, existingAncestorTagUIDs: [ancestor] })
+    const { ctx, sent } = makeMockChain()
+    const bad = {
+      ...ctx,
+      publicClient: {
+        ...ctx.publicClient,
+        async readContract(a: { functionName: string; args?: readonly unknown[] }) {
+          if (a.functionName === 'getAttestation' && (a.args as [Hex])[0] === ancestor) {
+            return { schema: SCHEMAS.data } // a DATA, not a folder ANCHOR
+          }
+          return (
+            ctx.publicClient as unknown as { readContract: (x: unknown) => Promise<unknown> }
+          ).readContract(a)
+        },
+      },
+    } as SubmitContext
+    const err = await submitWriteTier1(plan, bad).catch((e) => e)
+    expect((err as { code?: string }).code).toBe('InvalidArgument')
+    expect(String((err as Error).message)).toMatch(/ancestor tag target .* is not an ANCHOR/)
+    expect(sent).toHaveLength(0)
+  })
+
   it('REFUSES a non-ANCHOR mirror transportDefinition BEFORE layer 1 (r3741671356)', async () => {
     // MirrorResolver only rejects at the layer-2 MIRROR — by then DATA +
     // file-ANCHOR have mined (a paid partial graph).

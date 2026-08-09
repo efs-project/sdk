@@ -748,6 +748,45 @@ export function assertAttesterIsSigner(ctx: SubmitContext, attester: Address): v
   }
 }
 
+/** The visibility TAGs for PRE-EXISTING ancestor folders target concrete UIDs
+ * supplied by the caller, and they sit in the LAST layer — so a UID that is not
+ * an ANCHOR reverts only after the DATA, file anchor, metadata and placement
+ * have mined: a paid, half-applied write (r3742072004). Verify each is an
+ * ANCHOR attestation before layer 1. Folder anchors live in the GENERIC bucket,
+ * so only the schema is checked (no `forSchema` constraint). Fails CLOSED when
+ * the context cannot read. */
+async function assertAncestorTagTargets(plan: FileWriteGraph, ctx: SubmitContext): Promise<void> {
+  const targets = plan.ancestorTagUIDs
+  if (targets === undefined || targets.length === 0) return
+  const expected = plan.anchorSchemaUID
+  if (expected === undefined) {
+    throw new EfsError(
+      'EFS write: this plan tags pre-existing ancestors but carries no anchorSchemaUID stamp — rebuild it with buildFileWriteGraph.',
+      { code: 'InvalidArgument' },
+    )
+  }
+  if (ctx.publicClient.readContract === undefined) {
+    throw new EfsError(
+      'EFS write: verifying ancestor tag targets needs a publicClient with readContract — a non-ANCHOR target reverts only AFTER the rest of the write has mined.',
+      { code: 'InvalidArgument' },
+    )
+  }
+  for (const target of new Set(targets)) {
+    const att = (await ctx.publicClient.readContract({
+      address: ctx.easAddress,
+      abi: getAttestationAbi,
+      functionName: 'getAttestation',
+      args: [target],
+    })) as { schema?: Hex } | undefined
+    if (att?.schema === undefined || att.schema.toLowerCase() !== expected.toLowerCase()) {
+      throw new EfsError(
+        `EFS write: the ancestor tag target ${target} is not an ANCHOR attestation (schema ${att?.schema ?? 'unknown'}) — its visibility TAG would revert in the LAST layer, after the file had already been written.`,
+        { code: 'InvalidArgument' },
+      )
+    }
+  }
+}
+
 // One PIN encoder, reused to re-encode `definition` once it's resolved. The PIN
 // schema is `bytes32 definition` (EFS_SCHEMA_FIELDS.pin).
 const pinEncoder = new SchemaEncoder(EFS_SCHEMA_FIELDS.pin)
@@ -979,7 +1018,8 @@ export async function submitLayeredTier1(
     plan.hardlink ||
     plan.existingAnchorUID !== undefined ||
     plan.symlinkTargetUID !== undefined ||
-    (plan.mirrorTransportUIDs?.length ?? 0) > 0
+    (plan.mirrorTransportUIDs?.length ?? 0) > 0 ||
+    (plan.ancestorTagUIDs?.length ?? 0) > 0
   ) {
     await ctx.assertChain?.()
   }
@@ -987,6 +1027,7 @@ export async function submitLayeredTier1(
   await assertConcreteAnchorIsAnchor(plan, ctx)
   await assertSymlinkTargetReadable(plan, ctx)
   await assertMirrorTransportsValid(plan, ctx)
+  await assertAncestorTagTargets(plan, ctx)
   const resolved = new Map<string, Hex>()
   const layerTxHashes: Hex[] = []
   const layers: LayerResult[] = []
