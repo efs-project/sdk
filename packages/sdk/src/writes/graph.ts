@@ -82,7 +82,7 @@ import { SchemaEncoder } from '../eas/schema-encoder.js'
 import { EFS_SCHEMA_FIELDS } from '../eas/schemas.js'
 import { EfsError } from '../errors.js'
 import { type CanonicalName, isCanonicalName } from '../names/segment.js'
-import { validateMirrorUri } from './edge.js'
+import { assertReservedPropertyValue, validateMirrorUri } from './edge.js'
 
 /** The zero address — `recipient` is 0x0 for every EFS write attestation. */
 export const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000' as const
@@ -1005,5 +1005,15 @@ function reservedEntries(
   }
   out.push({ key: 'contentHash', value: input.contentHash })
   out.push({ key: 'size', value: input.size.toString() })
+  // `buildFileWriteGraph` is EXPORTED, so this is a public door onto the same
+  // authoritative metadata as fs.write and props.set — and it encodes straight
+  // into the reserved PROPERTY, producing a plan the submitter mines happily
+  // (r3742846058). The two guards added earlier sat on the OTHER two doors.
+  // Checked here rather than at each push so nothing new slips in untested:
+  // `contentHash` is only BRAND-typed (no runtime guarantee), and `size` is a
+  // bigint whose `.toString()` is canonical for every value except a negative.
+  for (const { key, value } of out) {
+    assertReservedPropertyValue(key, value, 'EFS write')
+  }
   return out
 }

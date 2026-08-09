@@ -728,6 +728,32 @@ describe('byte-plan builder preflight (reviews r3741586928 / r3741586938)', () =
     }
   })
 
+  it('REJECTS malformed reserved metadata at the EXPORTED builder (r3742846058)', () => {
+    // The third public door onto the same authoritative metadata: this encodes
+    // straight into the reserved PROPERTY and yields a plan the submitter mines
+    // happily. fs.write's preflight and props.set's builder guard the other two.
+    expect(() => buildFileWriteGraph({ ...good, contentType: 'not-a-media-type' })).toThrowError(
+      /not an IANA media type/,
+    )
+    expect(() => buildFileWriteGraph({ ...good, contentType: 'text/*' })).toThrowError(
+      /not an IANA media type/,
+    )
+    // contentHash and size were ALREADY guarded here, and more strongly than a
+    // canonical-form check: both are verified against the supplied bytes. Pinned
+    // so the shared reserved-key assertion cannot silently weaken them.
+    expect(() =>
+      buildFileWriteGraph({ ...good, contentHash: 'garbage' as typeof good.contentHash }),
+    ).toThrowError(/does not match the supplied bytes/)
+    expect(() => buildFileWriteGraph({ ...good, size: -1n })).toThrowError(
+      /does not match the supplied bytes/,
+    )
+    // The well-formed inputs still build.
+    expect(
+      buildFileWriteGraph({ ...good, contentType: 'text/plain; charset=utf-8' }).attestations
+        .length,
+    ).toBeGreaterThan(0)
+  })
+
   it('REJECTS a malformed ancestor tag target at build time (r3742072004)', () => {
     expect(() =>
       buildFileWriteGraph({ ...good, existingAncestorTagUIDs: ['0x01' as never] }),

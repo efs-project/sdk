@@ -203,33 +203,7 @@ export function buildPropertyPlan(
   // check belongs on the shared builder, where every caller (including direct ones)
   // goes through it (r3742696130). `contentType` is plain ASCII, so its canonical
   // encoding is itself.
-  if (key === 'contentType') assertContentType(value, 'EFS property write')
-  // The other authoritative reserved key (r3742750216). A malformed hash claim
-  // is WORSE than a malformed contentType: readText/readBytes/readJson report
-  // `malformed-claim` and THROW even when the mirror bytes are perfectly good,
-  // so one bad props.set makes a healthy file unreadable by default. File
-  // writes already persist only canonical `ContentHash`; this routes props.set
-  // through the same boundary.
-  // The third authoritative reserved key (r3742824666). A malformed `size` does
-  // NOT degrade gracefully as it first appears: every reader's `parseSize`
-  // returns `undefined`, and in `reads/overview.ts` that `undefined` SKIPS the
-  // documented pre-fetch `too-large` short-circuit entirely — so instead of
-  // returning `{kind:'too-large'}` without touching the network, the overview
-  // fetches until it hits the fixed render cap. `fs.info()` simply omits the
-  // size. Canonical form only: what `size.toString()` emits, no leading zeros,
-  // no sign, no separators.
-  if (key === 'size' && !/^(0|[1-9][0-9]*)$/.test(value)) {
-    throw new EfsError(
-      `EFS property write: \`size\` ${JSON.stringify(value)} is not a canonical byte count (expected a non-negative decimal integer with no leading zeros, e.g. '4096'). Readers parse this claim strictly and treat anything else as ABSENT, which silently disables fs.overview()'s pre-fetch too-large guard.`,
-      { code: 'InvalidArgument' },
-    )
-  }
-  if (key === 'contentHash' && asContentHash(value) === undefined) {
-    throw new EfsError(
-      `EFS property write: \`contentHash\` ${JSON.stringify(value)} is not a canonical content hash (expected the multibase-multihash form, e.g. \`f1220\` + 64 lowercase hex for sha2-256 — ADR-0016/specs 10 §2.3). This value is the AUTHORITATIVE claim readers verify against, so a malformed one makes every default read throw \`malformed-claim\` even when the bytes are intact. Use \`hashContent(bytes)\`, or \`decodeContentHash(s).canonical\` for an accepted-on-read form.`,
-      { code: 'InvalidArgument' },
-    )
-  }
+  assertReservedPropertyValue(key, value, 'EFS property write')
 
   // PROPERTY — the interned value (refUID 0, non-revocable). Always minted fresh (new
   // content), whether the key-anchor is reused or not.
@@ -742,6 +716,52 @@ export const MAX_CONTENT_TYPE_BYTES = 255
  *
  * @param verb A label for the error message (e.g. `'EFS write'`, `'efs.props.set'`).
  */
+/**
+ * The ONE definition of what a RESERVED property value may be, for every door
+ * that can mint one (r3742846058).
+ *
+ * The reserved keys carry authoritative metadata that readers trust without
+ * re-deriving, and each one reaches the chain through several public entry
+ * points: `fs.write`'s options, `efs.props.set`, `buildPropertyPlan`, and the
+ * exported `buildFileWriteGraph`. Every previous attempt to guard them patched
+ * one door and left the next open — three review rounds, one key at a time — so
+ * the rule lives here and each entry point calls it rather than restating it.
+ *
+ * Non-reserved keys are deliberately untouched: this is a reserved-key
+ * contract, not a value policy for every property.
+ *
+ * @param verb A label for the error message (e.g. `'EFS write'`).
+ */
+export function assertReservedPropertyValue(key: string, value: string, verb: string): void {
+  if (key === 'contentType') {
+    assertContentType(value, verb)
+    return
+  }
+  // A malformed hash claim is the worst of the three: readText/readBytes/
+  // readJson report `malformed-claim` and THROW even when the mirror bytes are
+  // perfectly good, so one bad write makes a healthy file unreadable by
+  // default (r3742750216). `ContentHash` is a BRANDED type, which is a
+  // compile-time guarantee only — a JS caller or a cast reaches here freely.
+  if (key === 'contentHash' && asContentHash(value) === undefined) {
+    throw new EfsError(
+      `${verb}: \`contentHash\` ${JSON.stringify(value)} is not a canonical content hash (expected the multibase-multihash form, e.g. \`f1220\` + 64 lowercase hex for sha2-256 — ADR-0016/specs 10 §2.3). This value is the AUTHORITATIVE claim readers verify against, so a malformed one makes every default read throw \`malformed-claim\` even when the bytes are intact. Use \`hashContent(bytes)\`, or \`decodeContentHash(s).canonical\` for an accepted-on-read form.`,
+      { code: 'InvalidArgument' },
+    )
+  }
+  // A malformed `size` does NOT degrade gracefully as it first appears: every
+  // reader's `parseSize` returns `undefined`, and in `reads/overview.ts` that
+  // `undefined` SKIPS the documented pre-fetch `too-large` short-circuit — so
+  // the overview fetches until it hits the render cap instead of returning
+  // `{kind:'too-large'}` without touching the network (r3742824666). Canonical
+  // form only: what `size.toString()` emits — which a NEGATIVE bigint does not.
+  if (key === 'size' && !/^(0|[1-9][0-9]*)$/.test(value)) {
+    throw new EfsError(
+      `${verb}: \`size\` ${JSON.stringify(value)} is not a canonical byte count (expected a non-negative decimal integer with no leading zeros, e.g. '4096'). Readers parse this claim strictly and treat anything else as ABSENT, which silently disables fs.overview()'s pre-fetch too-large guard.`,
+      { code: 'InvalidArgument' },
+    )
+  }
+}
+
 export function assertContentType(contentType: string | undefined, verb: string): void {
   if (contentType === undefined) return
   const byteLength = new TextEncoder().encode(contentType).length
