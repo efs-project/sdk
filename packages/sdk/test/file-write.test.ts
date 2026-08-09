@@ -48,6 +48,11 @@ const TRANSPORT_ONCHAIN = uid(0x2c) // /transports/onchain anchor UID (web3:// s
 /** The `/transports` root — the boundary gate walks each transportDefinition's
  * parent chain up to it (MirrorResolver's InvalidTransport predicate). */
 const TRANSPORTS_ROOT = uid(0x2b)
+/** `/tags` and `/tags/system` — seeded by the deploy exactly like `/transports`,
+ * and resolved BY PATH at the submit boundary so the Overview TAG cannot mine
+ * under some other tag definition (r3742782644). */
+const TAGS_ROOT = uid(0x7a6)
+const SYSTEM_TAG_DEF = uid(0x5751)
 /** Deterministic addresses the mocked deploys return (chunk, then manager). */
 const CHUNK_ADDR = addr(0x5c01)
 const MANAGER_ADDR = addr(0x11a0)
@@ -172,6 +177,10 @@ function makeCtx(
         // The transports subtree is always present (the deployments the SDK
         // targets bootstrap it) — the transport gate resolves it by path.
         if (parent === ROOT && name === 'transports') return transportsRoot
+        // Same bootstrap story for the tag subtree: the deploy seeds
+        // /tags/system, and the Overview gate resolves it by path.
+        if (parent === ROOT && name === 'tags') return TAGS_ROOT
+        if (parent === TAGS_ROOT && name === 'system') return SYSTEM_TAG_DEF
         return edges[`${parent}|${name}`] ?? ZERO_UID
       }
       if (args.functionName === 'resolveAnchor') {
@@ -1036,7 +1045,7 @@ describe('writeFileTier1 — overwrite (reuse the existing file anchor, Bug-1)',
     // re-mint the file-ANCHOR (which would revert DuplicateFileName); the cardinality-1
     // placement PIN supersedes. setOverview routes through writeFileTier1 with the
     // `overviewSystemTagDef` marker set on the context — simulate that here.
-    const SYSTEM_DEF = uid(0x5751)
+    const SYSTEM_DEF = SYSTEM_TAG_DEF // the deployment's real /tags/system anchor
     const README_ANCHOR = uid(0x222)
     const { ctx, sent } = makeCtx({
       anchors: { [`${DOCS_ANCHOR}|README.md|${SCHEMAS.data}`]: README_ANCHOR },

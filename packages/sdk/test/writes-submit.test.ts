@@ -754,6 +754,21 @@ describe('submitWriteTier1 — hardlink plan', () => {
     expect(sent).toHaveLength(0) // nothing broadcast
   })
 
+  it('REFUSES an Overview TAG definition that is a VALID anchor but not /tags/system (r3742782644)', async () => {
+    // The dangerous case is not a malformed UID — it is a perfectly good tag
+    // definition like /tags/nsfw. The TAG mines happily under it, but directory
+    // reads resolve the `system` exclusion to the canonical /tags/system anchor,
+    // so the README stays visible in filtered listings: the Overview contract
+    // quietly unfulfilled rather than loudly broken. "Some ANCHOR" is too weak.
+    const otherTagDef = TRANSPORT // a real ANCHOR in this harness, but not /tags/system
+    const plan = buildFileWriteGraph({ ...bytesInput, overviewSystemTagDef: otherTagDef })
+    const { ctx, sent } = makeMockChain()
+    const err = await submitWriteTier1(plan, ctx).catch((e) => e)
+    expect((err as { code?: string }).code).toBe('InvalidArgument')
+    expect(String((err as Error).message)).toMatch(/is not this deployment's \/tags\/system anchor/)
+    expect(sent).toHaveLength(0) // nothing broadcast
+  })
+
   it('REFUSES a non-ANCHOR mirror transportDefinition BEFORE layer 1 (r3741671356)', async () => {
     // MirrorResolver only rejects at the layer-2 MIRROR — by then DATA +
     // file-ANCHOR have mined (a paid partial graph).

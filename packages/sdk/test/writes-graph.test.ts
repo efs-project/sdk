@@ -674,6 +674,11 @@ describe('byte-plan builder preflight (reviews r3741586928 / r3741586938)', () =
       // (a valid one with a spare byte spliced into the version) cleared the
       // whole preflight while strict parsers and gateways reject it.
       'ipfs://f81005512209e7fd40918c93c86e01be3043703dd882bddb5ccd5466addc1e7969a27f93da8',
+      // r3742782641 — a five-byte varint that OVERFLOWS uint32. `81 80 80 80 10`
+      // encodes 4294967297, but JS `<<` coerces to int32 and dropped the high
+      // bits, so it read back as version 1 and the whole CID parsed. Everything
+      // after the version here is a genuine raw-codec sha2-256 CID.
+      'ipfs://f81808080105512209e7fd40918c93c86e01be3043703dd882bddb5ccd5466addc1e7969a27f93da8',
       'ipfs://cafkreie6p7kasggjhsdoag7daq3qhxmifpo3ltgvizvn3qphs2ncp6j5va',
       'ipfs://CAFKREIE6P7KASGGJHSDOAG7DAQ3QHXMIFPO3LTGVIZVN3QPHS2NCP6J5VA',
       'ipfs://t05512209e7fd40918c93c86e01be3043703dd882bddb5ccd5466addc1e79',

@@ -897,6 +897,14 @@ export type Expanded<
 /** The fixed anchor name a folder Overview is stored under (case-sensitive). */
 export const OVERVIEW_NAME = 'README.md' as const
 
+/** The tag-definition path whose anchor marks a file as folder-`system` — the
+ * Overview marker TAG's `definition`, and the SAME anchor directory reads
+ * resolve the `system` exclusion to (`reads/list.ts`). Lives here rather than in
+ * `writes/overview.ts` so the submit boundary can check against it without an
+ * import cycle (r3742782644); `writes/overview.ts` re-exports it, so the public
+ * name is unchanged. */
+export const SYSTEM_TAG_PATH = '/tags/system' as const
+
 /** Opt-in directory-filter policy that hides the conventional system labels
  * (the Overview is `system`-tagged). Pass to `ListOptions.excludes`; not applied
  * by default (ADR-0011 §3). */

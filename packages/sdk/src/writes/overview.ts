@@ -36,7 +36,7 @@ const ZERO_UID = '0x000000000000000000000000000000000000000000000000000000000000
 
 /** The `/tags/system` definition path — the folder-Overview marker TAG (ADR-0011).
  * The same `/tags/<name>` convention `efs.graph.tags` and the directory filter use. */
-const SYSTEM_TAG_PATH = '/tags/system' as const
+import { SYSTEM_TAG_PATH } from '../types.js'
 
 /** Join a container path with the well-known Overview file name (`README.md`),
  * tolerant of a trailing slash and the root container. */

@@ -76,6 +76,8 @@ import { SchemaEncoder } from '../eas/schema-encoder.js'
 import { EFS_SCHEMA_FIELDS } from '../eas/schemas.js'
 import { EfsError, classifyError, isDefiniteSendRefusal } from '../errors.js'
 import { type MirrorScanClient, hasActiveMirror } from '../reads/mirror-scan.js'
+import { type ResolvePublicClient, resolvePathToAnchor } from '../reads/resolve.js'
+import { SYSTEM_TAG_PATH } from '../types.js'
 import {
   type FileWriteGraph,
   type PlannedAttestation,
@@ -797,6 +799,29 @@ async function assertOverviewTagDefinition(
   if (att?.schema === undefined || att.schema.toLowerCase() !== expected.toLowerCase()) {
     throw new EfsError(
       `EFS write: the Overview system TAG definition ${def} is not an ANCHOR attestation (schema ${att?.schema ?? 'unknown'}) — the TAG would revert after the file had already been written.`,
+      { code: 'InvalidArgument' },
+    )
+  }
+  // "Some ANCHOR" is NOT enough (r3742782644). Directory reads resolve the
+  // `system` exclusion to the CANONICAL /tags/system anchor, so a TAG minted
+  // under any other tag definition — /tags/nsfw, say — confirms happily and
+  // still leaves the README visible in safety-filtered listings: the Overview
+  // contract silently unfulfilled rather than loudly broken. Pin it to the
+  // anchor the reader will actually look for.
+  if (ctx.indexerAddress === undefined) {
+    throw new EfsError(
+      `EFS write: verifying the Overview system TAG definition needs \`indexerAddress\` to resolve ${SYSTEM_TAG_PATH} — without it a definition that is merely SOME anchor would mint a TAG the directory filter ignores.`,
+      { code: 'InvalidArgument' },
+    )
+  }
+  const canonical = await resolvePathToAnchor(
+    ctx.publicClient as unknown as ResolvePublicClient,
+    ctx.indexerAddress,
+    SYSTEM_TAG_PATH,
+  )
+  if (def.toLowerCase() !== canonical.toLowerCase()) {
+    throw new EfsError(
+      `EFS write: the Overview system TAG definition ${def} is not this deployment's ${SYSTEM_TAG_PATH} anchor (${canonical}). The TAG would mine under the wrong definition, and the directory filter — which resolves ${SYSTEM_TAG_PATH} itself — would keep listing the README as a visible sibling.`,
       { code: 'InvalidArgument' },
     )
   }

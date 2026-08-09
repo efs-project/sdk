@@ -347,7 +347,12 @@ function readVarint(b: Uint8Array, i: number): { value: number; next: number } |
   for (let n = 0; n < 5; n++) {
     const byte = b[idx]
     if (byte === undefined) return undefined
-    value |= (byte & 0x7f) << shift
+    // PLAIN ARITHMETIC, not `|=` with `<<`: JS bitwise operators coerce to
+    // INT32, so a fifth group silently truncated its high bits — `81 80 80 80
+    // 10` encodes 4294967297 but read back as version 1, and no later check
+    // could tell (r3742782641). Multiplying keeps the true value, so the
+    // range test below is meaningful.
+    value += (byte & 0x7f) * 2 ** shift
     idx += 1
     if ((byte & 0x80) === 0) {
       // MINIMALITY (r3742724225). unsigned-varint requires the shortest
@@ -356,7 +361,10 @@ function readVarint(b: Uint8Array, i: number): { value: number; next: number } |
       // form let a CID with a spare byte spliced in clear the whole preflight
       // while strict CID parsers and gateways reject the locator outright.
       if (n > 0 && byte === 0) return undefined
-      return { value: value >>> 0, next: idx }
+      // Every field this reads (version, codec, multihash code and length) is
+      // a uint32 in practice; anything larger is a CID no parser accepts.
+      if (value > 0xffffffff) return undefined
+      return { value, next: idx }
     }
     shift += 7
   }
