@@ -122,6 +122,20 @@ export class UnsupportedUriError extends Error {
 
 const SCHEME_RE = /^([a-zA-Z][a-zA-Z0-9+.-]*):/
 
+/**
+ * The lowercased RFC 3986 scheme of `uri`, or `undefined` when the string does
+ * not START with a syntactically valid one.
+ *
+ * Exported so the WRITE preflight parses schemes exactly as the reader does
+ * (r3742660066). The preflight previously carried its own copy of this pattern,
+ * and a locator the reader considers schemeless — `"https ://…"`, with a space
+ * before the colon — slipped through the copy as a "custom" transport and
+ * minted a mirror no read could ever parse.
+ */
+export function uriScheme(uri: string): string | undefined {
+  return SCHEME_RE.exec(uri)?.[1]?.toLowerCase()
+}
+
 /** Strip a trailing slash from a gateway origin so we can concatenate paths. */
 function trimGateway(g: string): string {
   return g.endsWith('/') ? g.slice(0, -1) : g
@@ -167,7 +181,7 @@ export function resolveTransport(
       `resolveTransport: \`maxBytes\` must be a finite positive number (got ${opts.maxBytes}). Omit it for the default ceiling.`,
     )
   }
-  const scheme = SCHEME_RE.exec(uri)?.[1]?.toLowerCase()
+  const scheme = uriScheme(uri)
   if (!scheme) {
     throw new UnsupportedUriError(uri, 'no URI scheme')
   }

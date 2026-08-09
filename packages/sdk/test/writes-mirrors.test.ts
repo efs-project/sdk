@@ -247,6 +247,40 @@ describe('resolveMirrorTransport', () => {
     }
   })
 
+  it('rejects a locator whose scheme is only NEARLY valid, explicit anchor or not (r3742660066)', async () => {
+    // `"https ://…"` has no surrounding whitespace, so the trim guard misses it,
+    // and the space before the colon means it parses as SCHEMELESS. With an
+    // explicit anchor the transport lookup used to return before any scheme
+    // check, so it minted as a "custom" transport and then failed to parse at
+    // read time. The anchor names the transport; it cannot supply a scheme.
+    for (const anchor of [uid(0xe5b1), undefined]) {
+      const err = await resolveMirrorTransport(
+        makeReadClient(() => uid(0)) as never,
+        deployment,
+        'https ://cdn.example/file',
+        anchor,
+      ).catch((e) => e)
+      expect((err as { code?: string }).code).toBe('MissingTransport')
+      expect(String((err as Error).message)).toMatch(/no 'scheme:' prefix/)
+    }
+  })
+
+  it('does NOT spill inline data: payloads into validation errors (r3742660068)', async () => {
+    // A data: mirror carries its content INLINE and this check runs before the
+    // length cap, so interpolating the raw URI would put up to 8 KiB of file
+    // content into an error that applications routinely ship to logs.
+    const secret = 'SUPERSECRETPAYLOAD'.repeat(50)
+    const err = await resolveMirrorTransport(
+      makeReadClient(() => uid(0)) as never,
+      deployment,
+      ` data:text/plain;base64,${secret}`, // leading space → the whitespace branch
+      uid(0xe5b1),
+    ).catch((e) => e)
+    expect((err as { code?: string }).code).toBe('InvalidArgument')
+    expect(String((err as Error).message)).not.toContain(secret)
+    expect(String((err as Error).message)).toMatch(/chars elided/)
+  })
+
   it('rejects a URI over the 8192-byte MirrorResolver limit (even with an explicit transport)', async () => {
     const huge = `ipfs://${'a'.repeat(8200)}` // > 8192 UTF-8 bytes
     const err = await resolveMirrorTransport(

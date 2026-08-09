@@ -111,7 +111,7 @@ async function transportDefinitionFor(
   // wins (handled above), mirroring `efs.mirrors.add`'s schemeless rejection.
   if (scheme === '') {
     throw new EfsError(
-      "EFS write: a mirror URI has no 'scheme:' prefix, so its transport cannot be derived. Use a scheme-qualified URI (e.g. 'ipfs://…', 'ar://…', 'web3://…'), or pass `opts.transportDefinition` (the /transports/<scheme> anchor UID).",
+      "EFS write: a mirror URI has no 'scheme:' prefix, so its transport cannot be derived. Use a scheme-qualified URI (e.g. 'ipfs://…', 'ar://…', 'web3://…'). `opts.transportDefinition` does NOT substitute for a scheme (r3742660066) — it names the transport ANCHOR, while the reader still parses the scheme off the URI itself, so a schemeless locator stays unreadable either way.",
       { code: 'MissingTransport' },
     )
   }

@@ -50,6 +50,8 @@ import {
   UnsupportedUriError,
   cidStructureError,
   resolveTransport,
+  summarizeUri,
+  uriScheme,
 } from '../mirror/transport.js'
 import { Web3ReadError, parseWeb3Uri } from '../mirror/web3.js'
 import type { CanonicalName } from '../names/segment.js'
@@ -666,9 +668,18 @@ export function validateMirrorUri(uri: string, verb: string): void {
   // time for having no scheme, leaving an only-mirror unreadable (r3742636237).
   // Rejected, not trimmed: the chain stores the string verbatim, so silently
   // rewriting the caller's URI would mint a locator they never wrote.
+  // `summarizeUri`, never the raw string: a `data:` mirror carries its payload
+  // INLINE, and this runs before the length check, so interpolating the URI
+  // would spill up to the full 8 KiB of file content into an error that
+  // applications routinely ship to logs and telemetry (r3742660068).
+  //
+  // Summarize the TRIMMED string: `summarizeUri` detects an inline payload with
+  // `/^data:/`, which the very whitespace being reported here would defeat —
+  // the URI would fall through to the generic branch and still leak the first
+  // 200 characters of the body.
   if (uri !== uri.trim()) {
     throw new EfsError(
-      `${verb}: the mirror URI has leading or trailing whitespace (${JSON.stringify(uri)}). The URI is stored on-chain VERBATIM, so the whitespace would ride along and every read would fail to parse a scheme. Pass the trimmed URI.`,
+      `${verb}: the mirror URI has leading or trailing whitespace ("${summarizeUri(uri.trim())}", shown trimmed). The URI is stored on-chain VERBATIM, so the whitespace would ride along and every read would fail to parse a scheme. Pass the trimmed URI.`,
       { code: 'InvalidArgument' },
     )
   }
@@ -687,7 +698,26 @@ export function validateMirrorUri(uri: string, verb: string): void {
   // every read AllMirrorsFailed on a confirmed file. Parse the known schemes
   // here; UNKNOWN schemes stay untouched (the custom-transport escape hatch the
   // ADR protects).
-  const scheme = /^([a-z][a-z0-9+.-]*):/i.exec(uri)?.[1]?.toLowerCase()
+  // The SHARED scheme parser (mirror/transport.ts), not a local copy — the copy
+  // is exactly how `"https ://…"` got in: it parsed as schemeless here, took the
+  // custom-transport path, and minted a mirror `resolveTransport` then refused
+  // to parse at read time (r3742660066).
+  const scheme = uriScheme(uri)
+  // ADR-0056 has no scheme ALLOWLIST, and this is not one: any scheme is fine,
+  // but there must BE one. A locator with no syntactically valid `scheme:`
+  // prefix is unreadable by every transport, custom ones included, so minting it
+  // can only produce a confirmed file that nothing can fetch.
+  //
+  // Deliberately `MissingTransport`, matching the schemeless rejection in
+  // writes/file.ts rather than inventing a second code for one condition. What
+  // changes is REACH: an explicit transport anchor used to return before that
+  // check, so `"https ://…"` rode the escape hatch straight into a MIRROR.
+  if (scheme === undefined) {
+    throw new EfsError(
+      `${verb}: the mirror URI has no 'scheme:' prefix, so no transport can resolve it ("${summarizeUri(uri)}"). Use a scheme-qualified URI (e.g. 'ipfs://…', 'ar://…', 'web3://…'); a custom scheme is fine (ADR-0056), but an explicit transportDefinition does NOT substitute for one — the reader parses the scheme off the URI itself, so the mirror would confirm and never be readable.`,
+      { code: 'MissingTransport' },
+    )
+  }
   // `ar` is the arweave alias and `http` is resolveTransport's OPT-IN insecure
   // variant (r3741983482) — neither is a TRANSPORT key, but both are schemes the
   // SDK structurally parses, so a malformed one must not slip through as a
