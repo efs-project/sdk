@@ -482,16 +482,28 @@ export function listEntries(
     // empty page is the honest end of pagination, while an emptied one falls
     // through to the next candidate RESTARTING at 0 (the old cursor indexed the
     // emptied attester's listing and is void for the new one).
-    while (page.length === 0 && i + 1 < candidates.length) {
+    // A BOUND cursor's attester that turns out EMPTY invalidates the whole
+    // resumption: the ranked order may have changed under it (r3742009383), so
+    // the scan restarts from the TOP — a higher-ranked candidate that gained
+    // entries must win, not merely the ones after the cursor's attester. Done
+    // once (a second pass would loop); afterwards the walk advances forward.
+    let restartedFromTop = false
+    while (page.length === 0) {
       if (start > 0n && (await attesterStillHasEntries(ctx, listUID, candidates[i] as Address))) {
         break // honest end of the standing leader's listing
       }
-      // A BOUND cursor indexed THAT attester's listing: once we leave it the
-      // offset is void, so restart at 0. An UNBOUND (legacy/hand-written)
-      // cursor indexes "the selection" — the first candidate that actually has
-      // entries — so skipping empty candidates preserves it.
-      if (parsed.attester !== undefined) start = 0n
-      i += 1
+      if (parsed.attester !== undefined && !restartedFromTop) {
+        restartedFromTop = true
+        i = 0
+        start = 0n // the bound offset indexed the emptied listing — void now
+      } else if (i + 1 < candidates.length) {
+        // An UNBOUND (legacy/hand-written) cursor indexes "the selection" — the
+        // first candidate that actually has entries — so skipping empty
+        // candidates PRESERVES its offset.
+        i += 1
+      } else {
+        break // ranked set exhausted
+      }
       page = await readEntriesPage(ctx, listUID, candidates[i] as Address, kind, start, pageSize)
     }
     // A short page (fewer than requested) means the end; otherwise advance the cursor
@@ -545,14 +557,23 @@ export function listEntries(
       start,
       defaultLimit,
     )
-    // Same evaporated-leader fall-through as byPage, incl. the resumed-offset
-    // disambiguation (r3741157007 / r3741418197).
-    while (page.length === 0 && i + 1 < candidates.length) {
+    // Same fall-through as byPage, incl. the resumed-offset disambiguation and
+    // the restart-from-top on an emptied BOUND attester (r3741157007 /
+    // r3741418197 / r3742009383).
+    let restartedFromTop = false
+    while (page.length === 0) {
       if (start > 0n && (await attesterStillHasEntries(ctx, listUID, candidates[i] as Address))) {
         break
       }
-      if (parsed.attester !== undefined) start = 0n // see byPage
-      i += 1
+      if (parsed.attester !== undefined && !restartedFromTop) {
+        restartedFromTop = true
+        i = 0
+        start = 0n
+      } else if (i + 1 < candidates.length) {
+        i += 1
+      } else {
+        break
+      }
       page = await readEntriesPage(
         ctx,
         listUID,

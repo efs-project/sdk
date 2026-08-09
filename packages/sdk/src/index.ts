@@ -876,7 +876,15 @@ export function createEfsV1Client(config: EfsClientConfig): EfsClient {
       // signatures don't structurally unify with the narrow submit surfaces at the
       // type level, so cast through them at this boundary (same as `fs.write`).
       walletClient: wallet as unknown as EdgeSubmitContext['walletClient'],
-      publicClient: publicClient as unknown as EdgeSubmitContext['publicClient'],
+      // GUARDED (r3742009390): the submitter's boundary gates (hardlink,
+      // reused-anchor, symlink, transport) read EAS/indexer state through this
+      // client — a provider that drifts after the pre-gate assertChain and back
+      // before the per-layer one would otherwise have them approve a plan
+      // against ANOTHER chain's state. Same client the file-write planner uses.
+      publicClient: chainGuardedPublicClient(
+        publicClient,
+        () => dep.chainId,
+      ) as unknown as EdgeSubmitContext['publicClient'],
       easAddress: dep.contracts.eas,
       // The layered boundary's placement gates (stamped PIN plans) read the
       // indexer for the active-mirror readability proof.

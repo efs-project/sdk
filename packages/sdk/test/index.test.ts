@@ -654,6 +654,35 @@ describe('capability probe chain-pinning (review r3740495867)', () => {
     expect((err as { code?: string }).code).toBe('WrongChain')
   })
 
+  it('the EDGE submit context gets the chain-guarded client (r3742009390)', async () => {
+    // The submitter's boundary gates read EAS/indexer state through this
+    // client; a drifted provider must fail closed rather than approve a plan
+    // against another chain's state.
+    let chainCalls = 0
+    const provider = createMockProvider({
+      chainId: 11155111,
+      handlers: {
+        eth_chainId: () => {
+          chainCalls += 1
+          return chainCalls === 1 ? '0xaa36a7' : '0x3e7' // sepolia, then drift
+        },
+        eth_call: () => `0x${'0'.repeat(64)}`,
+      },
+    })
+    const pc = createPublicClient({ chain: sepolia, transport: custom(provider) })
+    const wc = createWalletClient({
+      chain: sepolia,
+      account: addr(0xbee),
+      transport: custom(provider),
+    }) as WalletClient
+    const efs = createEfsClient({ publicClient: pc, walletClient: wc }) as unknown as {
+      graph: { pins: { place(a: `0x${string}`, d: `0x${string}`): Promise<unknown> } }
+    }
+    const b32 = (n: number) => `0x${n.toString(16).padStart(64, '0')}` as `0x${string}`
+    const err = await efs.graph.pins.place(b32(0x800), b32(0x900)).catch((e) => e)
+    expect((err as { code?: string }).code).toBe('WrongChain')
+  })
+
   it('the ENS lens resolution is chain-guarded too (r3741740331)', async () => {
     // One provider serves ENS and the EFS reads: a drift between them would
     // make the resolved ATTESTER come from another chain's registry. The guard

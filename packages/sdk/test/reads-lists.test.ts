@@ -752,6 +752,50 @@ describe('list attester re-selection after a raced revoke (review r3741157007)',
     expect(unbound.items[0]?.attester).toBe(A)
   })
 
+  it('an emptied BOUND attester restarts the scan from the TOP, not just forward (r3742009383)', async () => {
+    // The first page skipped empty A and selected B; by resume time B is empty
+    // and A has gained an entry. Advancing only PAST B would report end-of-list
+    // (B is last) — the now-first-ranked A must win.
+    const flipped: ReadContext['publicClient'] = {
+      async readContract(args: { functionName: string; args?: readonly unknown[] }) {
+        const a = (args.args ?? []) as readonly unknown[]
+        switch (args.functionName) {
+          case 'getMode':
+            return {
+              exists: true,
+              curator: CURATOR,
+              allowsDuplicates: false,
+              appendOnly: false,
+              targetType: 0,
+              targetSchema: ZERO,
+              maxEntries: 0n,
+            }
+          case 'length': {
+            const who = (a[1] as string).toLowerCase()
+            return who === A.toLowerCase() ? 1n : 0n // A gained, B emptied
+          }
+          case 'entries': {
+            const who = (a[1] as string).toLowerCase()
+            const start = a[2] as bigint
+            if (who === A.toLowerCase() && start === 0n) {
+              return [{ entryUID: uid(0xea9), identityKey: uid(0xaaa) }]
+            }
+            return []
+          }
+          default:
+            throw new Error(`unexpected ${args.functionName}`)
+        }
+      },
+    } as unknown as ReadContext['publicClient']
+    const ctx = ctxOf(flipped)
+    const page = await listEntries((() => ctx) as never, LIST_UID, {
+      lens: lens([A, B]),
+      cursor: `3:${B}`, // bound to B, which is now empty
+    }).byPage()
+    expect(page.items).toHaveLength(1)
+    expect(page.items[0]?.attester).toBe(A) // restarted from the top
+  })
+
   it('a BOUND cursor continues ITS attester even when outranked (no skip, no dup)', async () => {
     // B gained entries and now outranks... rather: the cursor belongs to B's
     // listing; even with A ranked first, the bound cursor continues B at its
