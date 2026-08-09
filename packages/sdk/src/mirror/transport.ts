@@ -281,8 +281,16 @@ function decodeRadix(s: string, alphabet: string): Uint8Array | undefined {
 
 /**
  * Decode a bit-packed alphabet (the base2/base8/base16/base32 families) at
- * `bits` per character, dropping the trailing partial byte as RFC 4648 does.
- * `undefined` when a character falls outside `alphabet`.
+ * `bits` per character. `undefined` when a character falls outside `alphabet`,
+ * or when the body is not a WHOLE encoding of its bytes (r3742548815).
+ *
+ * RFC 4648 leaves at most `bits - 1` padding bits, and they are zero. Anything
+ * more is a body that decodes to bytes it does not actually spell: an extra
+ * base16 nibble on a valid CID contributes no byte, so `f…40` and `f…407`
+ * would decode IDENTICALLY and both clear the structural CID checks. The
+ * malformed locator then mints as a file's only mirror and 404s at a strict
+ * IPFS gateway — a write that confirms and can never be read. Rejecting the
+ * residue is what makes the decode a real parse rather than a lossy scan.
  */
 function decodeBits(s: string, alphabet: string, bits: number): Uint8Array | undefined {
   let acc = 0
@@ -299,6 +307,9 @@ function decodeBits(s: string, alphabet: string, bits: number): Uint8Array | und
       acc &= (1 << n) - 1 // keep `acc` small — `<<` is a 32-bit signed op
     }
   }
+  // `n >= bits` means a whole trailing character bought no byte; `acc !== 0`
+  // means its bits were not the zero padding RFC 4648 requires.
+  if (n >= bits || acc !== 0) return undefined
   return new Uint8Array(out)
 }
 

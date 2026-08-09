@@ -658,6 +658,12 @@ describe('byte-plan builder preflight (reviews r3741586928 / r3741586938)', () =
       'ipfs://k0000000000',
       'ipfs://v00000000000000',
       'ipfs://Z111111111111111',
+      // r3742548815 — a bit-packed body carrying MORE bits than the bytes it
+      // spells. The trailing residue bought no byte, so these decoded
+      // IDENTICALLY to the valid CIDs below and cleared every structural
+      // check, minting a locator a strict gateway 404s.
+      'ipfs://f015512209e7fd40918c93c86e01be3043703dd882bddb5ccd5466addc1e7969a27f93da87', // valid base16 CID + one nibble
+      'ipfs://bafkreie6p7kasggjhsdoag7daq3qhxmifpo3ltgvizvn3qphs2ncp6j5vaa', // valid base32 CID + one char
     ]) {
       expect(() =>
         buildFileWriteGraph({
