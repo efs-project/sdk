@@ -664,6 +664,15 @@ describe('byte-plan builder preflight (reviews r3741586928 / r3741586938)', () =
       // check, minting a locator a strict gateway 404s.
       'ipfs://f015512209e7fd40918c93c86e01be3043703dd882bddb5ccd5466addc1e7969a27f93da87', // valid base16 CID + one nibble
       'ipfs://bafkreie6p7kasggjhsdoag7daq3qhxmifpo3ltgvizvn3qphs2ncp6j5vaa', // valid base32 CID + one char
+      // r3742608266 — the PADDED codes. Swapping a valid base32 CID's 'b' for
+      // 'c' spells base32pad WITHOUT its required '=' padding: we decoded it
+      // with the unpadded routine and accepted it, while strict multibase
+      // implementations reject it. Unusable either way — the padding our own
+      // ipfs:// reader refuses is the padding multibase demands.
+      'ipfs://cafkreie6p7kasggjhsdoag7daq3qhxmifpo3ltgvizvn3qphs2ncp6j5va',
+      'ipfs://CAFKREIE6P7KASGGJHSDOAG7DAQ3QHXMIFPO3LTGVIZVN3QPHS2NCP6J5VA',
+      'ipfs://t05512209e7fd40918c93c86e01be3043703dd882bddb5ccd5466addc1e79',
+      'ipfs://T05512209E7FD40918C93C86E01BE3043703DD882BDDB5CCD5466ADDC1E79',
     ]) {
       expect(() =>
         buildFileWriteGraph({
@@ -672,6 +681,23 @@ describe('byte-plan builder preflight (reviews r3741586928 / r3741586938)', () =
         }),
       ).toThrowError(/valid IPFS CID|not a valid ipfs: locator/)
     }
+  })
+
+  it('names the PADDED multibase rather than calling it unknown (r3742608266)', () => {
+    // 'c' IS an assigned code, so "unknown multibase prefix" would be a lie —
+    // the caller has a real CID in the wrong encoding and needs to be told to
+    // re-encode, not sent hunting for a typo.
+    expect(() =>
+      buildFileWriteGraph({
+        ...good,
+        mirrors: [
+          {
+            uri: 'ipfs://cafkreie6p7kasggjhsdoag7daq3qhxmifpo3ltgvizvn3qphs2ncp6j5va',
+            transportDefinition: baseInput.mirrors[0]!.transportDefinition,
+          },
+        ],
+      }),
+    ).toThrowError(/base32pad .* not supported here .* re-encode/s)
   })
 
   it('ACCEPTS real CIDv0 and CIDv1 locators', () => {

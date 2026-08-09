@@ -389,8 +389,8 @@ const radixBase = (
  * Restricted to the ALPHANUMERIC bases: {@link resolveIpfs} refuses any other
  * character so a crafted CID cannot smuggle path/host characters into a
  * gateway URL, and the write preflight must not admit a locator our own reader
- * would reject. The padded variants (`c`/`C`/`t`/`T`) are therefore accepted
- * only in their unpadded spelling.
+ * would reject. The PADDED variants (`c`/`C`/`t`/`T`) are absent for exactly
+ * that reason — see {@link PADDED_BASES}.
  */
 const MULTIBASE: Record<string, Multibase> = {
   '0': bitsBase('base2', '01', 1, 'mixed'),
@@ -398,19 +398,41 @@ const MULTIBASE: Record<string, Multibase> = {
   '9': radixBase('base10', '0123456789', 'mixed'),
   b: bitsBase('base32', BASE32_ALPHABET, 5, 'lower'),
   B: bitsBase('base32upper', BASE32_ALPHABET, 5, 'upper'),
-  c: bitsBase('base32pad', BASE32_ALPHABET, 5, 'lower'),
-  C: bitsBase('base32padupper', BASE32_ALPHABET, 5, 'upper'),
   f: bitsBase('base16', BASE16_ALPHABET, 4, 'lower'),
   F: bitsBase('base16upper', BASE16_ALPHABET, 4, 'upper'),
   h: bitsBase('base32z', BASE32_Z_ALPHABET, 5, 'mixed'),
   k: radixBase('base36', BASE36_ALPHABET, 'lower'),
   K: radixBase('base36upper', BASE36_ALPHABET, 'upper'),
-  t: bitsBase('base32hexpad', BASE32_HEX_ALPHABET, 5, 'lower'),
-  T: bitsBase('base32hexpadupper', BASE32_HEX_ALPHABET, 5, 'upper'),
   v: bitsBase('base32hex', BASE32_HEX_ALPHABET, 5, 'lower'),
   V: bitsBase('base32hexupper', BASE32_HEX_ALPHABET, 5, 'upper'),
   z: radixBase('base58btc', BASE58_ALPHABET, 'mixed'),
   Z: radixBase('base58flickr', BASE58_FLICKR_ALPHABET, 'mixed'),
+}
+
+/**
+ * The PADDED multibase codes — assigned, but unusable as an `ipfs://` locator
+ * here, so they are refused BY NAME rather than decoded (r3742608266).
+ *
+ * These are a genuine dead end, not a gap we could close by parsing harder:
+ *
+ *  - Their `=` padding is REQUIRED by multibase, and {@link resolveIpfs} rejects
+ *    every non-alphanumeric character — so a correctly padded CID could never be
+ *    read back by our own reader.
+ *  - Dropping the padding does not rescue them: the table previously decoded
+ *    `c…`/`t…` with the ORDINARY unpadded routine, so `cafy…` (a valid base32
+ *    CID with its prefix swapped) sailed through the write preflight while
+ *    strict multibase implementations reject it — mintable as a file's only
+ *    mirror, and unreadable at the gateways that matter.
+ *
+ * Refusing by name rather than deleting the entries: `c` IS an assigned code, so
+ * "unknown multibase prefix" would be a lie, and the caller needs to be told to
+ * re-encode rather than to go hunting for a typo.
+ */
+const PADDED_BASES: Record<string, string> = {
+  c: 'base32pad',
+  C: 'base32padupper',
+  t: 'base32hexpad',
+  T: 'base32hexpadupper',
 }
 
 /**
@@ -458,6 +480,10 @@ export function cidStructureError(cid: string): string | undefined {
   const prefix = cid[0]
   const body = cid.slice(1)
   if (body.length === 0) return 'missing CID body'
+  const padded = prefix === undefined ? undefined : PADDED_BASES[prefix]
+  if (padded !== undefined) {
+    return `${padded} ('${prefix}') CIDs are not supported here — multibase REQUIRES their '=' padding, which the ipfs:// reader rejects, so the locator could never be read back; re-encode the CID as base32 ('b…') or base58btc ('z…')`
+  }
   const base = prefix === undefined ? undefined : MULTIBASE[prefix]
   if (base === undefined) {
     return `unknown multibase prefix '${prefix}' (an IPFS CID starts with 'Qm', or a multibase code such as 'b', 'f', 'z' or 'k')`
