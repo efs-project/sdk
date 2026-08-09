@@ -109,7 +109,14 @@ export function summarizeUri(uri: string): string {
     const bodyLen = comma === -1 ? 0 : uri.length - comma - 1
     return `${meta},<${bodyLen} chars elided>`
   }
-  return uri.length > 200 ? `${uri.slice(0, 200)}… (${uri.length} chars)` : uri
+  // Strip a `user:password@` userinfo component (r3742879885). The write path
+  // now refuses these outright, but this function is what every error and
+  // attempt record flows through — INCLUDING that refusal's own message — and
+  // the chain is append-only, so a credential-bearing mirror minted before this
+  // guard still reaches readers. String surgery, not `new URL`: the input here
+  // is arbitrary and may not parse at all.
+  const safe = uri.replace(/^([A-Za-z][A-Za-z0-9+.-]*:\/\/)[^/?#@]*@/, '$1<credentials redacted>@')
+  return safe.length > 200 ? `${safe.slice(0, 200)}… (${safe.length} chars)` : safe
 }
 
 /** Thrown when a URI cannot be parsed or its scheme is unrecognized. */
@@ -206,6 +213,18 @@ export function resolveTransport(
         parsed = new URL(uri)
       } catch {
         throw new UnsupportedUriError(uri, 'malformed https URL')
+      }
+      // `new URL` happily accepts `https://user:pass@host/…`, but WHATWG `fetch`
+      // REFUSES to construct a Request from a URL carrying credentials — it
+      // throws before any network call, so such a mirror confirms on-chain and
+      // then fails every read with AllMirrorsFailed (r3742879885). Refused at
+      // parse so the write preflight catches it, rather than minting a locator
+      // our own fetch can never use.
+      if (parsed.username !== '' || parsed.password !== '') {
+        throw new UnsupportedUriError(
+          uri,
+          'URL carries credentials (user:password@), which fetch refuses to request — publish a URL without embedded credentials',
+        )
       }
       return {
         scheme: TRANSPORT.https,

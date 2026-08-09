@@ -126,6 +126,38 @@ describe('resolveTransport - URI parsing (TRANSPORT allowlist)', () => {
     expect(urls[0]!.href).toBe(`https://arweave.net/${tx}`)
   })
 
+  it('rejects an https mirror carrying credentials, and never echoes them (r3742879885)', () => {
+    // WHATWG fetch REFUSES to construct a Request from a URL with credentials —
+    // it throws before any network call — so such a mirror would confirm
+    // on-chain and then fail every read with AllMirrorsFailed.
+    // A distinctive secret — not the word "password", which legitimately appears
+    // in the refusal's own explanatory text.
+    for (const uri of [
+      'https://alice:hunter2@example.com/file',
+      'https://alice@example.com/file',
+    ]) {
+      const err = (() => {
+        try {
+          resolveTransport(uri)
+        } catch (e) {
+          return e as Error
+        }
+        throw new Error(`expected ${uri} to be rejected`)
+      })()
+      expect(err).toBeInstanceOf(UnsupportedUriError)
+      expect(err.message).toMatch(/credentials/)
+      // The refusal must not print the secret it is refusing — nor the username.
+      expect(err.message).not.toContain('hunter2')
+      expect(err.message).not.toContain('alice')
+      expect(err.message).toContain('<credentials redacted>')
+    }
+    // An `@` in the PATH or QUERY is not userinfo — those URLs stay usable.
+    expect(resolveTransport('https://example.com/a@b/file').httpUrls()[0]?.href).toBe(
+      'https://example.com/a@b/file',
+    )
+    expect(resolveTransport('https://example.com/p?to=a@b.com').scheme).toBe(TRANSPORT.https)
+  })
+
   it('rejects a NON-CANONICAL ar:// id whose final char has pad bits set (r3742824658)', () => {
     // 43 base64url chars = 258 bits, but the id is a 32-byte hash = 256 bits, so
     // the last character's low 2 bits are padding. Length + alphabet alone
