@@ -41,6 +41,7 @@ import {
   hexToBytes,
 } from 'viem'
 import { chunkedSstore2Abi } from '../chain/abi/chunkStore.js'
+import { summarizeUri } from './transport.js'
 
 /** The minimal viem public surface the `web3://` read needs: a typed `readContract`
  * (for `chunkCount`/`chunkAddress`) and `getCode` (the SSTORE2 chunk bytecode).
@@ -83,7 +84,11 @@ const MAX_CHUNKS = 4096
 export function parseWeb3Uri(uri: string): Address {
   const lower = uri.toLowerCase()
   if (!lower.startsWith('web3://')) {
-    throw new Web3ReadError(`not a web3:// URI: ${uri.slice(0, 16)}`)
+    // Summarize BEFORE slicing: this is an exported entry point, so the string
+    // is arbitrary — a credential URL's first 16 raw characters would be
+    // `https://alice:hu`. Slicing after redaction keeps the message short
+    // without printing userinfo or an inline `data:` body.
+    throw new Web3ReadError(`not a web3:// URI: ${summarizeUri(uri).slice(0, 16)}`)
   }
   let rest = uri.slice('web3://'.length)
   // Optional 0x / 0X prefix (the router accepts both).
@@ -92,7 +97,7 @@ export function parseWeb3Uri(uri: string): Address {
   }
   const hex = rest.slice(0, 40)
   if (hex.length < 40 || !/^[0-9a-fA-F]{40}$/.test(hex)) {
-    throw new Web3ReadError(`malformed address in ${uri.slice(0, 64)}`)
+    throw new Web3ReadError(`malformed address in ${summarizeUri(uri).slice(0, 64)}`)
   }
   // Lowercase BEFORE `getAddress`: the router parses the address numerically /
   // case-insensitively, so a router-valid mirror may carry arbitrary mixed-case hex with

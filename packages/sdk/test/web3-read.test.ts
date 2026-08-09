@@ -80,6 +80,22 @@ describe('parseWeb3Uri', () => {
     expect(() => parseWeb3Uri(`web3://0x${'z'.repeat(40)}`)).toThrow(Web3ReadError)
   })
 
+  it('redacts credentials before truncating the rejected URI (exported entry point)', () => {
+    // This is a PUBLIC export, so the argument is arbitrary — and the message
+    // slices the head of it. Raw, `https://alice:hunter2@…`.slice(0,16) would
+    // print `https://alice:hu`. Summarize first, then slice.
+    const err = (() => {
+      try {
+        parseWeb3Uri('https://alice:hunter2@example.com/file')
+      } catch (e) {
+        return e as Error
+      }
+      throw new Error('expected rejection')
+    })()
+    expect(err.message).not.toContain('alice')
+    expect(err.message).not.toContain('hunter2')
+  })
+
   it('accepts a router-valid mixed-case address with NO valid EIP-55 checksum', () => {
     // The router parses the address case-insensitively, so a mirror from another client
     // may carry arbitrary mixed-case hex. Build a variant with every alpha case flipped
