@@ -107,7 +107,7 @@ describe('resolveTransport - URI parsing (TRANSPORT allowlist)', () => {
     // must not escape the /ipfs/<cid>/ namespace onto an arbitrary gateway path.
     expect(() => resolveTransport(`ipfs://${cid}/../admin`).httpUrls()).toThrow()
     expect(() => resolveTransport(`ipfs://${cid}/%2e%2e/admin`).httpUrls()).toThrow()
-    expect(() => resolveTransport(`ar://${'a'.repeat(43)}/../../admin`).httpUrls()).toThrow()
+    expect(() => resolveTransport(`ar://${'a'.repeat(42)}A/../../admin`).httpUrls()).toThrow()
     // Sibling whose name shares the CID prefix: /ipfs/bafyadmin must NOT pass a
     // namespace check for /ipfs/bafy (needs a `/` boundary, not a raw prefix).
     expect(() => resolveTransport('ipfs://bafy/../bafyadmin').httpUrls()).toThrow()
@@ -116,12 +116,27 @@ describe('resolveTransport - URI parsing (TRANSPORT allowlist)', () => {
   })
 
   it('parses ar://TXID to arweave gateways', () => {
-    const tx = 'a'.repeat(43) // Arweave tx ids are exactly 43 base64url chars
+    // 43 base64url chars, and CANONICAL: the 43rd carries 2 padding bits over a
+    // 32-byte id, so it must be one of AEIMQUYcgkosw048 (r3742824658).
+    const tx = `${'a'.repeat(42)}A`
     const r = resolveTransport(`ar://${tx}`)
     expect(r.scheme).toBe(TRANSPORT.arweave)
     const urls = r.httpUrls()
     expect(urls).toHaveLength(DEFAULT_ARWEAVE_GATEWAYS.length)
     expect(urls[0]!.href).toBe(`https://arweave.net/${tx}`)
+  })
+
+  it('rejects a NON-CANONICAL ar:// id whose final char has pad bits set (r3742824658)', () => {
+    // 43 base64url chars = 258 bits, but the id is a 32-byte hash = 256 bits, so
+    // the last character's low 2 bits are padding. Length + alphabet alone
+    // admitted a spelling strict base64url/Arweave parsers reject.
+    for (const last of ['B', 'C', 'D', 'b', 'z', '9', '-', '_']) {
+      expect(() => resolveTransport(`ar://${'A'.repeat(42)}${last}`)).toThrow(UnsupportedUriError)
+    }
+    // The 16 legal terminators (alphabet index % 4 === 0) still resolve.
+    for (const last of [...'AEIMQUYcgkosw048']) {
+      expect(resolveTransport(`ar://${'A'.repeat(42)}${last}`).scheme).toBe(TRANSPORT.arweave)
+    }
   })
 
   it('rejects an ar:// id that is not exactly 43 base64url chars', () => {

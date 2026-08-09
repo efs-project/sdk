@@ -146,6 +146,14 @@ describe('buildPropertyPlan', () => {
         /not an IANA media type/,
       )
     }
+    // r3742824661 — MEDIA RANGES. `text/` + wildcard is what a client sends in
+    // Accept, not what a file IS; stored as metadata it even reads as
+    // displayable text, since fs.overview() keys on the `text/` prefix.
+    for (const range of ['text/*', '*/*', '*/plain', 'text/*; charset=utf-8']) {
+      expect(() => buildPropertyPlan(SCHEMAS, DATA, 'contentType', range)).toThrowError(
+        /not an IANA media type/,
+      )
+    }
     // r3742724228 — RAW CONTROLS inside a quoted parameter, and CR/LF between
     // parameters. This value is served as the ERC-5219 store's reported MIME,
     // so a CRLF is a header the gateway would emit verbatim.
@@ -204,6 +212,22 @@ describe('buildPropertyPlan', () => {
     expect(
       buildPropertyPlan(SCHEMAS, DATA, 'contentHash', `f1220${'a'.repeat(64)}`).attestations,
     ).toHaveLength(3)
+  })
+
+  it('validates the reserved size key — a bad one DISABLES a reader guard (r3742824666)', () => {
+    // Not a graceful degradation: every reader's parseSize returns undefined,
+    // and in reads/overview.ts that undefined SKIPS the pre-fetch too-large
+    // short-circuit, so the overview fetches until it hits the render cap
+    // instead of returning {kind:'too-large'} without touching the network.
+    for (const bad of ['garbage', '-1', '007', '1.5', '1e3', ' 42', '0x10', '']) {
+      expect(() => buildPropertyPlan(SCHEMAS, DATA, 'size', bad)).toThrowError(
+        /not a canonical byte count/,
+      )
+    }
+    // The canonical form file writes emit (`size.toString()`) still builds.
+    for (const good of ['0', '1', '4096', '9007199254740993']) {
+      expect(buildPropertyPlan(SCHEMAS, DATA, 'size', good).attestations).toHaveLength(3)
+    }
   })
 
   it('with an existing key anchor (Bug-2): emits ONLY PROPERTY + binding-PIN (no key-ANCHOR)', () => {

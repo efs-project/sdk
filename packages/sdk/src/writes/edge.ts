@@ -210,6 +210,20 @@ export function buildPropertyPlan(
   // so one bad props.set makes a healthy file unreadable by default. File
   // writes already persist only canonical `ContentHash`; this routes props.set
   // through the same boundary.
+  // The third authoritative reserved key (r3742824666). A malformed `size` does
+  // NOT degrade gracefully as it first appears: every reader's `parseSize`
+  // returns `undefined`, and in `reads/overview.ts` that `undefined` SKIPS the
+  // documented pre-fetch `too-large` short-circuit entirely — so instead of
+  // returning `{kind:'too-large'}` without touching the network, the overview
+  // fetches until it hits the fixed render cap. `fs.info()` simply omits the
+  // size. Canonical form only: what `size.toString()` emits, no leading zeros,
+  // no sign, no separators.
+  if (key === 'size' && !/^(0|[1-9][0-9]*)$/.test(value)) {
+    throw new EfsError(
+      `EFS property write: \`size\` ${JSON.stringify(value)} is not a canonical byte count (expected a non-negative decimal integer with no leading zeros, e.g. '4096'). Readers parse this claim strictly and treat anything else as ABSENT, which silently disables fs.overview()'s pre-fetch too-large guard.`,
+      { code: 'InvalidArgument' },
+    )
+  }
   if (key === 'contentHash' && asContentHash(value) === undefined) {
     throw new EfsError(
       `EFS property write: \`contentHash\` ${JSON.stringify(value)} is not a canonical content hash (expected the multibase-multihash form, e.g. \`f1220\` + 64 lowercase hex for sha2-256 — ADR-0016/specs 10 §2.3). This value is the AUTHORITATIVE claim readers verify against, so a malformed one makes every default read throw \`malformed-claim\` even when the bytes are intact. Use \`hashContent(bytes)\`, or \`decodeContentHash(s).canonical\` for an accepted-on-read form.`,
@@ -665,9 +679,19 @@ export function validateAddTarget(
  * URI. The resolver checks `bytes(uri).length` — UTF-8 bytes, not JS UTF-16 code units. */
 export const MAX_MIRROR_URI_BYTES = 8192
 
-/** RFC 9110 `token` — the character set both halves of a media type and every
- * parameter name draw from. */
+/** RFC 9110 `token` — the parameter grammar (names and unquoted values). */
 const MEDIA_TOKEN = String.raw`[!#$%&'*+\-.^_\`|~0-9A-Za-z]+`
+/**
+ * RFC 6838 §4.2 `restricted-name` — the grammar for a type or subtype NAME.
+ *
+ * Deliberately narrower than {@link MEDIA_TOKEN}, which permits the wildcard
+ * character and so accepted MEDIA RANGES — the `text/` + wildcard form a client
+ * sends in `Accept`, which is not what a file IS (r3742824661). Stored as
+ * authoritative metadata that form even reads as displayable text, because
+ * `fs.overview()` keys on the `text/` prefix. A name must start alphanumeric
+ * and stay within 127 characters.
+ */
+const MEDIA_NAME = String.raw`[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,126}`
 /** RFC 9110 `OWS` — SP/HTAB only. Emphatically NOT `\s`, which admits CR and LF
  * (r3742724228). */
 const MEDIA_OWS = String.raw`[ \t]*`
@@ -687,7 +711,7 @@ const MEDIA_QUOTED_PAIR = String.raw`\\[\t \x21-\x7E]`
  * the header would emit verbatim (r3742724228).
  */
 const MEDIA_TYPE_RE = new RegExp(
-  `^${MEDIA_TOKEN}/${MEDIA_TOKEN}(?:${MEDIA_OWS};${MEDIA_OWS}${MEDIA_TOKEN}=(?:${MEDIA_TOKEN}|"(?:${MEDIA_QDTEXT}|${MEDIA_QUOTED_PAIR})*"))*$`,
+  `^${MEDIA_NAME}/${MEDIA_NAME}(?:${MEDIA_OWS};${MEDIA_OWS}${MEDIA_TOKEN}=(?:${MEDIA_TOKEN}|"(?:${MEDIA_QDTEXT}|${MEDIA_QUOTED_PAIR})*"))*$`,
 )
 
 /**

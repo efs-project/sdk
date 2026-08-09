@@ -264,6 +264,9 @@ const BASE32_HEX_ALPHABET = '0123456789abcdefghijklmnopqrstuv'
 const BASE32_Z_ALPHABET = 'ybndrfg8ejkmcpqxot1uwisza345h769'
 const BASE36_ALPHABET = '0123456789abcdefghijklmnopqrstuvwxyz'
 const BASE16_ALPHABET = '0123456789abcdef'
+/** base64url (RFC 4648 §5) — used only to range-check an Arweave tx id's final
+ * character, whose low 2 bits are padding on a 32-byte hash. */
+const B64URL_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_'
 
 /**
  * Decode a big-endian radix-N string (base10/base36/base58/…), or `undefined`
@@ -611,6 +614,17 @@ function resolveArweave(uri: string): ResolvedTransport {
     throw new UnsupportedUriError(
       uri,
       'invalid Arweave transaction id (expected 43 base64url chars)',
+    )
+  }
+  // 43 base64url chars carry 258 bits, but the id is a 32-byte (256-bit) hash —
+  // so the LAST character's low 2 bits are padding and must be zero, i.e. its
+  // alphabet index is a multiple of 4 (r3742824658). Without this the length +
+  // alphabet screen accepted a non-canonical spelling that strict base64url and
+  // Arweave parsers reject, and `fs.write` could confirm it as an only mirror.
+  if (B64URL_ALPHABET.indexOf(txid[42] as string) % 4 !== 0) {
+    throw new UnsupportedUriError(
+      uri,
+      'non-canonical Arweave transaction id (the final character carries non-zero padding bits)',
     )
   }
   return {
