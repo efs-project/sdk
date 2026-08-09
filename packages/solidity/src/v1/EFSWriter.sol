@@ -1,0 +1,254 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.26;
+
+import {IEAS} from "@ethereum-attestation-service/eas-contracts/contracts/IEAS.sol";
+import {EFSLib, IEFSIndexerWrite} from "./EFSLib.sol";
+
+/// @title EFSWriter
+/// @notice Inheritable base contract — the happy path for adding EFS *writes* to your contract.
+///         Inherit it, hold an {IEAS} reference, and call the wrapped helpers; because {EFSLib}
+///         is `internal` and inlines into your contract's context, **your contract stays the EAS
+///         attester** (ADR-0003). Run by an EIP-7702 account or an app contract, that is what
+///         gives wallet users a one-signature file write (planning/Designs/sdk-minimal-clicks.md).
+/// @dev    EFS-level events live here: EAS events are UID-keyed, not domain-keyed, so domain
+///         consumers need a path/data-keyed signal. The composition itself lives in {EFSLib}.
+abstract contract EFSWriter {
+    /// @notice The EAS instance every write attests against. Set once at construction.
+    IEAS internal immutable EAS;
+
+    /// @notice Emitted when this contract composes a full file write at a path.
+    /// @dev    `fileAnchor` is indexed so domain consumers can filter writes by the path node
+    ///         (the file-ANCHOR UID that the placement PIN's `definition` names). `dataUID` is
+    ///         indexed so consumers can follow a file's identity across placements.
+    /// @param  fileAnchor     The created file-ANCHOR UID (names the path).
+    /// @param  dataUID        The DATA (file identity) UID the write placed.
+    /// @param  placementPin   The placement-PIN UID that makes the file appear at the path.
+    event EFSFileWritten(bytes32 indexed fileAnchor, bytes32 indexed dataUID, bytes32 placementPin);
+
+    /// @param eas The EAS instance this writer attests against.
+    constructor(IEAS eas) {
+        EAS = eas;
+    }
+
+    /// @notice Compose a full file write (DATA + file-ANCHOR + MIRRORs + reserved-key triplets +
+    ///         placement PIN) in one transaction; emits {EFSFileWritten}.
+    /// @dev    Delegates to {EFSLib.writeFile}, which threads the EAS-returned UIDs in memory. The
+    ///         attester of every node is `address(this)` (this contract), because the lib inlines.
+    /// @param  w The file-write inputs (schemas, parent anchor, name, mirrors, reserved keys).
+    /// @return dataUID         The created DATA UID.
+    /// @return fileAnchorUID   The created file-ANCHOR UID.
+    /// @return placementPinUID The created placement-PIN UID.
+    function _efsWriteFile(EFSLib.FileWrite memory w)
+        internal
+        returns (bytes32 dataUID, bytes32 fileAnchorUID, bytes32 placementPinUID)
+    {
+        (dataUID, fileAnchorUID, placementPinUID) = EFSLib.writeFile(EAS, w);
+        emit EFSFileWritten(fileAnchorUID, dataUID, placementPinUID);
+    }
+
+    /// @notice Hardlink an existing DATA at a new path with a single placement PIN; emits
+    ///         {EFSFileWritten}.
+    /// @dev    Delegates to {EFSLib.placeExisting} (the dedup short-circuit). Emits the same event
+    ///         as a full write so consumers index placements uniformly.
+    /// @param  schemas         The frozen schema UID set (`anchor`, `pin`, `data` are used).
+    /// @param  dataUID         The pre-existing DATA UID to place.
+    /// @param  parentAnchorUID Pre-existing parent folder anchor UID.
+    /// @param  fileName        The file's anchor name (verbatim).
+    /// @return fileAnchorUID   The created file-ANCHOR UID (DATA-typed file slot).
+    /// @return placementPinUID The created placement-PIN UID.
+    function _efsPlaceExisting(
+        IEFSIndexerWrite indexer,
+        EFSLib.SchemaUIDs memory schemas,
+        bytes32 dataUID,
+        bytes32 parentAnchorUID,
+        string memory fileName
+    ) internal returns (bytes32 fileAnchorUID, bytes32 placementPinUID) {
+        (fileAnchorUID, placementPinUID) = EFSLib.placeExisting(
+            EAS, indexer, schemas, dataUID, parentAnchorUID, fileName
+        );
+        emit EFSFileWritten(fileAnchorUID, dataUID, placementPinUID);
+    }
+
+    /// @notice {_efsPlaceExisting} that REUSES an already-resolved file-ANCHOR — the overwrite /
+    ///         relink form, so re-pointing an existing path does not re-mint its permanent anchor.
+    /// @dev    Delegates to {EFSLib.placeExisting}'s 6-arg overload. When `existingFileAnchorUID`
+    ///         is nonzero the file-ANCHOR is reused and only the cardinality-1 placement PIN is
+    ///         attested (supersedes the prior placement); when {bytes32(0)} it mints a fresh anchor
+    ///         like the 4-arg form. Resolve the slot first via
+    ///         `EFSReader.resolveAnchor(parentAnchorUID, fileName, schemas.data)` (zero ⇒ new path) —
+    ///         re-minting the permanent `(parent, name, DATA)` anchor reverts or files a
+    ///         non-canonical anchor the read path never finds.
+    /// @param  existingFileAnchorUID The pre-resolved file-ANCHOR to reuse, or zero to mint.
+    function _efsPlaceExisting(
+        IEFSIndexerWrite indexer,
+        EFSLib.SchemaUIDs memory schemas,
+        bytes32 dataUID,
+        bytes32 parentAnchorUID,
+        string memory fileName,
+        bytes32 existingFileAnchorUID
+    ) internal returns (bytes32 fileAnchorUID, bytes32 placementPinUID) {
+        (fileAnchorUID, placementPinUID) = EFSLib.placeExisting(
+            EAS, indexer, schemas, dataUID, parentAnchorUID, fileName, existingFileAnchorUID
+        );
+        emit EFSFileWritten(fileAnchorUID, dataUID, placementPinUID);
+    }
+
+    /// @notice The **mkdir** primitive: create a child ANCHOR (folder/name node) under a parent.
+    /// @dev    Delegates to {EFSLib.anchorAt}. The created anchor's attester is `address(this)`.
+    /// @param  schemas      The frozen schema UID set (only `anchor` is used).
+    /// @param  parentAnchor The parent folder anchor UID.
+    /// @param  name         The child anchor's name (verbatim).
+    /// @return anchorUID    The created ANCHOR UID.
+    function _efsAnchorAt(
+        EFSLib.SchemaUIDs memory schemas,
+        bytes32 parentAnchor,
+        string memory name
+    ) internal returns (bytes32 anchorUID) {
+        anchorUID = EFSLib.anchorAt(EAS, schemas, parentAnchor, name);
+    }
+
+    /// @notice A **TAG** edge (cardinality-N) over `target` with `definition` and `weight`.
+    /// @dev    Delegates to {EFSLib.tag}. Folder-visibility / label primitive.
+    /// @param  schemas    The frozen schema UID set (only `tag` is used).
+    /// @param  target     The attestation UID being tagged (the edge's `refUID`).
+    /// @param  definition The tag predicate/category (must be nonzero; resolver-validated).
+    /// @param  weight     The signed tag weight.
+    /// @return tagUID     The created TAG edge UID.
+    function _efsTag(
+        EFSLib.SchemaUIDs memory schemas,
+        bytes32 target,
+        bytes32 definition,
+        int256 weight
+    ) internal returns (bytes32 tagUID) {
+        tagUID = EFSLib.tag(EAS, schemas, target, definition, weight);
+    }
+
+    /// @notice **First-set / create** an arbitrary key/value **PROPERTY** triple on a DATA
+    ///         (key-ANCHOR + PROPERTY + binding PIN).
+    /// @dev    Delegates to {EFSLib.setProperty}, which ALWAYS mints a fresh key-ANCHOR. Because the
+    ///         `(dataUID, keyName, PROPERTY)` key-ANCHOR is permanent / non-revocable, calling this a
+    ///         second time for the same `(dataUID, keyName)` reverts on the duplicate anchor — it does
+    ///         NOT supersede. To UPDATE an existing key, resolve its key-ANCHOR (e.g.
+    ///         `EFSReader.resolveAnchor(indexer, dataUID, keyName, schemas.property)`) and call
+    ///         {_efsSetPropertyAt}; the binding PIN there is cardinality-1, so the value supersedes in
+    ///         O(1). (Mirrors the TypeScript `props.set`, which resolves the anchor first and reuses
+    ///         it on update.)
+    /// @param  schemas The frozen schema UID set (`anchor`, `property`, `pin` are used).
+    /// @param  dataUID The DATA the property binds under.
+    /// @param  keyName The property key (the key-ANCHOR's `name`).
+    /// @param  value   The stringified property value.
+    /// @return keyAnchorUID  The created key-ANCHOR UID.
+    /// @return propertyUID   The created PROPERTY UID.
+    /// @return bindingPinUID The created binding-PIN UID.
+    function _efsSetProperty(
+        EFSLib.SchemaUIDs memory schemas,
+        bytes32 dataUID,
+        string memory keyName,
+        string memory value
+    ) internal returns (bytes32 keyAnchorUID, bytes32 propertyUID, bytes32 bindingPinUID) {
+        (keyAnchorUID, propertyUID, bindingPinUID) =
+            EFSLib.setProperty(EAS, schemas, dataUID, keyName, value);
+    }
+
+    /// @notice **Update** the value at an already-minted key-ANCHOR — set/replace without re-minting
+    ///         the (permanent) anchor.
+    /// @dev    Delegates to {EFSLib.setPropertyAt}: mints only the PROPERTY + binding PIN. The binding
+    ///         PIN is cardinality-1 over `(attester, key-ANCHOR, PROPERTY)`, so this supersedes the
+    ///         prior value for this contract's lens in O(1). Resolve `keyAnchorUID` first via
+    ///         `EFSReader.resolveAnchor(indexer, dataUID, keyName, schemas.property)` (returns
+    ///         {EMPTY_UID} when the key was never set — call {_efsSetProperty} for that first write).
+    /// @param  schemas      The frozen schema UID set (`property`, `pin` are used).
+    /// @param  keyAnchorUID The pre-existing key-ANCHOR UID (the slot under the DATA).
+    /// @param  value        The new stringified property value.
+    /// @return propertyUID   The created PROPERTY UID.
+    /// @return bindingPinUID The created binding-PIN UID.
+    function _efsSetPropertyAt(
+        EFSLib.SchemaUIDs memory schemas,
+        bytes32 keyAnchorUID,
+        string memory value
+    ) internal returns (bytes32 propertyUID, bytes32 bindingPinUID) {
+        (propertyUID, bindingPinUID) = EFSLib.setPropertyAt(EAS, schemas, keyAnchorUID, value);
+    }
+
+    /// @notice A placement **PIN** (cardinality-1) binding `dataUID` at `anchor` — the hardlink /
+    ///         move primitive. Emits {EFSFileWritten} so consumers index placements uniformly.
+    /// @dev    Delegates to {EFSLib.place}. `anchor` is both the event's `fileAnchor` key and the
+    ///         PIN's `definition`.
+    /// @param  schemas The frozen schema UID set (only `pin` is used).
+    /// @param  anchor  The path anchor UID the placement names.
+    /// @param  dataUID The DATA UID being placed.
+    /// @return pinUID  The created placement-PIN UID.
+    function _efsPlace(
+        IEFSIndexerWrite indexer,
+        EFSLib.SchemaUIDs memory schemas,
+        bytes32 anchor,
+        bytes32 dataUID
+    ) internal returns (bytes32 pinUID) {
+        pinUID = EFSLib.place(EAS, indexer, schemas, anchor, dataUID);
+        emit EFSFileWritten(anchor, dataUID, pinUID);
+    }
+
+    /// @notice Create a curated **LIST**.
+    /// @dev    Delegates to {EFSLib.createList}; the curator is `address(this)`.
+    /// @return listUID The created LIST UID.
+    function _efsCreateList(
+        EFSLib.SchemaUIDs memory schemas,
+        bool allowsDuplicates,
+        bool appendOnly,
+        uint8 targetType,
+        bytes32 targetSchema,
+        uint256 maxEntries
+    ) internal returns (bytes32 listUID) {
+        listUID = EFSLib.createList(
+            EAS, schemas, allowsDuplicates, appendOnly, targetType, targetSchema, maxEntries
+        );
+    }
+
+    /// @notice Add an ANY/SCHEMA-mode entry to a LIST.
+    /// @dev    Delegates to {EFSLib.addEntry}. For ADDR-mode, use {EFSLib.addAddressEntry} directly.
+    /// @return entryUID The created LIST_ENTRY UID.
+    function _efsAddEntry(EFSLib.SchemaUIDs memory schemas, bytes32 listUID, bytes32 target)
+        internal
+        returns (bytes32 entryUID)
+    {
+        entryUID = EFSLib.addEntry(EAS, schemas, listUID, target);
+    }
+
+    /// @notice A **REDIRECT** edge (ADR-0050): assert `source` points at `target` with class `kind`
+    ///         (0 = sameAs, 1 = supersededBy, 2 = symlink). The trust-scoped canonical / dedup /
+    ///         symlink primitive.
+    /// @dev    Delegates to {EFSLib.setRedirect}; the asserter is `address(this)` (the lens), and
+    ///         the EFSIndexer `index(uid)` leg runs in the SAME transaction (ADR-0017 — without it
+    ///         the redirect is invisible to every SDK discovery read). Not a cardinality-1 slot —
+    ///         {_efsRemoveRedirect} the returned UID to retract it (the read side
+    ///         {EFSReader.resolveWithRedirects} follows it lens-scoped, cycle-safe). No
+    ///         {EFSFileWritten} event: a redirect reroutes identity, it does not place a file at a path.
+    /// @param  indexer The EFSIndexer (the same-tx discovery leg).
+    /// @param  schemas The frozen schema UID set (only `redirect` is used).
+    /// @param  source  The source UID this redirect points FROM (the edge's `refUID`).
+    /// @param  target  The destination UID this redirect points TO (nonzero, != source).
+    /// @param  kind    The redirect class (0/1/2; ≥ 3 reserved).
+    /// @return redirectUID The created REDIRECT edge UID.
+    function _efsSetRedirect(
+        IEFSIndexerWrite indexer,
+        EFSLib.SchemaUIDs memory schemas,
+        bytes32 source,
+        bytes32 target,
+        uint16 kind
+    ) internal returns (bytes32 redirectUID) {
+        redirectUID = EFSLib.setRedirect(EAS, indexer, schemas, source, target, kind);
+    }
+
+    /// @notice Retract a REDIRECT: revoke + same-tx `indexRevocation` (ADR-0017's second leg —
+    ///         a bare `eas.revoke()` leaves the redirect SERVED by filtered discovery reads).
+    /// @param  indexer     The EFSIndexer (the revocation-mirror leg).
+    /// @param  schemas     The frozen schema UID set (only `redirect` is used).
+    /// @param  redirectUID The REDIRECT edge UID to retract.
+    function _efsRemoveRedirect(
+        IEFSIndexerWrite indexer,
+        EFSLib.SchemaUIDs memory schemas,
+        bytes32 redirectUID
+    ) internal {
+        EFSLib.removeRedirect(EAS, indexer, schemas, redirectUID);
+    }
+}

@@ -1,0 +1,33 @@
+{
+  "name": "@efs/monorepo",
+  "version": "0.0.0",
+  "private": true,
+  "description": "The Ethereum File System SDK — TypeScript and Solidity",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/efs-project/sdk.git"
+  },
+  "packageManager": "pnpm@9.12.0",
+  "engines": {
+    "node": ">=20",
+    "pnpm": ">=9"
+  },
+  "scripts": {
+    "build": "turbo run build",
+    "test": "turbo run test",
+    "typecheck": "turbo run typecheck",
+    "lint": "biome ci .",
+    "format": "biome check --write .",
+    "changeset": "changeset",
+    "release": "pnpm --filter @efs/sdk build && changeset publish"
+  },
+  "devDependencies": {
+    "@arethetypeswrong/cli": "0.18.3",
+    "@biomejs/biome": "1.9.4",
+    "@changesets/cli": "2.31.0",
+    "publint": "0.2.12",
+    "turbo": "2.9.17",
+    "typescript": "5.9.3"
+  }
+}

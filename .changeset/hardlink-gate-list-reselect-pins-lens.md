@@ -1,0 +1,5 @@
+---
+"@efs/sdk": patch
+---
+
+Three fixes: (1) `submitWriteTier1` enforces the hardlink self-authorship gate at the chain boundary — before any layer broadcasts, a hardlink plan's DATA attestation is read from EAS and the submission is refused with a typed error unless the submitting account authored it (Solidity parity: `EFSLib.ForeignDataUID`); the gate fails CLOSED when the context cannot resolve a signing account or lacks the new optional `SubmitPublicClient.readContract`. (2) List reads re-select the lens attester when the leading candidate's entries evaporate between the selection probe and the follow-up read: `length`, `has`, and `entries` now walk the ranked candidates instead of reporting a false 0/false/empty, while an honest miss under a standing winner still stops the walk (first-attester-wins). (3) `efs.graph.pins.active` with no attester and no connected account now throws `LensRequired` like the other standalone namespaces instead of returning `undefined` — a false absence for a read that never happened.

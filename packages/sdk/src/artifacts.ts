@@ -1,0 +1,391 @@
+/**
+ * Durable-artifact serializers (ADR-0019/R3) — the PERSISTENCE format for the
+ * refs and receipts the SDK documents as durable. `efs.toJSON` (`json.ts`) is a
+ * LOGGING/display helper with a documented-lossy bigint round-trip; these are
+ * the typed, versioned pairs durable storage goes through instead:
+ *
+ *   - restore `bigint`s losslessly (a tagged `{ "$efsbigint": "<decimal>" }`
+ *     encoding, schema-independent — a future bigint field round-trips without
+ *     a per-field list);
+ *   - REJECT incompatible envelopes with typed errors (`UnsupportedArtifact`
+ *     for a foreign profile or a newer version — never a silent best-effort
+ *     parse that reinterprets a v2 logical ID as a v1 EAS UID;
+ *     `MalformedArtifact` for shape failures);
+ *   - PRESERVE opaque extensions verbatim (unknown `data` keys + the whole
+ *     `ext` bag survive a parse→serialize round-trip, so a foreign tool can
+ *     carry profile-specific extras through this SDK unharmed).
+ *
+ * The envelope: `{ efs: { artifact, profile, v }, data, ext? }`.
+ */
+
+import { asContentHash } from './content/hash.js'
+import { EfsError } from './errors.js'
+import type { DataRef, WriteReceipt } from './types.js'
+
+/** The envelope version THIS module writes and the max it parses. */
+const CURRENT_VERSION = 1
+
+/** The persisted-artifact envelope header. */
+type ArtifactHeader = {
+  artifact: 'DataRef' | 'WriteReceipt'
+  profile: 'efs/v1'
+  v: number
+}
+
+/** A parse hit an envelope this profile/version cannot own — a FOREIGN profile
+ * (e.g. a future `efs/v2` artifact: its ids are logical, not EAS UIDs — reading
+ * them as v1 would silently mis-dereference) or a NEWER version. Fail closed;
+ * never best-effort. */
+export class UnsupportedArtifact extends EfsError {
+  override name = 'UnsupportedArtifact'
+  readonly expectedProfile = 'efs/v1'
+  readonly foundProfile?: string
+  readonly foundVersion?: number
+  constructor(args: { foundProfile?: string; foundVersion?: number }) {
+    super(
+      args.foundProfile !== undefined && args.foundProfile !== 'efs/v1'
+        ? `EFS artifacts: this is an '${args.foundProfile}' artifact — the v1 profile cannot interpret it (its ids are not EAS UIDs). Parse it with the matching profile's SDK.`
+        : `EFS artifacts: envelope version ${args.foundVersion} is newer than this SDK understands (max ${CURRENT_VERSION}). Upgrade @efs/sdk.`,
+      { code: 'UnsupportedArtifact' },
+    )
+    if (args.foundProfile !== undefined) this.foundProfile = args.foundProfile
+    if (args.foundVersion !== undefined) this.foundVersion = args.foundVersion
+  }
+}
+
+/** A parse failed structurally — not JSON, no envelope, or a payload missing
+ * required fields. Distinct from {@link UnsupportedArtifact}: this input was
+ * never a valid artifact of ANY profile. */
+export class MalformedArtifact extends EfsError {
+  override name = 'MalformedArtifact'
+  constructor(detail: string) {
+    super(
+      `EFS artifacts: not a valid persisted artifact (${detail}). Durable refs/receipts must round-trip through serializeDataRef/serializeWriteReceipt — efs.toJSON output is a logging format, not persistence.`,
+      { code: 'MalformedArtifact' },
+    )
+  }
+}
+
+const BIGINT_TAG = '$efsbigint'
+/** A single-key object whose key is the tag, or the tag + N escape `$`s —
+ * the family the escaping scheme below owns. */
+const TAG_FAMILY_RE = /^\$efsbigint\$*$/
+
+/** JSON replacer: tag bigints so the parser can revive them losslessly.
+ * INJECTIVE over arbitrary user `data`/`ext`: a user object that happens to
+ * look like the tag (single key `$efsbigint`, or an already-escaped form) is
+ * escaped by appending `$` to its key; the reviver strips one. Without this,
+ * `{ $efsbigint: "5" }` in an ext bag would silently revive as `5n`. */
+function replacer(_key: string, value: unknown): unknown {
+  if (typeof value === 'bigint') return { [BIGINT_TAG]: value.toString(10) }
+  if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
+    const keys = Object.keys(value)
+    const k = keys[0]
+    if (keys.length === 1 && k !== undefined && TAG_FAMILY_RE.test(k)) {
+      return { [`${k}$`]: (value as Record<string, unknown>)[k] }
+    }
+  }
+  return value
+}
+
+/** JSON reviver: restore tagged bigints; unescape the escaped tag family. */
+function reviver(_key: string, value: unknown): unknown {
+  if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
+    const keys = Object.keys(value)
+    const k = keys[0]
+    if (keys.length === 1 && k !== undefined) {
+      if (k === BIGINT_TAG && typeof (value as Record<string, unknown>)[k] === 'string') {
+        return BigInt((value as Record<string, string>)[k] as string)
+      }
+      if (k.length > BIGINT_TAG.length && TAG_FAMILY_RE.test(k)) {
+        return { [k.slice(0, -1)]: (value as Record<string, unknown>)[k] }
+      }
+    }
+  }
+  return value
+}
+
+type Envelope = {
+  efs: ArtifactHeader
+  data: Record<string, unknown>
+  ext?: Record<string, unknown>
+}
+
+function serialize(artifact: ArtifactHeader['artifact'], data: object, ext?: object): string {
+  const envelope: Envelope = {
+    efs: { artifact, profile: 'efs/v1', v: CURRENT_VERSION },
+    data: data as Record<string, unknown>,
+    ...(ext !== undefined ? { ext: ext as Record<string, unknown> } : {}),
+  }
+  return JSON.stringify(envelope, replacer)
+}
+
+function parseEnvelope(json: string, artifact: ArtifactHeader['artifact']): Envelope {
+  let raw: unknown
+  try {
+    raw = JSON.parse(json, reviver)
+  } catch {
+    throw new MalformedArtifact('not JSON')
+  }
+  if (typeof raw !== 'object' || raw === null || !('efs' in raw) || !('data' in raw)) {
+    throw new MalformedArtifact('missing the { efs, data } envelope')
+  }
+  const env = raw as Envelope
+  const header = env.efs
+  if (typeof header !== 'object' || header === null) {
+    throw new MalformedArtifact('missing the envelope header')
+  }
+  if (header.profile !== 'efs/v1') throw new UnsupportedArtifact({ foundProfile: header.profile })
+  // Version discipline: NEWER-than-supported is UnsupportedArtifact (upgrade
+  // the SDK); a version that was never legal — 0, negative, fractional, NaN —
+  // is structural corruption, not a future format: MalformedArtifact.
+  if (typeof header.v !== 'number' || !Number.isInteger(header.v) || header.v < 1) {
+    throw new MalformedArtifact(`envelope version is not a positive integer (${String(header.v)})`)
+  }
+  if (header.v > CURRENT_VERSION) {
+    throw new UnsupportedArtifact({ foundVersion: header.v })
+  }
+  if (header.artifact !== artifact) {
+    throw new MalformedArtifact(
+      `expected a ${artifact} artifact, found '${String(header.artifact)}'`,
+    )
+  }
+  if (typeof env.data !== 'object' || env.data === null) {
+    throw new MalformedArtifact('missing the data payload')
+  }
+  // `ext` is RESERVED at the payload top level: the ENVELOPE owns the extension
+  // bag (the serializers hoist a parsed `.ext` back to the envelope, and the
+  // parsers attach `env.ext` onto the returned object) — a payload-level `ext`
+  // would be indistinguishable from the caller's envelope bag on the parsed
+  // object. Our serializers never write one; a blob carrying it is corrupt or
+  // crafted, and must die at the boundary rather than masquerade.
+  if ('ext' in env.data) {
+    throw new MalformedArtifact(
+      "payload uses the reserved top-level key 'ext' (the envelope owns the extension bag)",
+    )
+  }
+  // `ext`, when present, must be a plain record — the signature promises
+  // `Record<string, unknown>`, and returning `null`/an array through the spread
+  // would fail consumers past the documented MalformedArtifact boundary.
+  if (
+    'ext' in (raw as object) &&
+    (typeof env.ext !== 'object' || env.ext === null || Array.isArray(env.ext))
+  ) {
+    throw new MalformedArtifact('ext is not a plain object')
+  }
+  return env
+}
+
+/** Serialize a {@link DataRef} for DURABLE storage (localStorage, a DB, a URL
+ * payload). `ext` carries opaque caller extensions, preserved verbatim — and
+ * when omitted, an `.ext` bag already on the ref (one returned by
+ * {@link parseDataRef}) is re-emitted at the ENVELOPE, so the natural
+ * read-modify-write round-trip `serializeDataRef(parseDataRef(json))` keeps
+ * the bag where it was. `ext` is reserved to the envelope: it is never
+ * written into the payload (and {@link parseDataRef} rejects payloads that
+ * carry it). */
+export function serializeDataRef(
+  ref: DataRef & { ext?: Record<string, unknown> },
+  ext?: Record<string, unknown>,
+): string {
+  // The brand is type-level and `ext` is ENVELOPE metadata — strip both from
+  // the payload; unknown future fields still ride along verbatim.
+  const { __brand, ext: parsedExt, ...data } = ref
+  return serialize('DataRef', data, ext ?? parsedExt)
+}
+
+/** The DataRef ID-field shape rule, shared by `parseDataRef` and the receipt's
+ * optional `data` field: bytes32 `uid`, address `resolvedBy`, positive safe-int
+ * `chainId`, v1 profile. Returns the failure detail, or `undefined` when valid. */
+function dataRefShapeError(d: Record<string, unknown>): string | undefined {
+  if (typeof d.uid !== 'string' || !/^0x[0-9a-fA-F]{64}$/.test(d.uid)) {
+    return `DataRef uid is not a bytes32 hex string (${String(d.uid)})`
+  }
+  if (typeof d.resolvedBy !== 'string' || !/^0x[0-9a-fA-F]{40}$/.test(d.resolvedBy)) {
+    return `DataRef resolvedBy is not an address (${String(d.resolvedBy)})`
+  }
+  if (typeof d.chainId !== 'number' || !Number.isSafeInteger(d.chainId) || d.chainId <= 0) {
+    return `DataRef chainId is not a positive integer (${String(d.chainId)})`
+  }
+  if (d.profile !== 'efs/v1') return `DataRef profile is not efs/v1 (${String(d.profile)})`
+  return undefined
+}
+
+/** Construct the branded {@link DataRef} from a SHAPE-VALIDATED payload record.
+ * Spread FIRST; every load-bearing field (including the brand) is set AFTER it
+ * so a crafted payload key can never clobber one. Shared by `parseDataRef` and
+ * the receipt's nested `data` — which must be REBUILT, never spread through:
+ * an external payload can omit or FORGE `__brand`, and passing it verbatim
+ * would violate the branded `WriteReceipt.data: DataRef` contract exactly
+ * where `parseDataRef` refuses to (r3740877070). */
+function brandDataRef(d: Record<string, unknown>): DataRef {
+  return {
+    ...(d as object),
+    __brand: 'DataRef',
+    profile: 'efs/v1',
+    uid: d.uid as DataRef['uid'],
+    chainId: d.chainId as number,
+    resolvedBy: d.resolvedBy as DataRef['resolvedBy'],
+  } as DataRef
+}
+
+/** Parse a persisted {@link DataRef}. Unknown payload keys are PRESERVED on the
+ * returned object (opaque-extension rule).
+ * @throws {UnsupportedArtifact} foreign profile / newer version.
+ * @throws {MalformedArtifact} structural failure. */
+export function parseDataRef(json: string): DataRef & { ext?: Record<string, unknown> } {
+  const env = parseEnvelope(json, 'DataRef')
+  const d = env.data
+  if (
+    typeof d.uid !== 'string' ||
+    typeof d.chainId !== 'number' ||
+    typeof d.resolvedBy !== 'string' ||
+    d.profile !== 'efs/v1'
+  ) {
+    throw new MalformedArtifact('DataRef payload missing uid/chainId/resolvedBy/profile')
+  }
+  // SHAPE-validate the ID fields before branding — a corrupted/foreign blob
+  // with `uid: "x"` or a fractional chainId must die HERE as MalformedArtifact
+  // (the promised boundary), not later as a misleading chain/ABI error deep in
+  // a read path that trusted the brand.
+  const shapeErr = dataRefShapeError(d)
+  if (shapeErr !== undefined) throw new MalformedArtifact(shapeErr)
+  return {
+    ...brandDataRef(d),
+    ...(env.ext !== undefined ? { ext: env.ext } : {}),
+  }
+}
+
+/** Serialize a {@link WriteReceipt} for DURABLE storage — the resume/recovery
+ * artifact (`steps` carries the landed UID map). Same `ext` rule as
+ * {@link serializeDataRef}: an omitted `ext` falls back to the receipt's own
+ * `.ext` bag (a parsed receipt), re-emitted at the ENVELOPE — never into the
+ * payload. */
+export function serializeWriteReceipt(
+  receipt: WriteReceipt & { ext?: Record<string, unknown> },
+  ext?: Record<string, unknown>,
+): string {
+  const { ext: parsedExt, ...data } = receipt
+  return serialize('WriteReceipt', data, ext ?? parsedExt)
+}
+
+/** Parse a persisted {@link WriteReceipt}. Bigint fields (none today; future
+ * ones ride the tagged encoding) revive as real bigints.
+ * @throws {UnsupportedArtifact} foreign profile / newer version.
+ * @throws {MalformedArtifact} structural failure. */
+export function parseWriteReceipt(json: string): WriteReceipt & { ext?: Record<string, unknown> } {
+  const env = parseEnvelope(json, 'WriteReceipt')
+  const d = env.data
+  if (!Array.isArray(d.steps) || typeof d.signatureCount !== 'number' || d.profile !== 'efs/v1') {
+    throw new MalformedArtifact('WriteReceipt payload missing steps/signatureCount/profile')
+  }
+  // Same strictness as parseDataRef (this is the RESUME/recovery artifact —
+  // a corrupt landed-UID map must fail the boundary, not a later replay):
+  // `typeof === 'number'` admits NaN/fractions; step uids must be bytes32.
+  if (!Number.isSafeInteger(d.signatureCount) || d.signatureCount < 0) {
+    throw new MalformedArtifact(
+      `WriteReceipt signatureCount is not a non-negative integer (${String(d.signatureCount)})`,
+    )
+  }
+  // The remaining REQUIRED WriteReceipt fields — a payload missing `mechanism`
+  // or `roles` would brand through and fail later at `receipt.roles.author`
+  // with a bare TypeError instead of the promised MalformedArtifact.
+  if (typeof d.mechanism !== 'string' || d.mechanism.length === 0) {
+    throw new MalformedArtifact(`WriteReceipt mechanism is not a string (${String(d.mechanism)})`)
+  }
+  const roles = d.roles as { author?: unknown; signer?: unknown; payer?: unknown } | undefined
+  const isAddr = (v: unknown): boolean => typeof v === 'string' && /^0x[0-9a-fA-F]{40}$/.test(v)
+  if (
+    typeof roles !== 'object' ||
+    roles === null ||
+    !isAddr(roles.author) ||
+    !isAddr(roles.signer) ||
+    !isAddr(roles.payer) ||
+    ((roles as { submitter?: unknown }).submitter !== undefined &&
+      !isAddr((roles as { submitter?: unknown }).submitter))
+  ) {
+    throw new MalformedArtifact(
+      'WriteReceipt roles missing/malformed (author/signer/payer must be addresses; submitter, when present, too)',
+    )
+  }
+  for (const step of d.steps as unknown[]) {
+    if (
+      typeof step !== 'object' ||
+      step === null ||
+      typeof (step as { id?: unknown }).id !== 'string' ||
+      typeof (step as { done?: unknown }).done !== 'boolean'
+    ) {
+      throw new MalformedArtifact('WriteReceipt step missing id/done')
+    }
+    const uid = (step as { uid?: unknown }).uid
+    if (uid !== undefined && (typeof uid !== 'string' || !/^0x[0-9a-fA-F]{64}$/.test(uid))) {
+      throw new MalformedArtifact(
+        `WriteReceipt step uid is not a bytes32 hex string (${String(uid)})`,
+      )
+    }
+  }
+  // Known OPTIONAL typed fields validate when PRESENT — a malformed `data`
+  // (fake DataRef), non-canonical `contentHash`, or mistyped `status`/`gasless`/
+  // `reason` must not brand through and fail later where code trusts the types.
+  // Genuinely UNKNOWN keys still pass verbatim (the opaque-extension rule).
+  if (d.data !== undefined) {
+    if (typeof d.data !== 'object' || d.data === null) {
+      throw new MalformedArtifact('WriteReceipt data is not an object')
+    }
+    const refErr = dataRefShapeError(d.data as Record<string, unknown>)
+    if (refErr !== undefined) throw new MalformedArtifact(`WriteReceipt data: ${refErr}`)
+  }
+  if (
+    d.contentHash !== undefined &&
+    (typeof d.contentHash !== 'string' || asContentHash(d.contentHash) === undefined)
+  ) {
+    throw new MalformedArtifact(
+      `WriteReceipt contentHash is not a canonical multihash string (${String(d.contentHash)})`,
+    )
+  }
+  if (d.status !== undefined && typeof d.status !== 'string') {
+    throw new MalformedArtifact(`WriteReceipt status is not a string (${String(d.status)})`)
+  }
+  if (d.gasless !== undefined && typeof d.gasless !== 'boolean') {
+    throw new MalformedArtifact(`WriteReceipt gasless is not a boolean (${String(d.gasless)})`)
+  }
+  if (d.reason !== undefined) {
+    const r = d.reason as { selected?: unknown; why?: unknown } | null
+    if (
+      typeof r !== 'object' ||
+      r === null ||
+      typeof r.selected !== 'string' ||
+      typeof r.why !== 'string'
+    ) {
+      throw new MalformedArtifact('WriteReceipt reason is not { selected, why } strings')
+    }
+    // `why` is a CLOSED union on the public type — branding an unknown literal
+    // through would break exhaustive switches; and `selected` documents itself
+    // as mirroring `mechanism`, so an inconsistent pair is corruption.
+    const WHYS = [
+      'in-account-routine',
+      'no-in-account-adapter',
+      'dependent-dag-needs-sequential',
+      'fell-back-from-5792',
+    ] as const
+    if (!(WHYS as readonly string[]).includes(r.why)) {
+      throw new MalformedArtifact(
+        `WriteReceipt reason.why is not one of the closed literals (${r.why})`,
+      )
+    }
+    if (r.selected !== d.mechanism) {
+      throw new MalformedArtifact(
+        `WriteReceipt reason.selected (${r.selected}) does not mirror mechanism (${String(d.mechanism)})`,
+      )
+    }
+  }
+  return {
+    ...(d as unknown as WriteReceipt),
+    profile: 'efs/v1',
+    // The nested ref is REBUILT from its validated shape — never spread
+    // through — so its brand/profile are OURS even when the payload omitted or
+    // forged them.
+    ...(d.data !== undefined ? { data: brandDataRef(d.data as Record<string, unknown>) } : {}),
+    ...(env.ext !== undefined ? { ext: env.ext } : {}),
+  }
+}

@@ -1,0 +1,5 @@
+---
+"@efs/sdk": patch
+---
+
+Five review fixes: completed on-chain storage now survives EVERY attestation-phase failure — a first-layer preflight abort/chain-guard failure (which escapes the submitter raw because nothing attested yet) is wrapped into a `WriteNotSentError` carrying `storage` when the deploys landed, instead of losing the reusable URI; the `/tags/system` lookup in `setOverview` and the `/transports/<scheme>` lookup in `mirrors.add` both route through the chain-guarded planning client (the last two raw-client planning reads); `OverviewOptions` now includes the fetch controls the overview read actually honors (`signal`, gateways, `fetchImpl`, host policy, `transports` — `maxBytes` stays excluded, the render ceiling is fixed); and a broadcast REDIRECT revoke whose receipt cannot be confirmed throws the new `RevokeUnconfirmed` carrying `revokeTx` (the revoke may still mine; a blind resend REVERTS as AlreadyRevoked once it does) — distinct from a confirmed revert (raw `ContractReverted`) and from `IndexingIncomplete`.

@@ -1,0 +1,5 @@
+---
+"@efs/sdk": patch
+---
+
+Four review fixes: the declared `size` claim no longer clamps the transport cap — an under-declared size (size 1, two-byte matching body) previously made every mirror abort and the read UNAVAILABLE (`AllMirrorsFailed`) instead of the documented `verification: 'mismatch'`; the claim is now a uniform post-fetch consistency check while the safety ceiling stays the caller/default cap. The folder-visibility TAG walk sweeps the FULL ancestor chain instead of short-circuiting at the first tagged node — "first tagged ⇒ all above tagged" doesn't survive TAG revocation, so a hole above a tagged descendant (revoked `/a` over tagged `/a/b`) was never repaired and the branch stayed invisible from the root listing (every read was already fetched; the sweep is free). `OnchainStoreIncomplete` now also wraps the MANAGER receipt leg (optional `managerTx` field) — a failed manager wait or missing contract address previously surfaced without the landed chunk state. And `readWeb3Bytes` re-checks the abort signal between `chunkAddress` and `getCode` (an abort during the pending address read no longer starts more RPC work).

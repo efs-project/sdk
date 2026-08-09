@@ -1,0 +1,85 @@
+{
+  "name": "@efs/sdk",
+  "version": "0.0.0",
+  "description": "TypeScript SDK for the Ethereum File System (EFS)",
+  "license": "MIT",
+  "type": "module",
+  "sideEffects": false,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/efs-project/sdk.git",
+    "directory": "packages/sdk"
+  },
+  "files": ["dist"],
+  "publishConfig": { "access": "public", "provenance": true },
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    },
+    "./eas": {
+      "import": {
+        "types": "./dist/eas/index.d.ts",
+        "default": "./dist/eas/index.js"
+      },
+      "require": {
+        "types": "./dist/eas/index.d.cts",
+        "default": "./dist/eas/index.cjs"
+      }
+    },
+    "./lenses": {
+      "import": {
+        "types": "./dist/lenses/index.d.ts",
+        "default": "./dist/lenses/index.js"
+      },
+      "require": {
+        "types": "./dist/lenses/index.d.cts",
+        "default": "./dist/lenses/index.cjs"
+      }
+    },
+    "./chain": {
+      "import": {
+        "types": "./dist/chain/index.d.ts",
+        "default": "./dist/chain/index.js"
+      },
+      "require": {
+        "types": "./dist/chain/index.d.cts",
+        "default": "./dist/chain/index.cjs"
+      }
+    },
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "size": "size-limit",
+    "knip": "knip"
+  },
+  "peerDependencies": {
+    "viem": "^2"
+  },
+  "peerDependenciesMeta": {
+    "viem": { "optional": false }
+  },
+  "devDependencies": {
+    "@size-limit/preset-small-lib": "12.1.0",
+    "knip": "6.16.1",
+    "prool": "0.0.16",
+    "size-limit": "12.1.0",
+    "tsup": "8.5.1",
+    "typescript": "5.9.3",
+    "viem": "2.52.2",
+    "vitest": "2.1.9"
+  }
+}

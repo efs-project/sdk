@@ -1,0 +1,10 @@
+[
+  {
+    "name": "@efs/sdk ESM (gzip, viem external) — 69 kB headroom for the foundational ReadSource/trust work (ADR-0014/0015) and the behavioral phases; deliberately loose pre-launch, tighten before 1.0",
+    "path": "dist/index.js",
+    "import": "*",
+    "ignore": ["viem"],
+    "gzip": true,
+    "limit": "69 kB"
+  }
+]

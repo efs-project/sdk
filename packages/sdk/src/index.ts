@@ -1,0 +1,1726 @@
+/**
+ * @efs/sdk — TypeScript SDK for the Ethereum File System (EFS).
+ *
+ * Resource-namespaced client (Decision F): `efs.fs.*` (files), `efs.lenses.*`,
+ * `efs.eas.*` (viem-native EAS), `efs.raw.*` (deployment escape hatch). Write
+ * capability is gated at the TYPE level — a client built without a `walletClient`
+ * doesn't expose `efs.fs.write`/`preview`/`batch` (viem's read/write split).
+ * Unbuilt methods reject with `NotImplemented`, locking signatures before publish.
+ *
+ * Namespaces from the full design not yet on the client (`graph`/`props`/`lists`/
+ * `sorts`) are additive — adding a top-level namespace is non-breaking — and are
+ * designed in a dedicated pass; the option/return/pagination/batch *seams* below
+ * are the ones that would force a breaking change, so they exist now.
+ */
+
+import {
+  type Account,
+  type Address,
+  type Chain,
+  type EIP1193Provider,
+  type Hex,
+  type PublicClient,
+  type WalletClient,
+  createPublicClient,
+  createWalletClient,
+  custom,
+} from 'viem'
+import { indexAbi, indexRevocationAbi, isIndexedAbi, isRevokedAbi } from './chain/abi/indexer.js'
+import {
+  type DeploymentsMap,
+  type EfsDeployment,
+  resolveDeployment,
+  verifyDeployment,
+} from './chain/deployments.js'
+import { type DecodedAttestation, decodeAttestation } from './decode.js'
+import {
+  type AttestationRequest,
+  type MultiAttestationRequest,
+  SchemaEncoder,
+  computeAttestationUID,
+  easAbi,
+  schemaRegistryAbi,
+  verifyAttestationUID,
+} from './eas/index.js'
+import { type EasVerbs, type RevocationRequest, makeEasVerbs } from './eas/verbs.js'
+import {
+  EfsError,
+  IndexSendUnknown,
+  IndexUnconfirmed,
+  NotImplemented,
+  WalletRequired,
+  classifyError,
+  isDefiniteSendRefusal,
+} from './errors.js'
+import { toJSON } from './json.js'
+import { type Lens, identity, lens, resolveLens } from './lenses/resolve.js'
+import {
+  type EfsRawContracts,
+  type EfsRawReadContracts,
+  buildRawContracts,
+} from './raw/contracts.js'
+import {
+  type HasSourceUIDs,
+  type HydratedItem,
+  attestationsFor as attestationsForItems,
+} from './reads/attestations.js'
+import type { ReadContext } from './reads/context.js'
+import {
+  type ParseSchema,
+  readBytes as readBytesFile,
+  read as readFile,
+  readJson as readJsonFile,
+  readText as readTextFile,
+} from './reads/fetch.js'
+import { exists as existsRead, info as infoRead, locate as locateRead } from './reads/file.js'
+import { list as listRead } from './reads/list.js'
+import {
+  getList as getListRead,
+  listEntries as listEntriesRead,
+  listHas as listHasRead,
+  listLength as listLengthRead,
+} from './reads/lists.js'
+import { overview as overviewRead } from './reads/overview.js'
+import { resolvePathToAnchor } from './reads/resolve.js'
+import {
+  type SortInfo,
+  type SortReadOptions,
+  applySort as applySortRead,
+  getSort as getSortRead,
+} from './reads/sorts.js'
+import type {
+  AccountCapabilities,
+  Attestation,
+  BatchReceipt,
+  DataRef,
+  DirEntry,
+  EfsFile,
+  EfsList,
+  ExpandToken,
+  Expanded,
+  FetchOptions,
+  FileInfo,
+  ListConfig,
+  ListEntry,
+  ListGetOptions,
+  ListOptions,
+  ListReadOptions,
+  OverviewOptions,
+  OverviewResult,
+  PreviewOptions,
+  ReadOpts,
+  ReadResult,
+  WriteConfig,
+  WriteEstimate,
+  WriteOptions,
+  WriteReceipt,
+} from './types.js'
+import {
+  type DetectClient,
+  detectAccount,
+  invalidateAccountProfile,
+  toCapabilities,
+} from './writes/detect.js'
+import type { EdgeSubmitContext } from './writes/edge-submit.js'
+import { type FileWriteContext, writeFileTier1 } from './writes/file.js'
+import { type ListsWriteNs, makeListsWriteNs } from './writes/lists.js'
+import { type MirrorsNs, makeMirrorsNs } from './writes/mirrors.js'
+import { setOverview as setOverviewWrite } from './writes/overview.js'
+import { type PinsNs, makePinsNs } from './writes/pins.js'
+import { type PropsNs, makePropsNs } from './writes/props.js'
+import { type RedirectsNs, makeRedirectsNs } from './writes/redirects.js'
+import { type TagsNs, makeTagsNs } from './writes/tags.js'
+
+/**
+ * The SDK's boundary is the **standard** (EIP-1193 provider + EIP-155 chain), not
+ * a library (ADR-0009 / docs/specs/standards.md). viem is the engine *inside* —
+ * we wrap the provider with viem's `custom()` transport. Any wallet (MetaMask,
+ * WalletConnect, Coinbase, hardware, embedded) is an EIP-1193 provider, so all of
+ * them work; a future ethers/other adapter just produces a provider, no break.
+ */
+
+/** Shared config. */
+type CommonConfig = {
+  /** Override the built-in registry to point at a custom/local deployment. */
+  deployments?: DeploymentsMap
+  /** Default lens when a read passes none (resolves to the connected account). */
+  defaultLens?: Lens
+  /**
+   * Client-level write defaults. Notably `write.onchainAutoLimit` — the byte cap
+   * under which a no-mirrors `fs.write` auto-stores the bytes on-chain (SSTORE2 +
+   * a `web3://` mirror); over it throws `PayloadTooLarge`. Default 16 KB.
+   */
+  write?: WriteConfig
+  /**
+   * RESERVED (ADR-0014, Fork 2) — an injected `fetch` for runtimes with no global `fetch`
+   * (Ring-3 sandboxed apps) or that need a proxy/auth/rate-limit wrapper. **Not yet honored
+   * at the client level** — passing it throws `NotImplemented` (an explicit "reserved" signal,
+   * never a silent no-op). The shape is reserved so future work plugs in here rather than
+   * hardcoding `globalThis.fetch`. (Per-call `FetchOptions.fetchImpl` already exists for the
+   * off-chain fetch engine.) */
+  fetch?: typeof fetch
+  /**
+   * RESERVED (ADR-0014, Fork 2) — a pluggable signature {@link SignatureVerifier} for
+   * non-ECDSA attester keys (firmware/PGP/ed25519) and Ring-3 brokered crypto. **Not yet
+   * honored** — passing it throws `NotImplemented`. Reserved so a verifier registry plugs in
+   * here instead of the read path hardcoding ECDSA recovery. */
+  verifier?: SignatureVerifier
+}
+
+/**
+ * RESERVED (ADR-0014, Fork 2): a pluggable signature verifier. Not yet honored — see
+ * {@link CommonConfig.verifier}. The shape is fixed so future non-ECDSA / brokered-crypto
+ * work has a stable seam.
+ */
+export type SignatureVerifier = {
+  /** Verify an attester's signature over a digest. */
+  verify(args: { attester: Address; digest: Hex; signature: Hex }): boolean | Promise<boolean>
+}
+
+/** Standard form: an EIP-1193 provider + the chain. Pass an `account` to enable writes. */
+export type ProviderConfig = CommonConfig & {
+  /** Any EIP-1193 provider — `window.ethereum`, a WalletConnect session, a viem
+   * client's transport, etc. The durable, library-neutral input. */
+  provider: EIP1193Provider
+  /** The chain (EIP-155) the provider talks to. */
+  chain: Chain
+  /** The signing account for writes; omit for a read-only client. */
+  account?: Address | Account
+}
+
+/** Convenience form: pre-configured viem clients (for viem-native callers). */
+export type ViemConfig = CommonConfig & {
+  publicClient: PublicClient
+  /** Required for writes; presence gates write methods at the type level. */
+  walletClient?: WalletClient
+}
+
+export type EfsClientConfig = ProviderConfig | ViemConfig
+
+/** Normalize either config form to the viem clients the SDK uses internally. */
+function resolveClients(config: EfsClientConfig): {
+  publicClient: PublicClient
+  walletClient: WalletClient | undefined
+} {
+  if ('provider' in config) {
+    const transport = custom(config.provider)
+    // Opt into Multicall3 coalescing for the SDK-constructed client (sdk-read-surface
+    // §Batching): viem's `batch.multicall` is OFF by default, so concurrent
+    // `readContract`s fired in the same tick (every internal bulk path uses
+    // `Promise.all`) coalesce into one aggregate3. NOT imposed on a user-supplied
+    // `publicClient` (the ViemConfig path below) — batching is their call there.
+    const publicClient = createPublicClient({
+      chain: config.chain,
+      transport,
+      batch: { multicall: true },
+    })
+    const walletClient =
+      config.account !== undefined
+        ? createWalletClient({ chain: config.chain, account: config.account, transport })
+        : undefined
+    return { publicClient, walletClient }
+  }
+  return { publicClient: config.publicClient, walletClient: config.walletClient }
+}
+
+/** Read-only file operations (sdk-read-surface verbs). */
+export type EfsFsRead = {
+  /** The file's content. Accepts a PATH or a {@link DataRef} (folds in the old
+   * `fetch(ref)`). Returns an {@link EfsFile} with `bytes` + pure `.text()`/`.json()`
+   * + trust-relative `verification` + `hashAuthor`. Throws `FileNotFoundError` when a
+   * PATH resolves to nothing — including a REVOKED placement (lens-scoped views are
+   * active-only, so revocation reads as absence). Generic
+   * over `expand`: `expand:['attestations']` makes `.attestations` non-optional. */
+  read<const E extends readonly ExpandToken[] = []>(
+    pathOrRef: string | DataRef,
+    opts?: ReadOpts<E> & FetchOptions,
+  ): Promise<Expanded<EfsFile, E>>
+  /** Sugar → the bare UTF-8 string. FAIL-CLOSED: throws `ContentHashMismatch`/
+   * `MalformedClaim` on a verification problem unless `{verify:false}`. */
+  readText(path: string, opts?: ReadOpts & FetchOptions): Promise<string>
+  /** Sugar → the bare bytes. Fail-closed (see {@link EfsFsRead.readText}). */
+  readBytes(path: string, opts?: ReadOpts & FetchOptions): Promise<Uint8Array>
+  /** Sugar → the parsed JSON value. Fail-closed; optional `schema` (e.g. zod) narrows. */
+  readJson<T = unknown>(
+    path: string,
+    opts?: ReadOpts & FetchOptions & { schema?: ParseSchema<T> },
+  ): Promise<T>
+  /** The pointer: which DATA/version + winning attester, no bytes. `null` when
+   * nothing is placed under the lens (a normal absence). Renamed from `resolve`. */
+  locate(path: string, opts?: ReadOpts): Promise<ReadResult | null>
+  /** Flat metadata DTO (sdk-read-surface). Always returns a {@link FileInfo}; absence
+   * is `exists:false`. Provenance is always present and never projected away; `fields`
+   * projects the value payload; `expand` opts into nested records. Generic over
+   * `expand`: `expand:['attestations']` makes `.attestations` non-optional. */
+  info<const E extends readonly ExpandToken[] = []>(
+    path: string,
+    opts?: ReadOpts<E>,
+  ): Promise<Expanded<FileInfo, E>>
+  /** Cheap presence probe. Never throws except on network error (or `LensRequired`). */
+  exists(path: string, opts?: ReadOpts): Promise<boolean>
+  list(path: string, opts?: ListOptions): EfsList<DirEntry>
+  /** The folder Overview (`README.md`) for `path`, resolved by exact path — never
+   * a directory scan (ADR-0011). Returns a discriminated `OverviewResult`
+   * (`none` when absent). Folder-scoped: a file path has no Overview. */
+  overview(path: string, opts?: OverviewOptions): Promise<OverviewResult>
+}
+
+/** Read + write file operations (only present when a `walletClient` is set). */
+export type EfsFsWrite = EfsFsRead & {
+  write(path: string, content: Uint8Array, opts?: WriteOptions): Promise<WriteReceipt>
+  preview(path: string, content: Uint8Array, opts?: PreviewOptions): Promise<WriteEstimate>
+  /** Author/replace the folder Overview at `container`: composes the upload
+   * pipeline and applies the `system` TAG *before* placement, so an interrupted
+   * write never exposes a visible untagged README (ADR-0011). Folder-scoped. */
+  setOverview(container: string, markdown: string, opts?: WriteOptions): Promise<WriteReceipt>
+}
+
+export type EfsLensesNs = {
+  resolve(input: Lens | Address): Promise<readonly Address[]>
+  lens: typeof lens
+  identity: typeof identity
+}
+
+/**
+ * The `efs.lists.*` namespace — read surface for curated collections (LISTs;
+ * ADR-0044/0046). Reads only; the write primitives are authored via the Solidity
+ * SDK / EAS verbs. Available on read-only and write clients alike (no wallet needed).
+ *
+ *   - `get(listUID, { lens? })` — the LIST config + identity (`getMode`). NOT
+ *     lens-scoped (the config is the curator's declaration); `exists:false` when
+ *     absent (a probe — never throws on absence).
+ *   - `entries(listUID, { lens?, limit?, cursor? })` — the lens-scoped, ordered,
+ *     deduped entries as an {@link EfsList} (first-attester-wins; dedupe honors the
+ *     list's `allowsDuplicates`; target decoded per `targetType`). Throws
+ *     `ListNotFound` (on first read) when no LIST exists.
+ *   - `length(listUID, { lens? })` / `has(listUID, target, { lens? })` — O(1) count
+ *     and membership for the resolved lens attester. Both throw `ListNotFound`.
+ */
+export type EfsListsNs = {
+  get(listUID: Hex, opts?: ListGetOptions): Promise<ListConfig>
+  entries(listUID: Hex, opts?: ListReadOptions): EfsList<ListEntry>
+  length(listUID: Hex, opts?: ListReadOptions): Promise<bigint>
+  has(listUID: Hex, target: Address | Hex, opts?: ListReadOptions): Promise<boolean>
+}
+
+/**
+ * The write-capable `efs.lists.*` namespace — the read verbs plus the LIST write
+ * primitives (`create`/`add`/`remove`), present only on a write-capable client (they
+ * author attestations as the connected wallet). Mirrors the Solidity `EFSLib`
+ * wrappers' encodings and routes through the same Submitter seam as `fs.write`.
+ *
+ *   - `create(config)` → `WriteReceipt & { listUID }` — mint a LIST (one signature);
+ *     validates the resolver invariants client-side BEFORE submit.
+ *   - `add(listUID, target, { targetType? })` → `WriteReceipt` — add a LIST_ENTRY,
+ *     routed by the list's targetType (read once, or hinted to skip the read).
+ *   - `remove(entryUID, { listUID? })` → `Hex` — revoke a LIST_ENTRY; rejects an
+ *     append-only list up front (typed error, no chain round-trip) when `listUID` is
+ *     supplied.
+ */
+export type EfsListsWriteNs = EfsListsNs & ListsWriteNs
+
+/**
+ * The `efs.sorts.*` namespace — read surface for SORT overlays (sorted views over
+ * kernel child arrays).
+ *
+ * @experimental — DEFERRED. SORT_INFO is not yet in the frozen schema set /
+ * deployments registry, so every verb throws `NotImplemented` with a pointer (the
+ * on-chain encoding could still change; the SDK does not guess it). The namespace +
+ * signatures are present so the real implementation lands additively. Use
+ * `efs.lists.*` for curated ordering today.
+ */
+export type EfsSortsNs = {
+  /** @experimental — throws `NotImplemented` until SORT_INFO is frozen + deployed. */
+  get(sortInfoUID: Hex, opts?: SortReadOptions): Promise<SortInfo>
+  /** @experimental — throws `NotImplemented` until SORT_INFO is frozen + deployed. */
+  apply(parentAnchor: Hex, sortInfoUID: Hex, opts?: SortReadOptions): Promise<never>
+}
+
+/**
+ * The `efs.account.*` namespace (sdk-wallet-architecture §Public surface) —
+ * read-by-default account introspection over the execution seam. Present only on a
+ * write-capable client (it answers questions about the SIGNING account). Today just
+ * the curated capability read; `foreignDelegation()`/`revokeDelegation()` land with
+ * the deferred AA slice.
+ */
+export type EfsAccountNs = {
+  /**
+   * The curated {@link AccountCapabilities} for the connected signing account
+   * (`canOneSig`/`gasless`/`sponsored`/`kind`). Runs `detectAccount` lazily
+   * (`getCode` + the wallet's `getCapabilities` when supported) and caches the
+   * profile per `(address, chainId)` within the connector, so this is NOT on
+   * the write hot path — a `fs.write` never triggers it. Tolerant of a wallet
+   * without `getCapabilities`.
+   *
+   * The probed inputs are MUTABLE on-chain state: deploying a counterfactual
+   * smart account or adding/removing an EIP-7702 delegation changes the
+   * account's code — and with it `kind` and the capability profile — WITHOUT
+   * changing the cache key, so the cached profile goes stale. Pass
+   * `{ refresh: true }` after such a transition (or from a UI "re-check"
+   * affordance) to drop the cached profile and re-probe live state. This is
+   * the client-level invalidation lever: provider-form callers cannot reach
+   * the internally-created wallet object that scopes the cache.
+   */
+  capabilities(opts?: { refresh?: boolean }): Promise<AccountCapabilities>
+}
+
+/** Read-capable EAS namespace: the pure tools + raw `getAttestation` (no wallet). */
+export type EfsEasReadNs = {
+  encoder(schema: string): SchemaEncoder
+  computeUID: typeof computeAttestationUID
+  verifyUID: typeof verifyAttestationUID
+  abi: { eas: typeof easAbi; schemaRegistry: typeof schemaRegistryAbi }
+  /** Batched hydrate (sdk-read-surface §Trust escalation): one coalesced multicall
+   * of `getAttestation(uid)` over every source UID across `items`, `allowFailure`-
+   * style (a revoked/absent UID degrades per-item, never failing the batch). Also
+   * backs `expand:['attestations']`. */
+  attestationsFor(
+    items: readonly HasSourceUIDs[],
+    opts?: { withSchema?: boolean },
+  ): Promise<HydratedItem[]>
+  /** Raw EAS read: `getAttestation(uid)` → the typed {@link Attestation}, or
+   * `undefined` when the UID is absent (the zero record). Available always. */
+  getAttestation: EasVerbs['getAttestation']
+}
+
+/** Full EAS namespace (a `walletClient` was supplied): read tools + the raw write
+ * verbs (`attest`/`multiAttest`/`revoke`), each routed through `classifyError`. */
+export type EfsEasNs = EfsEasReadNs & {
+  /** Submit one `attest` over the connected wallet; resolves to the tx hash. */
+  attest: EasVerbs['attest']
+  /** Submit one `multiAttest` (grouped by schema); resolves to the tx hash. */
+  multiAttest: EasVerbs['multiAttest']
+  /** Revoke an attestation (only the original attester may); resolves to the tx hash. */
+  revoke: EasVerbs['revoke']
+}
+
+/** The `efs.decode` bridge: raw {@link Attestation} (or a UID) → the SDK's typed,
+ * discriminated view. Synchronous when given an attestation (pure); async when
+ * given a UID (reads `getAttestation` first, then decodes). */
+export type EfsDecodeNs = {
+  /** Decode an already-read raw attestation into the typed view (pure, sync). */
+  (attestation: Attestation): DecodedAttestation
+  /** Read `getAttestation(uid)` then decode; `null` when the UID is absent. */
+  (uid: Hex): Promise<DecodedAttestation | null>
+}
+
+/** Read-capable `raw` namespace: the deployment + the pre-wired read-only contract
+ * instances (write methods absent until a wallet is supplied — see {@link EfsRawNs}). */
+export type EfsRawReadNs = EfsRawReadContracts & {
+  deployment(): EfsDeployment
+  /**
+   * Run the full deployment trust gate: bytecode presence **then** schema-UID
+   * authenticity (each of the nine frozen UIDs is read from its authoritative
+   * on-chain getter and compared to the registry; ADR-0005 / review P1 #9).
+   * Opt-in — call it once after wiring a custom `deployments` override.
+   * Resolves on success; rejects with `EfsError` (no bytecode) or
+   * `SchemaMismatchError` (a UID the deployment claims doesn't match chain).
+   */
+  verifyDeployment(): Promise<void>
+}
+
+/** The wallet-backed `raw` namespace: the same deployment/verify surface with
+ * contract instances that ALSO carry `.write.*` (viem's getContract with a
+ * wallet). Distinct from {@link EfsRawReadNs} so the type gate is real — a
+ * read-only client's instances have NO `.write` at the type level, matching
+ * the runtime (viem generates none without a wallet). */
+export type EfsRawNs = EfsRawContracts & {
+  deployment(): EfsDeployment
+  /** See {@link EfsRawReadNs.verifyDeployment}. */
+  verifyDeployment(): Promise<void>
+}
+
+// Read-only VIEWS of the standalone graph/value namespaces. Their read verbs are lens-scoped
+// and need no wallet, so a read-only client exposes them; the write verbs (add/remove/set/
+// place/unplace) are added back only on the full `EfsClient`. Derived via `Pick` from the full
+// namespace types so the read signatures never drift from the implementations.
+/** Read-only `graph.tags`: `active`/`list` (no `add`/`remove`). */
+export type TagsReadNs = Pick<TagsNs, 'active' | 'list'>
+/** Read-only `graph.pins`: `active` (no `place`/`unplace`). */
+export type PinsReadNs = Pick<PinsNs, 'active'>
+/** Read-only `efs.graph.*` (no wallet): `tags.active/list` + `pins.active`. */
+export type EfsGraphReadNs = { tags: TagsReadNs; pins: PinsReadNs }
+/** Read-only `props`: `get`/`list` (no `set`). */
+export type PropsReadNs = Pick<PropsNs, 'get' | 'list'>
+/** Read-only `mirrors`: `list` (no `add`/`remove`). */
+export type MirrorsReadNs = Pick<MirrorsNs, 'list'>
+/** Read-only `redirects`: the lens-scoped read verbs — selected-record `get`,
+ * discovery `list`, `sameAs` canonicalization, and the deliberate
+ * `supersededBy` history walk (no `set`/`remove`). */
+export type RedirectsReadNs = Pick<RedirectsNs, 'get' | 'list' | 'canonical' | 'history'>
+
+/** Read-capable client (no `walletClient`). The `eas`/`raw` escape hatches are
+ * read-only here (no write verbs / no `.write.*` on the raw instances), and the standalone
+ * graph/value namespaces expose only their lens-scoped READ verbs (the mutators appear on
+ * the full {@link EfsClient}). */
+export type EfsReadClient = {
+  /** The protocol profile this client implements: the EFS **v1** profile —
+   * 9 frozen EAS schemas, chain-bound deployment, EAS UIDs as identity
+   * (ADR-0019). A v2 client will carry its own literal; branch on this, never
+   * on duck-typing. */
+  readonly profile: 'efs/v1'
+  fs: EfsFsRead
+  lenses: EfsLensesNs
+  /** Curated-collection reads (`efs.lists.*`); no wallet required. */
+  lists: EfsListsNs
+  /** SORT overlay reads (`efs.sorts.*`); @experimental — deferred, throws today. */
+  sorts: EfsSortsNs
+  eas: EfsEasReadNs
+  raw: EfsRawReadNs
+  /** Standalone graph-edge READS (no wallet): `graph.tags.active/list`, `graph.pins.active`. */
+  graph: EfsGraphReadNs
+  /** Standalone PROPERTY READS (no wallet, lens-scoped): `props.get`/`props.list`. */
+  props: PropsReadNs
+  /** Standalone MIRROR READS (no wallet, lens-scoped): `mirrors.list`. */
+  mirrors: MirrorsReadNs
+  /** REDIRECT active-record READ (no wallet, lens-scoped): `redirects.get`. */
+  redirects: RedirectsReadNs
+  /** Round-trip bridge: raw {@link Attestation} (or a UID) → the typed view. */
+  decode: EfsDecodeNs
+  /**
+   * Serialize an EFS result to a JSON string with `bigint`s (file `size`, tag
+   * weights, list `maxEntries`, estimate `gas`, …) rendered as decimal strings —
+   * bare `JSON.stringify` THROWS on a bigint. Convenience over the exported
+   * {@link jsonReplacer}; see its note on the lossy round-trip (bigints come back as
+   * strings, not bigints). Pure + stateless; present on read-only clients too.
+   */
+  toJSON(value: unknown, space?: number | string): string
+}
+
+/**
+ * The `efs.graph.*` namespace — the standalone graph-edge write primitives that sit
+ * alongside `fs.write` (completeness P1-1). Present only on a write-capable client
+ * (they author attestations as the connected wallet). `tags` is the TAG edge
+ * (add/remove + reads); `pins` is the cardinality-1 placement PIN (place/unplace +
+ * the active read). Both route through the same Submitter seam as `fs.write`.
+ */
+export type EfsGraphNs = {
+  tags: TagsNs
+  pins: PinsNs
+}
+
+/** Full client (a `walletClient` was supplied): reads + writes + batching. The
+ * `eas` namespace gains the raw write verbs; `raw` instances gain `.write.*`. */
+export type EfsClient = EfsReadClient & {
+  fs: EfsFsWrite
+  eas: EfsEasNs
+  raw: EfsRawNs
+  /** Account introspection over the execution seam (read-by-default). */
+  account: EfsAccountNs
+  /** Standalone graph-edge writes: `graph.tags.*` (TAG) + `graph.pins.*` (PIN). */
+  graph: EfsGraphNs
+  /** Standalone PROPERTY value writes: `props.{set,get,list}`. */
+  props: PropsNs
+  /** Standalone MIRROR (retrieval-method) writes: `mirrors.{add,remove,list}` — add a
+   * retrieval URI to an existing DATA (file-write publishes mirrors inline; this is the
+   * after-the-fact verb). */
+  mirrors: MirrorsNs
+  /** REDIRECT (alias) primitive (ADR-0050 + the ratified specs/09 read
+   * semantics): `redirects.{set,remove,get,list,canonical,history}`. Path-level
+   * SYMLINK following is on `efs.fs.locate`/`read` via `{ followRedirects }`;
+   * `canonical`/`history` are the sameAs/supersededBy layers (never followed). */
+  redirects: RedirectsNs
+  /** Curated-collection reads + writes (`efs.lists.*`): the read verbs plus
+   * `create`/`add`/`remove` (LIST / LIST_ENTRY). */
+  lists: EfsListsWriteNs
+  /**
+   * Permissionless indexing REPAIR (`EFSIndexer.index`/`indexRevocation`, both
+   * idempotent): completes a `redirects.set`/`remove` whose follow-up indexing
+   * tx failed ({@link import('./errors.js').IndexingIncomplete} carries the
+   * UID), and makes any third-party/foreign attestation of a non-auto-indexed
+   * schema discoverable. Safe from ANY funded account — indexing never changes
+   * the attester (lens-neutral), so a relayer/sponsor may run it. Reads the
+   * EAS + indexer state and sends whichever leg is missing (or no-ops). */
+  index(uid: Hex): Promise<IndexRepairResult>
+  /** Compose a multi-operation write delivered with one signature where possible. */
+  batch(): { execute(): Promise<BatchReceipt> }
+}
+
+/** The outcome of an `efs.index(uid)` repair. */
+export type IndexRepairResult = {
+  /** `indexed` — the discovery index() leg was sent; `revocation-indexed` — the
+   * revocation-mirror leg was sent; `already-indexed` — nothing to do. */
+  status: 'indexed' | 'revocation-indexed' | 'already-indexed'
+  /** The repair tx hash (absent on `already-indexed`). */
+  txHash?: Hex
+}
+
+function chainIdOf(publicClient: PublicClient): number {
+  const id = publicClient.chain?.id
+  if (id === undefined) {
+    throw new EfsError('publicClient has no `chain` set — cannot resolve the EFS deployment.', {
+      code: 'DeploymentNotFound',
+    })
+  }
+  return id
+}
+
+/**
+ * Fail closed when the wallet would write to a DIFFERENT chain than the EFS deployment.
+ * The deployment (contract addresses + schema UIDs) is resolved from the PUBLIC client's
+ * chain, but `writeContract` runs on the WALLET's chain. If they differ — a `ViemConfig`
+ * with a public client on one chain and a wallet bound or connected to another — the
+ * EAS/storage txs would be sent on the wallet chain to the public chain's addresses, and
+ * receipts awaited on the public chain (a silent cross-chain write). Queries the wallet's
+ * LIVE connected chain (`getChainId()` → `eth_chainId`) — NOT the bound `wallet.chain`,
+ * which can go stale if an injected wallet switches networks after the client is built.
+ */
+/**
+ * Throw `WrongChain` unless `client`'s LIVE chain (`getChainId()` → `eth_chainId`) matches
+ * the EFS deployment's chain. The deployment (addresses + UIDs) is resolved from the public
+ * client's chain, but the actual call lands on the provider's CURRENT chain — which a bound
+ * `chain` can't reflect after an injected wallet switches networks. Unlike
+ * {@link assertWalletOnDeploymentChain} there is NO bound-account early-return: the op can
+ * proceed regardless of a bound account (a raw `.write.*` with a per-call `account`, or a
+ * raw read), so the chain must be checked unconditionally.
+ */
+async function assertChainMatches(
+  client: { getChainId(): Promise<number> },
+  deploymentChainId: number,
+): Promise<void> {
+  const liveChainId = await client.getChainId()
+  if (liveChainId !== deploymentChainId) {
+    throw new EfsError(
+      `EFS: the client is on chain ${liveChainId} but the EFS deployment is chain ${deploymentChainId}. The operation would target the wrong chain's contracts. Use a client on the deployment's chain.`,
+      { code: 'WrongChain' },
+    )
+  }
+}
+
+/**
+ * Fail closed when the wallet would write to a DIFFERENT chain than the EFS deployment
+ * (the higher-level write verbs: `fs.write`/`setOverview`/`efs.eas.*`/standalone namespaces).
+ * Those derive the attester from the BOUND account, so an unbound wallet fails closed with
+ * `WalletRequired` regardless of chain — hence the account early-return (also avoids an RPC
+ * on a doomed write). Raw writes differ (per-call account) and use {@link assertChainMatches}.
+ */
+async function assertWalletOnDeploymentChain(
+  wallet: WalletClient,
+  deploymentChainId: number,
+): Promise<void> {
+  if (wallet.account === undefined) return
+  await assertChainMatches(wallet, deploymentChainId)
+}
+
+/**
+ * Fail closed before a write if EITHER the wallet OR the public client has drifted from the
+ * deployment chain. A write sends the tx on the WALLET's chain but uses the PUBLIC client
+ * for parent/transport reads and `waitForTransactionReceipt` — so a `ViemConfig` whose
+ * public client switched away (while the wallet stayed) could send on the deployment chain
+ * yet read/wait on another, producing false misses or a mined tx reported as a partial
+ * failure. Both must be on the deployment chain.
+ */
+async function assertWriteChain(
+  wallet: WalletClient,
+  publicClient: PublicClient,
+  deploymentChainId: number,
+): Promise<void> {
+  // No bound account ⇒ the write fails closed with `WalletRequired` regardless of chain
+  // (there is nothing to send); skip both probes (the higher-level verbs derive the
+  // attester from the bound account).
+  if (wallet.account === undefined) return
+  await assertChainMatches(wallet, deploymentChainId)
+  await assertChainMatches(publicClient, deploymentChainId)
+}
+
+/**
+ * Wrap a wallet client so every `writeContract` runs the {@link assertChainMatches} preflight
+ * first. The `efs.raw.*` escape hatch builds viem `getContract` instances whose `.write.*`
+ * methods call `walletClient.writeContract` directly — bypassing the per-verb guard. Checks
+ * the chain UNCONDITIONALLY (not the account-gated {@link assertWalletOnDeploymentChain}):
+ * viem raw writes accept a per-call `account`, so an UNBOUND wallet on a different chain can
+ * still broadcast — the guard must fire regardless of a bound account. Reads pass through.
+ */
+function chainGuardedWallet(wallet: WalletClient, deploymentChainId: () => number): WalletClient {
+  return new Proxy(wallet, {
+    get(target, prop, receiver) {
+      if (prop === 'writeContract') {
+        const write = target.writeContract.bind(target)
+        return (async (args: Parameters<WalletClient['writeContract']>[0]) => {
+          await assertChainMatches(target, deploymentChainId())
+          return write(args)
+        }) as WalletClient['writeContract']
+      }
+      return Reflect.get(target, prop, receiver)
+    },
+  }) as WalletClient
+}
+
+/**
+ * Wrap a public client so every chain-touching READ (`readContract` and `getCode`) first
+ * validates the LIVE chain matches `deploymentChainId()` ({@link assertChainMatches}). Two
+ * uses: (1) the `efs.raw.*` read instances bound to construction-time addresses, and (2) the
+ * `readContext` read engines, which resolve the deployment from the live chain and then issue
+ * reads — a mutable provider that switches networks between resolution and the read (or after
+ * construction) would otherwise hit the resolved chain's addresses on the new chain, returning
+ * false misses / wrong-chain data. Guarding fails closed on drift. `getCode` is included
+ * because the `web3://` (SSTORE2) read transport code-copies chunks by address. `getEnsAddress`
+ * IS guarded too (r3741740331): the client holds ONE provider, so an ENS lens resolves on
+ * whatever chain that provider is currently on — under drift the resolved ATTESTER comes from
+ * another chain's registry while the guarded EFS reads run on the deployment chain, yielding a
+ * false absence or another lens's data. (The earlier "cross-chain by nature" exemption bought
+ * nothing: with a single client it made resolution nondeterministic rather than cross-chain.
+ * Deliberate cross-chain ENS would need its own client, not provider drift.)
+ */
+function chainGuardedPublicClient(
+  client: PublicClient,
+  deploymentChainId: () => number,
+): PublicClient {
+  return new Proxy(client, {
+    get(target, prop, receiver) {
+      if (prop === 'readContract') {
+        const readFn = target.readContract.bind(target)
+        return (async (args: Parameters<PublicClient['readContract']>[0]) => {
+          await assertChainMatches(target, deploymentChainId())
+          const out = await readFn(args)
+          // Re-check AFTER the read resolves: a provider that switched between
+          // the pre-check and the eth_call executed the call on chain B — its
+          // result must not be accepted as chain-A data (the capability probe
+          // would cache chain-B bytecode under chain A; ordinary reads would
+          // return wrong-chain values). The post-check narrows the TOCTOU
+          // window to a single in-flight request and fails closed on drift.
+          await assertChainMatches(target, deploymentChainId())
+          return out
+        }) as PublicClient['readContract']
+      }
+      if (prop === 'getCode') {
+        const getCodeFn = target.getCode.bind(target)
+        return (async (args: Parameters<PublicClient['getCode']>[0]) => {
+          await assertChainMatches(target, deploymentChainId())
+          const out = await getCodeFn(args)
+          // Same post-check as readContract — see above.
+          await assertChainMatches(target, deploymentChainId())
+          return out
+        }) as PublicClient['getCode']
+      }
+      if (prop === 'getEnsAddress') {
+        const ensFn = target.getEnsAddress.bind(target)
+        return (async (args: Parameters<PublicClient['getEnsAddress']>[0]) => {
+          await assertChainMatches(target, deploymentChainId())
+          const out = await ensFn(args)
+          // Same post-check as readContract — an address resolved on a drifted
+          // chain must never become the lens attester for deployment-chain reads.
+          await assertChainMatches(target, deploymentChainId())
+          return out
+        }) as PublicClient['getEnsAddress']
+      }
+      return Reflect.get(target, prop, receiver)
+    },
+  }) as PublicClient
+}
+
+// Type-level write gate: a write-capable config (an `account` in the provider form,
+// or an account-BOUND `walletClient` in the viem form) widens the return to
+// `EfsClient`; otherwise you get `EfsReadClient` (no write verbs). The viem-form
+// overload requires `walletClient.account` to be a definite `Account`
+// (r3741036567): an UNBOUND wallet (`createWalletClient({ chain, transport })`)
+// cannot sign, so every write verb it would advertise throws `WalletRequired` at
+// runtime — it falls through to the read-only overload instead. A wallet whose
+// account is statically `Account | undefined` also reads as read-only: narrow
+// (or rebuild the client with the account bound) to get the write surface.
+//
+// PROFILE-EXPLICIT FACTORY (ADR-0019/R1): `createEfsV1Client` is the canonical
+// name — the implementation is the EFS **v1 profile** (the 9 frozen EAS schemas
+// on a chain-bound deployment; EAS UIDs as identity). A future v2 profile lands
+// as a SIBLING factory (`createEfsV2Client`) with its own client type — v1
+// callers never break, and a persisted v1 ref can never be silently
+// reinterpreted as a v2 logical ID (see the `profile` stamps + artifacts.ts).
+// A required `profile:` config param and a nested `efs.v1.*` namespace were
+// both rejected (ceremony / call-site churn) — the factory name IS the profile.
+export function createEfsV1Client(
+  config: ProviderConfig & { account: Address | Account },
+): EfsClient
+export function createEfsV1Client(
+  config: ViemConfig & { walletClient: WalletClient & { account: Account } },
+): EfsClient
+export function createEfsV1Client(config: EfsClientConfig): EfsReadClient
+export function createEfsV1Client(config: EfsClientConfig): EfsClient {
+  // RESERVED config seams (ADR-0014, Fork 2): the shapes exist so future runtimes (Ring-3,
+  // non-ECDSA verticals) plug in here, but they're not yet wired. Fail loudly rather than
+  // silently ignore a passed value — an accidental no-op on a security-relevant slot is worse
+  // than an explicit "not yet".
+  if (config.fetch !== undefined) {
+    throw new NotImplemented('createEfsClient({ fetch })', {
+      alternative:
+        'client-level fetch injection is a reserved seam (ADR-0014); use per-call FetchOptions.fetchImpl for now.',
+    })
+  }
+  if (config.verifier !== undefined) {
+    throw new NotImplemented('createEfsClient({ verifier })', {
+      alternative:
+        'a pluggable signature verifier is a reserved seam (ADR-0014); ECDSA is assumed today.',
+    })
+  }
+  const { publicClient, walletClient } = resolveClients(config)
+  const override = config.deployments
+  // Require a chain-bound public client at construction. The write/raw/eas paths resolve
+  // the deployment SYNCHRONOUSLY from `publicClient.chain.id` and then VALIDATE it against
+  // the live chain (the deliberate "writes validate, reads re-resolve" split — a public
+  // client must not drift the plan's deployment independently of the wallet). A chainless
+  // viem client (`createPublicClient({ transport })`) can answer `getChainId()` but exposes
+  // no synchronous construction chain, so those paths have no stable anchor to validate
+  // against — reads would work (they re-resolve live) while writes/raw/eas would throw a
+  // confusing `DeploymentNotFound` on first use. Fail fast with an actionable error instead.
+  // (The `provider` config form always binds a chain, so this only catches a raw chainless
+  // `ViemConfig.publicClient`.)
+  if (publicClient.chain?.id === undefined) {
+    throw new EfsError(
+      'EFS: the supplied `publicClient` has no bound `chain`. Construct it with a chain (e.g. `createPublicClient({ chain, transport })`) so the SDK can resolve the EFS deployment and validate writes against it — or use the `{ provider, chain }` config form.',
+      { code: 'InvalidArgument' },
+    )
+  }
+  const getDeployment = () => resolveDeployment(chainIdOf(publicClient), override)
+  /**
+   * Resolve the deployment from the wallet/provider's LIVE chain (`eth_chainId`), not the
+   * construction-time `publicClient.chain.id`. A mutable EIP-1193 provider can switch
+   * networks after the client is built, and `readContract` goes to the provider's CURRENT
+   * chain — resolving from the bound chain would query the OLD deployment's addresses on
+   * the new chain (false misses / wrong-chain data). Reads use this so a chain switch is
+   * reflected (or surfaces `DeploymentNotFound`). One `getChainId()` per read op; a
+   * provider `chainChanged`-subscription cache is a future optimization. (Writes keep their
+   * own live-wallet guard, {@link assertWalletOnDeploymentChain}.)
+   */
+  const liveDeployment = async (): Promise<EfsDeployment> =>
+    resolveDeployment(await publicClient.getChainId(), override)
+  const requireWallet = () => {
+    if (!walletClient) throw new WalletRequired()
+  }
+
+  // The connected wallet account address, if any — the last-resort default lens
+  // for reads (ADR-0039: a read with no explicit lens resolves through the
+  // connected wallet, then errors if there is none).
+  const account = walletClient?.account?.address
+
+  // Assemble the lens-scoped read context the read verbs operate over. Built fresh
+  // per call so a deployment override / account change is always reflected (cheap;
+  // the narrow `readContract` surface is the only viem coupling).
+  //
+  // Resolve the deployment from the LIVE chain, then hand the read engines a publicClient
+  // GUARDED against that resolved chain. Closes a TOCTOU: `liveDeployment()` resolves at time
+  // T, but the engines' `readContract`/`getCode` run at T+1 — a mutable provider that switches
+  // chains in between would otherwise use the resolved chain's addresses on the new chain
+  // (false misses / wrong-chain data). The guard re-asserts `live === deployment.chainId`
+  // before each read, failing closed on drift. `deployment.chainId` is captured (constant for
+  // this read), so the guard pins to the chain we actually resolved against.
+  const readContext = async (): Promise<ReadContext> => {
+    const deployment = await liveDeployment()
+    return {
+      publicClient: chainGuardedPublicClient(
+        publicClient,
+        () => deployment.chainId,
+      ) as unknown as ReadContext['publicClient'],
+      deployment,
+      ...(config.defaultLens !== undefined ? { defaultLens: config.defaultLens } : {}),
+      ...(account !== undefined ? { account } : {}),
+    }
+  }
+
+  // The `efs.raw.*` pre-wired contract instances (P1-4): viem `getContract`s bound
+  // to the resolved deployment addresses + vendored ABIs + the client(s). Built once
+  // (the instances re-resolve the deployment lazily on each property access).
+  const rawContracts = buildRawContracts(getDeployment, {
+    // Guard raw `.read.*`/`.write.*` against a wrong-chain (drifted) provider — the
+    // instances are bound to the construction-time deployment addresses, so a live chain
+    // mismatch must fail closed rather than read/broadcast on the wrong chain.
+    public: chainGuardedPublicClient(publicClient, () => getDeployment().chainId),
+    wallet: walletClient
+      ? chainGuardedWallet(walletClient, () => getDeployment().chainId)
+      : undefined,
+  })
+
+  // The `efs.eas.*` raw verb implementations (attest/multiAttest/revoke/getAttestation)
+  // over the EAS address from the resolved deployment, routed through classifyError.
+  const easVerbs: EasVerbs = makeEasVerbs({
+    get easAddress() {
+      return getDeployment().contracts.eas
+    },
+    // Guard `getAttestation` (and `efs.decode(uid)`, which uses it) against a drifted
+    // provider — the EAS address is the construction-chain one, so a live mismatch must
+    // fail closed rather than read the old address on the new chain (same as the raw surface).
+    publicClient: chainGuardedPublicClient(
+      publicClient,
+      () => getDeployment().chainId,
+    ) as unknown as Parameters<typeof makeEasVerbs>[0]['publicClient'],
+    walletClient: walletClient as unknown as Parameters<typeof makeEasVerbs>[0]['walletClient'],
+    requireWallet,
+    // Same fail-closed wrong-chain guard as fs.write / the edge verbs — covers the raw
+    // efs.eas.attest/multiAttest/revoke AND every namespace remove/revoke (they route
+    // through easVerbs.revoke). Only invoked after requireWallet, so the wallet is set.
+    assertChain: () =>
+      assertWalletOnDeploymentChain(walletClient as WalletClient, getDeployment().chainId),
+    ...(walletClient?.account !== undefined ? { account: walletClient.account } : {}),
+    ...(walletClient?.chain !== undefined ? { chain: walletClient.chain } : {}),
+  })
+
+  // Build the edge/value submit context (TAG / PROPERTY / PIN writes) — the file
+  // write's chain/wallet plumbing plus the attester the receipt records. Built per
+  // call so a deployment override / account change is reflected. Only ever invoked
+  // on a write-capable client (the namespaces are wallet-gated below).
+  const edgeSubmitContext = (): EdgeSubmitContext => {
+    // A read-only client (no walletClient) still carries the edge-write methods at
+    // runtime (the type hides them). Gate here — matching fs.write/eas — so they throw
+    // WalletRequired rather than a raw TypeError on `wallet.account` below.
+    if (!walletClient) throw new WalletRequired()
+    const wallet = walletClient as WalletClient
+    const dep = getDeployment()
+    const attester = wallet.account?.address
+    if (attester === undefined) {
+      throw new EfsError(
+        'efs.graph/props write: the wallet client has no bound account — cannot author as an attester.',
+        { code: 'WalletRequired' },
+      )
+    }
+    return {
+      // The submit path uses `writeContract` (wallet) + `waitForTransactionReceipt`
+      // (public); supply each from its client. viem's broadly-generic method
+      // signatures don't structurally unify with the narrow submit surfaces at the
+      // type level, so cast through them at this boundary (same as `fs.write`).
+      walletClient: wallet as unknown as EdgeSubmitContext['walletClient'],
+      // GUARDED (r3742009390): the submitter's boundary gates (hardlink,
+      // reused-anchor, symlink, transport) read EAS/indexer state through this
+      // client — a provider that drifts after the pre-gate assertChain and back
+      // before the per-layer one would otherwise have them approve a plan
+      // against ANOTHER chain's state. Same client the file-write planner uses.
+      publicClient: chainGuardedPublicClient(
+        publicClient,
+        () => dep.chainId,
+      ) as unknown as EdgeSubmitContext['publicClient'],
+      easAddress: dep.contracts.eas,
+      // The layered boundary's placement gates (stamped PIN plans) read the
+      // indexer for the active-mirror readability proof.
+      indexerAddress: dep.contracts.indexer,
+      chainId: dep.chainId,
+      attester,
+      // Same fail-closed wrong-chain guard as `fs.write`, run before any standalone-verb
+      // tx (props/tags/pins/mirrors/redirects/lists) — BOTH the wallet (tx) and the public
+      // client (receipt wait) must be on the deployment chain, else EAS txs would land on
+      // the wallet chain at the deployment's addresses.
+      assertChain: () => assertWriteChain(wallet, publicClient, dep.chainId),
+      ...(wallet.account !== undefined ? { account: wallet.account } : {}),
+      ...(wallet.chain !== undefined ? { chain: wallet.chain } : {}),
+    }
+  }
+
+  // The standalone graph-edge / value namespaces (completeness P1-1). Built once,
+  // bound to the lazy deployment + the clients; the deps re-resolve on each call.
+  // Revokes go through the `efs.eas.revoke` verb (the same typed funnel).
+  // The standalone namespaces' READ methods resolve the deployment from the LIVE provider
+  // chain (`liveDeployment`) — like `fs.*` reads — so a mutable provider that switched
+  // networks doesn't query old-chain addresses; their WRITE methods keep the sync
+  // `getDeployment` (the submit context's chain guard is what fails a drifted write closed).
+  // Guard a standalone namespace's READ against a chain switch between its `liveDeployment()`
+  // resolution and the subsequent `readContract` (TOCTOU) — the same fix `readContext` uses,
+  // pinned to the chain the read resolved against (passed in by each read method).
+  const guardReadClient = (chainId: number) =>
+    chainGuardedPublicClient(publicClient, () => chainId) as unknown as ReadContext['publicClient']
+  const tagsNs = makeTagsNs({
+    getDeployment,
+    liveDeployment,
+    publicClient: publicClient as unknown as ReadContext['publicClient'],
+    guardReadClient,
+    submitContext: edgeSubmitContext,
+    attester: () => account,
+    revoke: (schema, uid) => easVerbs.revoke({ schema, uid }),
+  })
+  const pinsNs = makePinsNs({
+    getDeployment,
+    liveDeployment,
+    publicClient: publicClient as unknown as ReadContext['publicClient'],
+    guardReadClient,
+    submitContext: edgeSubmitContext,
+    attester: () => account,
+    revoke: (schema, uid) => easVerbs.revoke({ schema, uid }),
+  })
+  const propsNs = makePropsNs({
+    getDeployment,
+    liveDeployment,
+    publicClient: publicClient as unknown as ReadContext['publicClient'],
+    guardReadClient,
+    readContext,
+    submitContext: edgeSubmitContext,
+    attester: () => account,
+  })
+  // The `efs.mirrors.*` write verbs (add/remove) + the lens-scoped list read. Same
+  // wiring as graph/props: built once, gated at the type level, revokes through the
+  // `efs.eas.revoke` funnel; the transport anchor is resolved on `add` via the
+  // public client (deployment map → /transports/<scheme> path fallback).
+  const mirrorsNs = makeMirrorsNs({
+    getDeployment,
+    liveDeployment,
+    publicClient: publicClient as unknown as ReadContext['publicClient'],
+    guardReadClient,
+    submitContext: edgeSubmitContext,
+    attester: () => account,
+    revoke: (schema, uid) => easVerbs.revoke({ schema, uid }),
+  })
+  // EFSIndexer index/indexRevocation txs — the discovery lifecycle REDIRECT needs
+  // (AliasResolver is write-guards-only and does NOT populate the referencing
+  // index the reads use). Chain-guarded like every standalone write; waits for
+  // the receipt (the callers sequence on minedness). Permissionless + lens-
+  // neutral: it never changes the attester, so any account may send it.
+  const indexerCall = async (fn: 'index' | 'indexRevocation', uidArg: Hex): Promise<Hex> => {
+    requireWallet()
+    const wallet = walletClient as WalletClient
+    const dep = getDeployment()
+    await assertWriteChain(wallet, publicClient, dep.chainId)
+    let hash: Hex
+    try {
+      hash = (await (
+        wallet as unknown as { writeContract: (args: object) => Promise<Hex> }
+      ).writeContract({
+        address: dep.contracts.indexer,
+        abi: fn === 'index' ? indexAbi : indexRevocationAbi,
+        functionName: fn,
+        args: [uidArg],
+        ...(wallet.account !== undefined ? { account: wallet.account } : {}),
+        ...(wallet.chain !== undefined ? { chain: wallet.chain } : {}),
+      })) as Hex
+    } catch (cause) {
+      // Refusal-vs-transport split (r3741441637; the same rule as every other
+      // send site): a refusal RESPONSE proves nothing was broadcast — the
+      // classified error propagates and the leg reads as never-sent. A
+      // code-less transport loss proves nothing: the tx may still mine with NO
+      // hash to reconcile by — surface the distinct unknown-send state so the
+      // redirect wrappers don't claim "never broadcast" (and don't undercount
+      // the signed prompt).
+      if (isDefiniteSendRefusal(cause)) throw classifyError(cause)
+      throw new IndexSendUnknown({ op: fn, uid: uidArg, cause })
+    }
+    try {
+      await waitForReceipt(hash)
+    } catch (err) {
+      // A CONFIRMED on-chain revert is a definite outcome — propagate raw
+      // (ContractReverted names the tx). Anything else (RPC loss, drift during
+      // the wait) is UNKNOWN: the tx may still mine, and discarding `hash`
+      // would leave callers unable to reconcile its fate/cost before the
+      // idempotent repair — preserve it on IndexUnconfirmed.
+      if ((err as { code?: string } | undefined)?.code === 'ContractReverted') throw err
+      throw new IndexUnconfirmed({ op: fn, uid: uidArg, txHash: hash, cause: err })
+    }
+    return hash
+  }
+  const waitForReceipt = async (txHash: Hex): Promise<void> => {
+    // Re-assert the LIVE chain immediately before the wait: a mutable provider
+    // that drifts after broadcast would poll ANOTHER chain for this hash — a
+    // landed index could read as absent (surfacing a false IndexingIncomplete),
+    // or a landed revoke could abort remove() before its required
+    // indexRevocation leg, leaving redirect discovery stale. Same fail-closed
+    // rule as the layered submitter's receipt wait (submit.ts).
+    await assertChainMatches(publicClient, getDeployment().chainId)
+    const receipt = (await (
+      publicClient as unknown as {
+        waitForTransactionReceipt: (args: { hash: Hex }) => Promise<{ status?: string }>
+      }
+    ).waitForTransactionReceipt({ hash: txHash })) as { status?: string }
+    // A mined-but-reverted tx yields a receipt (viem does NOT throw) with
+    // `status: 'reverted'` — same check the layered submitter runs (submit.ts).
+    // Without it, remove()'s revoke leg would treat a REVERTED revoke as landed,
+    // throw IndexingIncomplete claiming "the revoke landed — efs.index(uid)
+    // repairs it", and the repair would then report 'already-indexed' while the
+    // redirect keeps being served. Fail loud instead.
+    if (receipt.status === 'reverted') {
+      throw new EfsError(`transaction reverted on-chain (tx ${txHash}).`, {
+        code: 'ContractReverted',
+      })
+    }
+  }
+
+  // The `efs.redirects.*` write verbs (set/remove, each with its follow-up
+  // indexing leg) + the lens-scoped reads (get/list/canonical/history). Like
+  // graph/props, merged unconditionally and gated at the type level; a
+  // no-wallet runtime call to set/remove throws via the wallet-bound submit/revoke.
+  const redirectsNs = makeRedirectsNs({
+    getDeployment,
+    readContext,
+    publicClient: publicClient as unknown as ReadContext['publicClient'],
+    guardReadClient,
+    submitContext: edgeSubmitContext,
+    revoke: (schema, uid) => easVerbs.revoke({ schema, uid }),
+    indexerCall,
+    waitForReceipt,
+  })
+  // The `efs.lists.*` write verbs (create/add/remove). Merged onto the read verbs
+  // below; the type-level write gate hides them on a read-only client, and each
+  // verb authors through the wallet-bound submit/revoke (a no-wallet runtime call
+  // throws). `add`/`remove` reuse the read engine's `getList` (config routing).
+  const listsWriteNs = makeListsWriteNs({
+    getDeployment,
+    publicClient: publicClient as unknown as ReadContext['publicClient'],
+    guardReadClient,
+    submitContext: edgeSubmitContext,
+    revoke: (schema, uid) => easVerbs.revoke({ schema, uid }),
+  })
+
+  // `efs.decode` (P1-4): raw Attestation → typed view (sync, pure), or a UID →
+  // read-then-decode (async; `null` when the UID is absent). One overloaded fn.
+  const decode = ((
+    input: Attestation | Hex,
+  ): DecodedAttestation | Promise<DecodedAttestation | null> => {
+    if (typeof input === 'string') {
+      return easVerbs.getAttestation(input).then((att) => {
+        if (att === undefined) return null
+        return decodeAttestation(att, getDeployment())
+      })
+    }
+    return decodeAttestation(input, getDeployment())
+  }) as EfsDecodeNs
+
+  return {
+    profile: EFS_PROFILE_V1,
+    fs: {
+      // `async` so a synchronous throw from `readContext()` (e.g. DeploymentNotFound)
+      // surfaces as a rejected promise, not a sync throw at the call site.
+      // `read`/`info` are generic over the expand tuple at the type level; the
+      // runtime impl is monomorphic (returns the wide `EfsFile`/`FileInfo`), so the
+      // expand-narrowed return type is a compile-time-only refinement — cast through
+      // the typed surface at this boundary (the narrowing is sound: when the token is
+      // present the field IS populated; see `info`/`read` + `Expanded`).
+      read: (async (pathOrRef: string | DataRef, opts?: ReadOpts & FetchOptions) =>
+        readFile(await readContext(), pathOrRef, opts)) as EfsFsRead['read'],
+      readText: async (path, opts) => readTextFile(await readContext(), path, opts),
+      readBytes: async (path, opts) => readBytesFile(await readContext(), path, opts),
+      readJson: async (path, opts) => readJsonFile(await readContext(), path, opts),
+      locate: async (path, opts) => locateRead(await readContext(), path, opts),
+      info: (async (path: string, opts?: ReadOpts) =>
+        infoRead(await readContext(), path, opts)) as EfsFsRead['info'],
+      exists: async (path, opts) => existsRead(await readContext(), path, opts),
+      // `list` is synchronous (returns a lazy EfsList). Defer deployment + lens +
+      // anchor resolution into the first read so the sync method never throws and a
+      // bad deployment surfaces on `.byPage()`/iteration (consistent with the async
+      // verbs). The thunk is evaluated inside `listRead`'s lazy `prime()`.
+      list: (path, opts) => listRead(readContext, path, opts),
+      // Folder Overview (ADR-0011): the folder's README.md, resolved by EXACT path
+      // (never a directory scan) and classified into a discriminated OverviewResult.
+      overview: async (path, opts) => overviewRead(await readContext(), path, opts),
+      write: async (path, content, opts) => {
+        requireWallet()
+        // requireWallet() guarantees `walletClient` is defined here.
+        const wallet = walletClient as WalletClient
+        // Fail closed BEFORE any tx if the wallet OR the public client (parent/transport
+        // reads + receipt wait) is on a different chain than the deployment.
+        await assertWriteChain(wallet, publicClient, getDeployment().chainId)
+        // Tier-1 (any-wallet, multi-signature) write: one multiAttest per DAG
+        // layer. The Tier-2 one-signature path (7702/5792 via @efs/solidity) is a
+        // later slice; both consume the same `buildFileWriteGraph` plan.
+        //
+        // The orchestrator takes the *narrow* client surfaces it needs (typed
+        // `readContract`/`writeContract` for the EFS ABIs). viem's full clients
+        // satisfy those calls at runtime, but their broadly-generic method
+        // signatures don't structurally unify with the narrow interfaces at the
+        // type level — so cast through `FileWriteContext` at this boundary.
+        const dep = getDeployment()
+        const ctx = {
+          // Planning reads (the parent walk, overwrite probe, visibility-tag
+          // checks, transport lookups) run through the chain-GUARDED client
+          // pinned to the deployment: the single entry preflight above cannot
+          // cover this multi-RPC window — a provider that drifts mid-planning
+          // and back would bake chain-B parent/anchor UIDs into a plan the
+          // per-tx guards then happily submit on chain A. The guard's pre+post
+          // checks fail each read closed instead. Non-read methods (the
+          // storage receipt waits) pass through the proxy untouched and keep
+          // their own assertChain guards.
+          publicClient: chainGuardedPublicClient(publicClient, () => dep.chainId),
+          walletClient: wallet,
+          deployment: dep,
+          // viem binds `account`/`chain` on a wallet client built from the
+          // provider/account config; forward them so `writeContract` has them.
+          account: wallet.account,
+          chain: wallet.chain,
+          // Re-assert the live chain before EACH wallet tx in the write (the storage
+          // deploys + every EAS layer), not just this entry preflight — a wallet that
+          // switches networks between prompts fails the next step closed (WrongChain)
+          // rather than orphaning a partial write on the deployment chain.
+          assertChain: () => assertWriteChain(wallet, publicClient, dep.chainId),
+          // Client-level on-chain auto-store cap (default applied in resolveMirrors).
+          ...(config.write?.onchainAutoLimit !== undefined
+            ? { onchainAutoLimit: config.write.onchainAutoLimit }
+            : {}),
+        } as unknown as FileWriteContext
+        return writeFileTier1(path, content, ctx, opts)
+      },
+      preview: async (_path, _content) => {
+        throw new NotImplemented('efs.fs.preview()', {
+          alternative:
+            'call efs.fs.write() directly for now — it returns a receipt; pre-flight cost estimation is a later slice.',
+        })
+      },
+      // Author/replace the folder Overview (ADR-0011): the normal file-write pipeline
+      // at `${container}/README.md`, forced to `text/markdown`, with the `system` TAG
+      // applied on the README's own anchor BEFORE the placement PIN (no untagged
+      // flash). Same wallet/chain plumbing as `write`, plus an indexer-backed
+      // `resolveAnchorPath` so the orchestrator can resolve the `/tags/system` def.
+      setOverview: async (container, markdown, opts) => {
+        requireWallet()
+        const wallet = walletClient as WalletClient
+        const dep = getDeployment()
+        // Fail closed if the wallet OR the public client is on a different chain.
+        await assertWriteChain(wallet, publicClient, dep.chainId)
+        // ONE guarded planning client for the whole overview write — the ctx
+        // reads AND the /tags/system lookup below (a raw-client lookup there
+        // could accept a chain-B UID into the chain-A plan mid-drift).
+        const guardedPlanning = chainGuardedPublicClient(publicClient, () => dep.chainId)
+        const baseCtx = {
+          // Same guarded planning client as fs.write — see the write ctx note.
+          publicClient: guardedPlanning,
+          walletClient: wallet,
+          deployment: dep,
+          account: wallet.account,
+          chain: wallet.chain,
+          // Re-assert the live chain before each wallet tx (storage deploys + EAS layers),
+          // same as `fs.write` — a mid-write network switch fails the next step closed.
+          assertChain: () => assertWriteChain(wallet, publicClient, dep.chainId),
+          ...(config.write?.onchainAutoLimit !== undefined
+            ? { onchainAutoLimit: config.write.onchainAutoLimit }
+            : {}),
+        } as unknown as FileWriteContext
+        const overviewCtx = {
+          ...baseCtx,
+          resolveAnchorPath: (path: string) =>
+            resolvePathToAnchor(
+              guardedPlanning as unknown as Parameters<typeof resolvePathToAnchor>[0],
+              dep.contracts.indexer,
+              path,
+            ),
+        }
+        return setOverviewWrite(container, markdown, overviewCtx, opts)
+      },
+    },
+    lenses: {
+      // Guarded like the read path's lens resolution (r3741740331): an ENS name
+      // resolved on a drifted chain must never become an attester.
+      resolve: (input) =>
+        resolveLens(input, {
+          publicClient: chainGuardedPublicClient(publicClient, () => getDeployment().chainId),
+        }),
+      lens,
+      identity,
+    },
+    // Curated-collection reads (`efs.lists.*`). `get`/`length`/`has` are async over
+    // the read context; `entries` is synchronous (a lazy EfsList) — defer the context
+    // into a thunk so the synchronous call never throws (mirrors `fs.list`).
+    // Read verbs always; the write verbs (create/add/remove) are merged on
+    // unconditionally and gated at the type level (EfsListsWriteNs on EfsClient vs
+    // EfsListsNs on EfsReadClient), like graph/props — a no-wallet runtime call to a
+    // write verb throws via the wallet-bound submit/revoke.
+    lists: {
+      get: async (listUID, opts) => getListRead(await readContext(), listUID, opts),
+      entries: (listUID, opts) => listEntriesRead(readContext, listUID, opts),
+      length: async (listUID, opts) => listLengthRead(await readContext(), listUID, opts),
+      has: async (listUID, target, opts) => listHasRead(await readContext(), listUID, target, opts),
+      create: (config) => listsWriteNs.create(config),
+      add: (listUID, target, opts) => listsWriteNs.add(listUID, target, opts),
+      remove: (entryUID, opts) => listsWriteNs.remove(entryUID, opts),
+    },
+    // SORT overlay reads (`efs.sorts.*`). @experimental — every verb throws
+    // NotImplemented until SORT_INFO is frozen + deployed (see reads/sorts.ts).
+    sorts: {
+      get: (sortInfoUID, opts) => getSortRead(sortInfoUID, opts),
+      apply: (parentAnchor, sortInfoUID, opts) => applySortRead(parentAnchor, sortInfoUID, opts),
+    },
+    eas: {
+      encoder: (schema) => new SchemaEncoder(schema),
+      computeUID: computeAttestationUID,
+      verifyUID: verifyAttestationUID,
+      abi: { eas: easAbi, schemaRegistry: schemaRegistryAbi },
+      attestationsFor: async (items, opts) =>
+        attestationsForItems(await readContext(), items, opts),
+      // Raw EAS verbs (P1-4): reads available always, writes gated on the wallet.
+      getAttestation: easVerbs.getAttestation,
+      attest: easVerbs.attest,
+      multiAttest: easVerbs.multiAttest,
+      revoke: easVerbs.revoke,
+    },
+    // The `as unknown as EfsRawNs` below: the getters return the SAME viem
+    // instantiations the type names, but TS treats the two deferred
+    // GetContractReturnType expansions as unrelated (TS2719) — a known
+    // deep-generic comparison limit, not a shape difference. The builder is the
+    // single source of the runtime shape.
+    raw: {
+      deployment: getDeployment,
+      verifyDeployment: async () => {
+        // Resolve the deployment from the live chain, then probe through a client GUARDED to
+        // that resolved chain — verifyDeployment's `getCode`/schema `readContract` checks run
+        // after resolution, so a provider that drifts in between would otherwise verify the
+        // resolved chain's addresses against the new chain (or falsely pass on a fork with
+        // matching addresses). Fail closed (`WrongChain`) on drift. (The guard covers both
+        // readContract and getCode.)
+        const dep = await liveDeployment()
+        return verifyDeployment(
+          chainGuardedPublicClient(publicClient, () => dep.chainId),
+          dep,
+        )
+      },
+      // Spread the pre-wired contract instances (P1-4). They are lazy getters, so
+      // spreading here would eagerly resolve them — instead expose the object so
+      // each `efs.raw.<contract>` access re-resolves the deployment.
+      get indexer() {
+        return rawContracts.indexer
+      },
+      get router() {
+        return rawContracts.router
+      },
+      get fileView() {
+        return rawContracts.fileView
+      },
+      get edgeResolver() {
+        return rawContracts.edgeResolver
+      },
+      get mirrorResolver() {
+        return rawContracts.mirrorResolver
+      },
+      get listReader() {
+        return rawContracts.listReader
+      },
+      get aliasResolver() {
+        return rawContracts.aliasResolver
+      },
+      get eas() {
+        return rawContracts.eas
+      },
+    } as unknown as EfsRawNs & EfsRawReadNs,
+    decode,
+    toJSON,
+    account: {
+      capabilities: async (opts?: { refresh?: boolean }) => {
+        requireWallet()
+        const wallet = walletClient as WalletClient
+        const address = wallet.account?.address
+        if (address === undefined) {
+          throw new EfsError(
+            'efs.account.capabilities(): the wallet client has no bound account — cannot profile the signing account.',
+            { code: 'WalletRequired' },
+          )
+        }
+        // Key the probe by the LIVE chain, not the construction-time `publicClient.chain.id`.
+        // A mutable EIP-1193 provider can switch networks after the client is built, and
+        // EIP-5792 `getCapabilities` is reported per the live chain too. Keying
+        // detectAccount's cache with the stale construction-time id would mix new-chain
+        // bytecode/capabilities into an old-chain cache slot and return the wrong
+        // `kind`/gasless status after a switch. Sample FIRST, then pin the probe to it.
+        const liveChainId = await publicClient.getChainId()
+        // Compose the narrow DetectClient: `getCode` routes through the chain-GUARDED
+        // client pinned to the sampled `liveChainId` — a provider that drifts between the
+        // sample above and the probe read would otherwise return chain-B bytecode that gets
+        // cached under chain A's key (and keeps mis-reporting `kind` from the cache). The
+        // guard fails the probe closed (`WrongChain`) instead. The optional EIP-5792
+        // `getCapabilities` comes from the wallet (absent on wallets that don't implement
+        // it — detection tolerates that). Lazy + cached per (address, chainId); never on
+        // the write hot path.
+        // Account code is MUTABLE (a counterfactual deploy, a 7702 delegation
+        // added/removed) while the cache key (address@chain, per connector) is
+        // not — `{ refresh: true }` evicts the cached profile for the LIVE
+        // chain sampled above, so the probe below re-reads real state.
+        if (opts?.refresh) invalidateAccountProfile(address, liveChainId, wallet)
+        const guardedForProbe = guardReadClient(liveChainId)
+        const detectClient: DetectClient = {
+          getCode: (args) => (guardedForProbe as unknown as DetectClient).getCode(args),
+          ...(typeof (wallet as unknown as DetectClient).getCapabilities === 'function'
+            ? {
+                getCapabilities: (args) =>
+                  (wallet as unknown as Required<DetectClient>).getCapabilities(args),
+              }
+            : {}),
+        }
+        // Scope the cache by the CONNECTOR (the wallet client) — `getCapabilities` is
+        // connector-dependent, so a reconnect with a different wallet must not reuse another
+        // connector's cached `gasless`/batch profile for the same account+chain.
+        const profile = await detectAccount(detectClient, address, liveChainId, wallet)
+        return toCapabilities(profile)
+      },
+    },
+    // Standalone graph-edge / value write namespaces (completeness P1-1). Present on
+    // the returned object unconditionally; the type-level write gate (`EfsClient` vs
+    // `EfsReadClient`) hides them on a read-only client, and each write verb authors
+    // through the wallet-bound submit/revoke (so a no-wallet runtime call throws).
+    graph: { tags: tagsNs, pins: pinsNs },
+    props: propsNs,
+    mirrors: mirrorsNs,
+    redirects: redirectsNs,
+    index: async (uidArg: Hex): Promise<IndexRepairResult> => {
+      requireWallet()
+      const dep = getDeployment()
+      // Which leg is missing? Read EAS + the indexer's own state, chain-pinned.
+      const att = await easVerbs.getAttestation(uidArg)
+      if (att === undefined) {
+        throw new EfsError(
+          `efs.index: no attestation exists at ${uidArg} on this chain — index() would revert (InvalidAttestation). Check the UID/chain.`,
+          { code: 'InvalidArgument' },
+        )
+      }
+      const rc = guardReadClient(dep.chainId)
+      const [indexed, revokedInIndexer] = await Promise.all([
+        rc.readContract({
+          address: dep.contracts.indexer,
+          abi: isIndexedAbi,
+          functionName: 'isIndexed',
+          args: [uidArg],
+        }) as Promise<boolean>,
+        rc.readContract({
+          address: dep.contracts.indexer,
+          abi: isRevokedAbi,
+          functionName: 'isRevoked',
+          args: [uidArg],
+        }) as Promise<boolean>,
+      ])
+      // EFS-native schemas (ANCHOR/DATA/PROPERTY) are indexed atomically in
+      // EFSIndexer.onAttest; the public index() API silently NO-OPS for them
+      // (EFSIndexer.sol:1272-1276) and isIndexed() stays false forever. Sending
+      // a tx would mine a state-free no-op and falsely report 'indexed' every
+      // call — recognize them up front and report the honest terminal.
+      const native = [dep.schemas.anchor, dep.schemas.data, dep.schemas.property]
+      if (native.includes(att.schema)) {
+        return { status: 'already-indexed' }
+      }
+      // index() self-mirrors an existing EAS revocation at index time
+      // (EFSIndexer.sol:1283-1287), so an unindexed UID needs ONLY index().
+      if (!indexed) {
+        const txHash = await indexerCall('index', uidArg)
+        return { status: 'indexed', txHash }
+      }
+      if (att.revocationTime !== 0n && !revokedInIndexer) {
+        const txHash = await indexerCall('indexRevocation', uidArg)
+        return { status: 'revocation-indexed', txHash }
+      }
+      return { status: 'already-indexed' }
+    },
+    batch: () => {
+      requireWallet()
+      throw new NotImplemented('efs.batch()', {
+        alternative:
+          'call fs.write() per file for now — one signature per file; the one-signature batch path is a later slice.',
+      })
+    },
+  }
+}
+
+/** The v1 profile literal — what `efs.profile` and every persisted-artifact
+ * stamp carry (ADR-0019). */
+export const EFS_PROFILE_V1 = 'efs/v1' as const
+
+/** @deprecated Use {@link createEfsV1Client} — the profile-explicit canonical
+ * name (ADR-0019/R1). Same function; this alias exists so in-flight branches
+ * keep compiling for one cycle and will be removed before 1.0. */
+// Compile-time overload contract (tsc-enforced — the test tree is excluded from
+// `typecheck`, so the write-gate narrowing is pinned here; never executed and
+// tree-shaken from the bundle).
+function _typecheckCreateClientOverloads(
+  bound: ViemConfig & { walletClient: WalletClient & { account: Account } },
+  unbound: ViemConfig & { walletClient: WalletClient },
+): void {
+  const writable: EfsClient = createEfsV1Client(bound)
+  const readOnly: EfsReadClient = createEfsV1Client(unbound)
+  // @ts-expect-error — an UNBOUND wallet client must NOT advertise write verbs
+  void createEfsV1Client(unbound).fs.write
+  void writable
+  void readOnly
+}
+void _typecheckCreateClientOverloads
+
+export const createEfsClient = createEfsV1Client
+
+/** Profile-explicit alias of {@link EfsClient} (ADR-0019/R1). */
+export type EfsV1Client = EfsClient
+/** Profile-explicit alias of {@link EfsReadClient} (ADR-0019/R1). */
+export type EfsV1ReadClient = EfsReadClient
+/** Profile-explicit alias of {@link EfsClientConfig} (ADR-0019/R1). */
+export type EfsV1ClientConfig = EfsClientConfig
+
+/**
+ * The v1-profile-SCOPED namespaces (ADR-0019/R2) — the surfaces that are EAS/
+ * deployment-specific BY CONSTRUCTION and will NOT be reinterpreted for a
+ * future profile: the raw EAS verbs, the pre-wired contract escape hatches,
+ * the attestation decode bridge, the schema-UID-keyed graph/value primitives,
+ * and account capability detection. The rest of the client (`fs.*` verbs,
+ * lenses-as-concept, pagination, typed errors, fetch/verify, receipts) is the
+ * STABLE surface future profiles re-implement behind the same verbs
+ * ("stable verbs, versioned result envelopes").
+ */
+export type EfsV1ProtocolSurface = Pick<
+  EfsClient,
+  'eas' | 'raw' | 'decode' | 'graph' | 'props' | 'mirrors' | 'redirects' | 'lists' | 'account'
+>
+
+// ── Standalone exports (chain-independent; usable now) ─────────────────────────
+export {
+  SchemaEncoder,
+  buildAttest,
+  buildMultiAttest,
+  computeAttestationUID,
+  verifyAttestationUID,
+  MAX_UID_BUMP_SCAN,
+  parseSchema,
+  parseSchemaParameters,
+  easAbi,
+  revokeAbi,
+  schemaRegistryAbi,
+  EFS_SCHEMA_FIELDS,
+  type AttestationRequest,
+  type AttestationRequestData,
+  type MultiAttestationRequest,
+  type EfsSchemaName,
+} from './eas/index.js'
+// Raw EAS verbs (`efs.eas.attest/multiAttest/revoke/getAttestation`) — escape hatch (P1-4).
+export {
+  makeEasVerbs,
+  type EasVerbs,
+  type EasVerbContext,
+  type EasWalletClient,
+  type EasPublicClient,
+  type RevocationRequest,
+} from './eas/verbs.js'
+// `efs.raw.*` pre-wired contract instances — escape hatch (P1-4).
+export {
+  buildRawContracts,
+  type EfsRawContracts,
+  type EfsRawReadContracts,
+  type RawClients,
+} from './raw/contracts.js'
+// `efs.decode` round-trip bridge — raw Attestation → typed view (P1-4).
+export {
+  decodeAttestation,
+  type DecodedAttestation,
+  type DecodedKnown,
+  type DecodedUnknown,
+  type DecodedAnchor,
+  type DecodedProperty,
+  type DecodedData,
+  type DecodedPin,
+  type DecodedTag,
+  type DecodedMirror,
+  type DecodedList,
+  type DecodedListEntry,
+  type DecodedRedirect,
+} from './decode.js'
+export {
+  hashContent,
+  verifyContent,
+  asContentHash,
+  decodeContentHash,
+  CONTENT_HASH_CODES,
+  type ContentHash,
+  type ContentHashAlgorithm,
+  type DecodedContentHash,
+  type VerificationStatus,
+} from './content/hash.js'
+// The canonical anchor-segment codec (specs/02): fs.* paths and props keys are
+// HUMAN; these are the explicit encode/decode boundary for callers holding
+// canonical (on-chain / web3://) forms.
+export {
+  encodeName,
+  decodeName,
+  isCanonicalName,
+  asCanonicalName,
+  InvalidAnchorNameError,
+  type CanonicalName,
+  type InvalidNameReason,
+} from './names/segment.js'
+// Bigint-safe JSON serialization for EFS result DTOs (`efs.toJSON`) — review P3 DX.
+// LOGGING ONLY — durable persistence is artifacts.ts below (ADR-0019/R3).
+export { toJSON, jsonReplacer } from './json.js'
+// Durable-artifact serializers (ADR-0019/R3): typed, VERSIONED persistence for
+// refs/receipts — lossless bigints, fail-closed profile/version rejection,
+// opaque-extension preservation.
+export {
+  serializeDataRef,
+  parseDataRef,
+  serializeWriteReceipt,
+  parseWriteReceipt,
+  UnsupportedArtifact,
+  MalformedArtifact,
+} from './artifacts.js'
+// Off-chain fetch/verify/mirror engine (freeze-independent; see future-proofing.md §2).
+export * from './mirror/index.js'
+// Write path: pure graph builder + Tier-1 submitter (writes/index barrels both).
+export * from './writes/index.js'
+export { lens, identity, resolveLens, MAX_LENSES, type Lens } from './lenses/resolve.js'
+export {
+  deployments,
+  resolveDeployment,
+  assertDeploymentIntegrity,
+  assertSchemaIntegrity,
+  assertViewRevision,
+  verifyDeployment,
+  CORE_CONTRACT_KEYS,
+  VIEW_CONTRACT_KEYS,
+  DEVNET_CHAIN_ID,
+  type DeploymentsMap,
+  type EfsDeployment,
+  type EfsContracts,
+  type EfsSchemaUIDs,
+  type EfsTransports,
+  type EfsViewRevision,
+} from './chain/deployments.js'
+export * from './errors.js'
+export type {
+  AccountProfile,
+  AccountCapabilities,
+  AnchorUID,
+  DataRef,
+  DataUID,
+  DirEntry,
+  ReadOpts,
+  ReadOptions,
+  ExpandToken,
+  Expanded,
+  ListOptions,
+  ListConfig,
+  ListEntry,
+  ListTargetType,
+  ListReadOptions,
+  ListGetOptions,
+  FetchOptions,
+  TransportName,
+  WriteOptions,
+  PreviewOptions,
+  Page,
+  EfsList,
+  ReadResult,
+  EfsFile,
+  FileInfo,
+  Attestation,
+  SchemaRecord,
+  FileAttestations,
+  SourceUIDs,
+  OverviewResult,
+  OverviewOptions,
+  WriteConfig,
+  WriteReceipt,
+  WriteMechanism,
+  CallStatus,
+  WriteEstimate,
+  OperationResult,
+  OperationKind,
+  BatchReceipt,
+} from './types.js'
+// Overview convention constants (values, ADR-0011).
+export { OVERVIEW_NAME, SAFETY_EXCLUDES, MAX_RENDER_BYTES } from './types.js'
+// Vendored contract ABIs (view + resolvers) for reads + writes (ADR-0010/0011).
+export * from './chain/abi/index.js'
+export {
+  MAX_ATTESTERS_PER_QUERY,
+  MAX_EXCLUDE_TAGS_PER_QUERY,
+  shouldUseFilteredQuery,
+  reconcileMinWeights,
+  validateDirectoryQuery,
+  InvalidDirectoryQuery,
+} from './reads/directory.js'
+// Path resolution (write-path parent lookup; read-path single-segment walk).
+export {
+  resolvePathToAnchor,
+  resolveParentAnchor,
+  resolveOrPlanParents,
+  planExistingAncestorVisibilityTags,
+  splitPath,
+  ParentNotFoundError,
+  type ParentPlan,
+  type ResolvePublicClient,
+  type TagReadPublicClient,
+  type VisibilityTagPlanInput,
+} from './reads/resolve.js'
+// Lens-scoped read engine (resolve/stat/cat/fetch/list internals + context).
+export {
+  type ReadContext,
+  type ReadPublicClient,
+  type FileSystemItem,
+  type DirectoryPageRaw,
+  resolveAttesters,
+  SYSTEM_LENS,
+} from './reads/context.js'
+export {
+  locate,
+  info,
+  exists,
+  resolvePlacement,
+  readReservedProperty,
+  type ReservedProperty,
+} from './reads/file.js'
+export {
+  read,
+  readText,
+  readBytes,
+  readJson,
+  fetchRef,
+  assertTrust,
+  type ParseSchema,
+} from './reads/fetch.js'
+export {
+  attestationsFor,
+  attestationsForUIDs,
+  attestationFor,
+  isRevoked,
+  isAbsent,
+  type HasSourceUIDs,
+  type HydratedItem,
+} from './reads/attestations.js'
+export { list, DEFAULT_PAGE_SIZE } from './reads/list.js'
+// Folder Overview read (`efs.fs.overview`) — exact-path README.md resolution (ADR-0011).
+export { overview } from './reads/overview.js'
+// Folder Overview write (`efs.fs.setOverview`) — README.md + system-TAG-before-placement (ADR-0011).
+export {
+  setOverview,
+  overviewPath,
+  SYSTEM_TAG_PATH,
+  type OverviewWriteContext,
+} from './writes/overview.js'
+// Curated-collection (LIST) reads — `efs.lists.*` internals (ADR-0044/0046).
+export {
+  getList,
+  listEntries,
+  listLength,
+  listHas,
+  DEFAULT_LIST_PAGE_SIZE,
+} from './reads/lists.js'
+// SORT overlay reads — `efs.sorts.*`. @experimental (deferred; throws until frozen).
+export {
+  getSort,
+  applySort,
+  type SortInfo,
+  type SortSourceType,
+  type SortReadOptions,
+} from './reads/sorts.js'
+// REDIRECT (alias) — the ratified read-resolution engine (specs/09 / ADR-0067):
+// symlink-only navigation with surfaced-node statuses, `sameAs` canonicalization,
+// and the deliberate `supersededBy` history walk.
+export {
+  selectLensRedirect,
+  listLensRedirects,
+  walkSymlinks,
+  canonicalizeSameAs,
+  walkSupersededBy,
+  resolveHopCap,
+  redirectKindName,
+  isNavigationalKind,
+  DEFAULT_REDIRECT_HOPS,
+  MAX_REDIRECT_HOPS,
+  MAX_REDIRECT_SCAN,
+  MAX_SAMEAS_NODES,
+  type RedirectWalkStatus,
+  type RedirectWalkResult,
+  type HopBudget,
+} from './reads/redirects.js'
+// REDIRECT (alias) — `efs.redirects.*` write verbs + plan builder + kind constants.
+export {
+  makeRedirectsNs,
+  type RedirectsNs,
+  type RedirectSetOptions,
+  type RedirectRemoveOptions,
+  type RedirectRemoveReceipt,
+  type RedirectGetOptions,
+  type RedirectHistoryOptions,
+  type CanonicalResult,
+  type HistoryResult,
+} from './writes/redirects.js'
+export type { RedirectKind, RedirectRecord } from './types.js'
+
+// ── Pluggable read source (ADR-0014) + read-trust provenance (ADR-0015) ────────
+// The `ReadSource` seam decouples reads from a live chain-bound viem client; `ViemReadSource`
+// is the only live impl today, the snapshot/indexer sources are reserved stubs. `TrustDescriptor`
+// is LIVE: a required `trust` field on the rich read results (EfsFile/FileInfo/ReadResult),
+// stamped `{ freshness: 'current', source: 'live' }` today, gated by `requireTrust` on the
+// fail-closed sugar. These are the seams future runtimes (offline, indexer, Ring-3) plug into.
+export type { ReadSource, ReadSourceCapabilities, ReadBasis } from './reads/source.js'
+export { viemReadSource } from './reads/sources/viem.js'
+export { snapshotReadSource, type ReadSnapshot } from './reads/sources/snapshot.js'
+export { indexerReadSource, type IndexerConfig } from './reads/sources/indexer.js'
+export { LIVE_TRUST } from './reads/context.js'
+export type { TrustDescriptor } from './types.js'
