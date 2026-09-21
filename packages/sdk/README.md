@@ -60,9 +60,13 @@ await efs.fs.write('/notes/hello.txt', new TextEncoder().encode('gm'))
 const json = efs.toJSON(meta) // == JSON.stringify(meta, jsonReplacer)
 ```
 
-> **Implemented:** `efs.fs.read`/`readText`/`readBytes`/`readJson`, `locate`, `info`, `exists`, `list`, `write`; `efs.lenses`, `efs.eas`, `efs.raw`, the off-chain fetch/mirror engine, content hashing, and the deployments registry.
+> **Implemented:** `efs.fs.read`/`readText`/`readBytes`/`readJson`, `locate`, `info`, `exists`, `list` (including `list({ excludes })` directory filtering, ADR-0011), `write`, `overview`/`setOverview` (folder READMEs); `efs.lenses`, `efs.eas`, `efs.raw`, the off-chain fetch/mirror engine, content hashing, and the deployments registry.
 >
-> **Coming (throws `NotImplemented` with a workaround today):** `efs.fs.overview`/`setOverview` (folder READMEs — read/write `README.md` directly for now), `efs.fs.preview` (write cost estimate), `efs.batch` (one-signature multi-write — call `fs.write` per file for now), and `list({ excludes })` directory filtering (ADR-0011).
+> **Coming (throws `NotImplemented` with a workaround today):** `efs.fs.preview` (write cost estimate), `efs.batch` (one-signature multi-write — call `fs.write` per file for now), and `efs.sorts` (until the SORT_INFO schema is frozen and deployed).
+
+**Networks:** Sepolia is the only built-in deployment. A default `fs.write` stores small files on-chain (up to 16 KB automatically; pass `storage: 'onchain'` to go up to about 24 KB) and takes several wallet confirmations per file; larger files need a mirror you host (`mirrors: ['ipfs://…']`).
+
+**Content hashes** are the canonical multihash string `f1220<sha2-256 hex>` (ADR-0016, contracts specs/10). Files written by older tools with a bare `0x…` digest read back with `verification: 'malformed-claim'` — `read` still returns the bytes, while the fail-closed `readText`/`readBytes`/`readJson` throw.
 
 ## Design notes that shape this API
 

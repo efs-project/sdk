@@ -142,9 +142,12 @@ export type DeploymentsMap = Record<number, EfsDeployment>
  *
  * `transports` is intentionally absent: the per-scheme `/transports/<scheme>` anchor
  * UIDs are runtime EAS UIDs (not derivable offline) and `docs/CHAINS.md` lists only the
- * `/transports` root. Reads work fully; a default on-chain (`web3://`) write needs the
- * per-scheme UID via `WriteOptions.transportDefinition` until the map is seeded (else a
- * clear `MissingTransport`). Add the per-scheme UIDs here once the deploy records them.
+ * `/transports` root. Writes do NOT need them supplied: with no map entry, the write path
+ * resolves `/transports/<scheme>` on-chain (`writes/file.ts`, `writes/mirrors.ts`;
+ * `web3://` lives under the `onchain` anchor), so a default `fs.write` works as-is.
+ * Verified against live Sepolia 2026-09-21: `/transports/onchain`, `/transports/ipfs`
+ * and `/tags/system` (the Overview marker) all resolve. Recording the UIDs here would
+ * only save that one read per write.
  */
 export const SEPOLIA: EfsDeployment = {
   chainId: 11155111,
