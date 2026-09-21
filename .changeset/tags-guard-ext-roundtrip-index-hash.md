@@ -1,0 +1,5 @@
+---
+"@efs/sdk": patch
+---
+
+Three review fixes: (1) `efs.graph.tags.add` routes its `/tags/<name>` definition-resolution walk through the chain-guarded read client like every other planner, closing a provider-drift window that could feed a wrong-chain definition UID into the plan. (2) Artifact `ext` bags now survive the natural read-modify-write round-trip: `serializeDataRef`/`serializeWriteReceipt` re-emit a parsed `.ext` bag at the ENVELOPE (an explicit `ext` argument still wins), and `ext` is now formally reserved to the envelope — parsers reject a payload-level `ext` as `MalformedArtifact` instead of letting it masquerade as the caller's bag. (3) When an EFSIndexer `index`/`indexRevocation` tx broadcasts but its receipt confirmation fails, the new `IndexUnconfirmed` error preserves the in-flight tx hash, and the redirect verbs thread it onto `IndexingIncomplete.indexTx` — callers can reconcile the tx's fate/cost before the idempotent repair (a confirmed on-chain revert still propagates as `ContractReverted`).

@@ -1,0 +1,97 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# CI only reads the repo — never needs write.
+permissions:
+  contents: read
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ts:
+    name: TypeScript (build, typecheck, test, lint)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      # --ignore-scripts neutralizes malicious dependency postinstall/preinstall
+      # scripts — the dominant supply-chain attack on a wallet-adjacent SDK.
+      # It only suppresses *dependency* lifecycle scripts; explicit `pnpm run`
+      # pre/post hooks (e.g. the Solidity forge-std bootstrap) still run.
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - run: pnpm --filter @efs/sdk build
+      # Guard the dual ESM/CJS `exports` map: attw catches type masquerading /
+      # resolution bugs, publint catches malformed package metadata.
+      # node16 profile: the package requires Node >=20 and ships an `exports`
+      # map, so legacy node10 resolution (which ignores `exports`, breaking
+      # subpath entries) is an explicit non-target.
+      - run: pnpm --filter @efs/sdk exec attw --pack --profile node16
+      - run: pnpm --filter @efs/sdk exec publint
+      - run: pnpm --filter @efs/sdk typecheck
+      - run: pnpm --filter @efs/sdk test
+      # Bundle-size budget on the @efs/sdk ESM entry (viem external). Fails the
+      # build if the gzipped surface grows past the budget in .size-limit.json.
+      - run: pnpm --filter @efs/sdk size
+      # Dead-code / unused-dependency report. Report-only (|| true) for now — the
+      # findings are follow-ups, not a merge gate, while the API surface settles.
+      - run: pnpm --filter @efs/sdk knip || true
+      - run: pnpm lint
+      # Deployment-record drift gate (ADR-0018, interim until contracts#43 ships
+      # a generated manifest): the built-in Sepolia registry must match the
+      # contracts repo's hardhat artifacts + docs/CHAINS.md at main — and those
+      # two must agree with EACH OTHER (a conflict fails distinctly). Network-
+      # hard-fail on purpose: a silently-skipped drift gate is how the June-23
+      # view drift shipped.
+      - run: node scripts/check-deployment-drift.mjs
+
+  solidity:
+    name: Solidity (build, test, fmt)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: foundry-rs/foundry-toolchain@v1
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      # Use the package scripts so CI and a contributor's `pnpm test` run the same
+      # path; the build/test pre-hooks bootstrap forge-std (test-only, not shipped).
+      # --ignore-scripts above only suppresses *dependency* install scripts, so
+      # these explicit `pnpm run` pre/post hooks still execute.
+      - run: pnpm --filter @efs/solidity build
+      - run: pnpm --filter @efs/solidity test
+      - run: pnpm --filter @efs/solidity fmt:check
+
+  changeset:
+    name: Changeset present
+    # Skip the gate for Changesets' own "Version Packages" PR, which consumes
+    # (deletes) the changeset files — it legitimately has none left.
+    if: github.event_name == 'pull_request' && github.head_ref != 'changeset-release/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - run: pnpm changeset status --since=origin/main

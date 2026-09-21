@@ -1,0 +1,969 @@
+import { describe, expect, it, vi } from 'vitest'
+import { hashContent } from '../src/content/hash.js'
+import {
+  AllMirrorsFailedError,
+  DEFAULT_ARWEAVE_GATEWAYS,
+  DEFAULT_IPFS_GATEWAYS,
+  TRANSPORT,
+  TransportNotImplementedError,
+  UnsupportedUriError,
+  checkSsrf,
+  fetchVerified,
+  resolveTransport,
+  summarizeUri,
+} from '../src/mirror/index.js'
+
+const enc = (s: string) => new TextEncoder().encode(s)
+
+/** Build a minimal `Response`-like object with a streaming body so the engine's
+ * capped reader path is exercised (not just arrayBuffer). */
+function mockResponse(
+  bytes: Uint8Array,
+  init: { status?: number; statusText?: string; headers?: Record<string, string> } = {},
+): Response {
+  const status = init.status ?? 200
+  const headers = new Headers(init.headers ?? {})
+  if (!headers.has('content-length')) headers.set('content-length', String(bytes.byteLength))
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(bytes)
+      controller.close()
+    },
+  })
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    statusText: init.statusText ?? 'OK',
+    headers,
+    body,
+    arrayBuffer: async () =>
+      bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
+  } as unknown as Response
+}
+
+describe('resolveTransport - URI parsing (TRANSPORT allowlist)', () => {
+  it('parses https:// to itself', () => {
+    const r = resolveTransport('https://example.com/file.bin')
+    expect(r.scheme).toBe(TRANSPORT.https)
+    expect(r.httpUrls().map((u) => u.href)).toEqual(['https://example.com/file.bin'])
+  })
+
+  it('rejects plaintext http:// by default (downgrade defense, ADR-0010)', () => {
+    expect(() => resolveTransport('http://example.com/file.bin')).toThrow(UnsupportedUriError)
+    // https stays unaffected even with the option absent.
+    expect(resolveTransport('https://example.com/file.bin').scheme).toBe(TRANSPORT.https)
+  })
+
+  it('allows http:// only when allowInsecureHttp is set', () => {
+    const r = resolveTransport('http://example.com/file.bin', { allowInsecureHttp: true })
+    // It is labeled the https transport (the web transport), but the URL is preserved.
+    expect(r.scheme).toBe(TRANSPORT.https)
+    expect(r.httpUrls().map((u) => u.href)).toEqual(['http://example.com/file.bin'])
+    // The opt-in flag must be exactly `true` — any other value rejects.
+    expect(() => resolveTransport('http://example.com/x', { allowInsecureHttp: false })).toThrow(
+      UnsupportedUriError,
+    )
+  })
+
+  it('parses ipfs://CID to the default gateway list, ?format=raw on a RAW block', () => {
+    // Raw codec (0x55): the block IS the file bytes, so IPIP-402 raw is exactly
+    // what we want to re-hash.
+    const cid = 'bafkreie6p7kasggjhsdoag7daq3qhxmifpo3ltgvizvn3qphs2ncp6j5va'
+    const r = resolveTransport(`ipfs://${cid}`)
+    expect(r.scheme).toBe(TRANSPORT.ipfs)
+    const urls = r.httpUrls()
+    expect(urls).toHaveLength(DEFAULT_IPFS_GATEWAYS.length)
+    expect(urls[0]!.href).toBe(`https://ipfs.io/ipfs/${cid}?format=raw`)
+    expect(urls[1]!.href).toBe(`https://dweb.link/ipfs/${cid}?format=raw`)
+  })
+
+  it('does NOT force ?format=raw on UnixFS/dag-pb CIDs (r3742636236)', () => {
+    // dag-pb (0x70) and every CIDv0: the raw block is a protobuf node WRAPPING
+    // the payload (links only, for a multi-block file). Asking for it would
+    // re-hash to a digest that can never match contentHash, so a valid mirror
+    // would read back as verification:'mismatch' and readBytes would throw.
+    for (const cid of [
+      'bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi', // CIDv1 dag-pb
+      'QmZ1NBGCY8gyX929hs2JWv1QTUjV4wLK4eS77ddhBVoy3d', // CIDv0 — always dag-pb
+    ]) {
+      const urls = resolveTransport(`ipfs://${cid}`).httpUrls()
+      expect(urls[0]!.href).toBe(`https://ipfs.io/ipfs/${cid}`)
+      expect(urls[0]!.searchParams.has('format')).toBe(false)
+    }
+  })
+
+  it('honors overridden ipfs gateways and a subpath (no raw on a path walk)', () => {
+    // A subpath is a UnixFS directory walk — its result is a file, never the
+    // root block, so `format=raw` never applies however the CID is encoded.
+    const cid = 'bafytest'
+    const r = resolveTransport(`ipfs://${cid}/dir/a.txt`)
+    const urls = r.httpUrls({ ipfsGateways: ['https://my.gw/'] })
+    expect(urls).toHaveLength(1)
+    expect(urls[0]!.href).toBe(`https://my.gw/ipfs/${cid}/dir/a.txt`)
+  })
+
+  it('rejects path traversal in ipfs/arweave subpaths (literal and %2e-encoded)', () => {
+    const cid = 'bafytest'
+    // Literal `..` and percent-encoded `%2e%2e` both normalize in new URL and
+    // must not escape the /ipfs/<cid>/ namespace onto an arbitrary gateway path.
+    expect(() => resolveTransport(`ipfs://${cid}/../admin`).httpUrls()).toThrow()
+    expect(() => resolveTransport(`ipfs://${cid}/%2e%2e/admin`).httpUrls()).toThrow()
+    expect(() => resolveTransport(`ar://${'a'.repeat(42)}A/../../admin`).httpUrls()).toThrow()
+    // Sibling whose name shares the CID prefix: /ipfs/bafyadmin must NOT pass a
+    // namespace check for /ipfs/bafy (needs a `/` boundary, not a raw prefix).
+    expect(() => resolveTransport('ipfs://bafy/../bafyadmin').httpUrls()).toThrow()
+    // A CID/txid that carries non-alphanumeric smuggling chars is rejected at parse.
+    expect(() => resolveTransport('ipfs://bafy%2f..%2fadmin')).toThrow()
+  })
+
+  it('parses ar://TXID to arweave gateways', () => {
+    // 43 base64url chars, and CANONICAL: the 43rd carries 2 padding bits over a
+    // 32-byte id, so it must be one of AEIMQUYcgkosw048 (r3742824658).
+    const tx = `${'a'.repeat(42)}A`
+    const r = resolveTransport(`ar://${tx}`)
+    expect(r.scheme).toBe(TRANSPORT.arweave)
+    const urls = r.httpUrls()
+    expect(urls).toHaveLength(DEFAULT_ARWEAVE_GATEWAYS.length)
+    expect(urls[0]!.href).toBe(`https://arweave.net/${tx}`)
+  })
+
+  it('summarizeUri redacts even when the URI is whitespace-prefixed (r3742980319)', () => {
+    // Both redaction tests are ANCHORED, so a single leading space defeated
+    // them. This function also serves READS — fetchVerified can be called
+    // directly, and the chain is append-only, so a legacy or foreign mirror
+    // carries whatever it was minted with.
+    const payload = 'SUPERSECRETPAYLOAD'.repeat(40)
+    expect(summarizeUri(` data:text/plain,${payload}`)).not.toContain('SUPERSECRET')
+    expect(summarizeUri(` data:text/plain,${payload}`)).toMatch(/chars elided/)
+    expect(summarizeUri('\t data:text/plain;base64,AAAA')).toMatch(/chars elided/)
+
+    const cred = summarizeUri('  https://alice:hunter2@example.com/file')
+    expect(cred).not.toContain('hunter2')
+    expect(cred).not.toContain('alice')
+    expect(cred).toBe('https://<credentials redacted>@example.com/file')
+
+    // Unaffected shapes stay byte-identical.
+    expect(summarizeUri('ipfs://QmZ1NBGCY8gyX929hs2JWv1QTUjV4wLK4eS77ddhBVoy3d')).toBe(
+      'ipfs://QmZ1NBGCY8gyX929hs2JWv1QTUjV4wLK4eS77ddhBVoy3d',
+    )
+    expect(summarizeUri('https://example.com/a@b/file')).toBe('https://example.com/a@b/file')
+  })
+
+  it('rejects an https mirror carrying credentials, and never echoes them (r3742879885)', () => {
+    // WHATWG fetch REFUSES to construct a Request from a URL with credentials —
+    // it throws before any network call — so such a mirror would confirm
+    // on-chain and then fail every read with AllMirrorsFailed.
+    // A distinctive secret — not the word "password", which legitimately appears
+    // in the refusal's own explanatory text.
+    for (const uri of [
+      'https://alice:hunter2@example.com/file',
+      'https://alice@example.com/file',
+    ]) {
+      const err = (() => {
+        try {
+          resolveTransport(uri)
+        } catch (e) {
+          return e as Error
+        }
+        throw new Error(`expected ${uri} to be rejected`)
+      })()
+      expect(err).toBeInstanceOf(UnsupportedUriError)
+      expect(err.message).toMatch(/credentials/)
+      // The refusal must not print the secret it is refusing — nor the username.
+      expect(err.message).not.toContain('hunter2')
+      expect(err.message).not.toContain('alice')
+      expect(err.message).toContain('<credentials redacted>')
+    }
+    // r3742898918 — a RAW `@` inside the password. WHATWG treats the LAST `@`
+    // of the authority as the delimiter, so this parses as password `p@ss`; a
+    // first-`@` redaction would print `ss@` to the log.
+    {
+      const err = (() => {
+        try {
+          resolveTransport('https://alice:p@sswordy@example.com/file')
+        } catch (e) {
+          return e as Error
+        }
+        throw new Error('expected rejection')
+      })()
+      expect(err.message).not.toContain('sswordy')
+      expect(err.message).not.toContain('alice')
+      expect(err.message).toBe(
+        'unsupported mirror URI "https://<credentials redacted>@example.com/file": URL carries credentials (user:password@), which fetch refuses to request — publish a URL without embedded credentials',
+      )
+    }
+
+    // An `@` in the PATH or QUERY is not userinfo — those URLs stay usable.
+    expect(resolveTransport('https://example.com/a@b/file').httpUrls()[0]?.href).toBe(
+      'https://example.com/a@b/file',
+    )
+    expect(resolveTransport('https://example.com/p?to=a@b.com').scheme).toBe(TRANSPORT.https)
+  })
+
+  it('rejects a NON-CANONICAL ar:// id whose final char has pad bits set (r3742824658)', () => {
+    // 43 base64url chars = 258 bits, but the id is a 32-byte hash = 256 bits, so
+    // the last character's low 2 bits are padding. Length + alphabet alone
+    // admitted a spelling strict base64url/Arweave parsers reject.
+    for (const last of ['B', 'C', 'D', 'b', 'z', '9', '-', '_']) {
+      expect(() => resolveTransport(`ar://${'A'.repeat(42)}${last}`)).toThrow(UnsupportedUriError)
+    }
+    // The 16 legal terminators (alphabet index % 4 === 0) still resolve.
+    for (const last of [...'AEIMQUYcgkosw048']) {
+      expect(resolveTransport(`ar://${'A'.repeat(42)}${last}`).scheme).toBe(TRANSPORT.arweave)
+    }
+  })
+
+  it('rejects an ar:// id that is not exactly 43 base64url chars', () => {
+    expect(() => resolveTransport('ar://graphql')).toThrow() // a word, not a tx id
+    expect(() => resolveTransport(`ar://${'a'.repeat(42)}`)).toThrow() // too short
+  })
+
+  it('decodes a base64 data: URI inline (no network)', () => {
+    // base64 of "hello"
+    const r = resolveTransport('data:text/plain;base64,aGVsbG8=')
+    expect(r.scheme).toBe(TRANSPORT.data)
+    expect(r.inline?.contentType).toBe('text/plain')
+    expect(new TextDecoder().decode(r.inline!.bytes)).toBe('hello')
+    expect(r.httpUrls()).toEqual([])
+  })
+
+  it('decodes a percent-encoded (non-base64) data: URI inline', () => {
+    const r = resolveTransport('data:,hello%20world')
+    expect(new TextDecoder().decode(r.inline!.bytes)).toBe('hello world')
+    expect(r.inline?.contentType).toBeUndefined()
+  })
+
+  it('rejects an oversized percent-encoded base64 body before materializing it', () => {
+    // '%41' x1000 percent-decodes to 1000 'A's -> ~750 decoded bytes; at a small
+    // cap it must be rejected from the raw-scan estimate, before decodeURIComponent.
+    const body = '%41'.repeat(1000)
+    expect(() => resolveTransport(`data:;base64,${body}`, { maxBytes: 64 })).toThrow()
+  })
+
+  it('rejects a base64 body that is mostly percent-encoded whitespace filler (raw-length cap)', () => {
+    // The bypass: `%20` (a space) is NOT a significant base64 char, so
+    // significantBase64Chars() === 0 and the sig precheck passes — but the raw
+    // percent-decoded body would still be materialized in full by decodeURIComponent.
+    // A huge filler run with a tiny real payload must be rejected by the RAW-length
+    // cap BEFORE the whole string is allocated.
+    const filler = '%20'.repeat(100_000) // 100k spaces of percent-encoded filler
+    const body = `${filler}aGVsbG8=` // + base64("hello")
+    expect(() => resolveTransport(`data:;base64,${body}`, { maxBytes: 64 })).toThrow(
+      UnsupportedUriError,
+    )
+    // A small amount of legitimate whitespace around a real payload still decodes
+    // fine (the cap allows a generous whitespace allowance over the base64 budget).
+    const ok = resolveTransport('data:;base64,%20aGVsbG8%3D%20', { maxBytes: 64 })
+    expect(new TextDecoder().decode(ok.inline!.bytes)).toBe('hello')
+  })
+
+  it('detects ;base64 with whitespace before the comma (trimmed media type)', () => {
+    // RFC 2397 allows whitespace; `;base64 ,` must still be treated as base64.
+    const r = resolveTransport('data:text/plain;base64 ,SGVsbG8=')
+    expect(new TextDecoder().decode(r.inline!.bytes)).toBe('Hello')
+  })
+
+  it('does not split a surrogate pair across the literal flush boundary', () => {
+    // An astral char (😀 = F0 9F 98 80) landing on the 4096-char flush boundary
+    // must encode as 4 bytes, not two replacement chars.
+    const r = resolveTransport(`data:,${'a'.repeat(4095)}😀`)
+    const tail = r.inline!.bytes.slice(-4)
+    expect(Array.from(tail)).toEqual([0xf0, 0x9f, 0x98, 0x80])
+  })
+
+  it('percent-decodes a base64 data: body before decoding (WHATWG order)', () => {
+    // %2Fw%3D%3D percent-decodes to '/w==', which base64-decodes to the byte 0xff.
+    const r = resolveTransport('data:application/octet-stream;base64,%2Fw%3D%3D')
+    expect(r.inline?.bytes).toEqual(new Uint8Array([0xff]))
+    // And it must not be falsely rejected at a tight cap (1 real byte).
+    const capped = resolveTransport('data:application/octet-stream;base64,%2Fw%3D%3D', {
+      maxBytes: 1,
+    })
+    expect(capped.inline?.bytes).toEqual(new Uint8Array([0xff]))
+  })
+
+  it('decodes percent-escaped binary octets (not UTF-8 text) in data: URIs', () => {
+    // %ff is the byte 0xFF — invalid UTF-8; decodeURIComponent would throw.
+    const r = resolveTransport('data:application/octet-stream,%ff')
+    expect(r.inline?.bytes).toEqual(new Uint8Array([0xff]))
+    // Mixed literal + octet escapes round-trip byte-wise.
+    const mixed = resolveTransport('data:,A%00%ff')
+    expect(mixed.inline?.bytes).toEqual(new Uint8Array([0x41, 0x00, 0xff]))
+  })
+
+  it('magnet: parses but yields no HTTP URLs', () => {
+    const r = resolveTransport('magnet:?xt=urn:btih:abc')
+    expect(r.scheme).toBe(TRANSPORT.magnet)
+    expect(r.httpUrls()).toEqual([])
+  })
+
+  it('web3:// parses but throws NotImplemented when resolved (the seam)', () => {
+    const r = resolveTransport('web3://0xabc/foo')
+    expect(r.scheme).toBe(TRANSPORT.web3)
+    expect(() => r.httpUrls()).toThrow(TransportNotImplementedError)
+  })
+
+  it('rejects unknown schemes and schemeless input', () => {
+    expect(() => resolveTransport('ftp://x')).toThrow(UnsupportedUriError)
+    expect(() => resolveTransport('not-a-uri')).toThrow(UnsupportedUriError)
+  })
+})
+
+describe('checkSsrf - host guard', () => {
+  const block = (h: string) => checkSsrf(new URL(h))
+  it('blocks loopback, private, link-local, metadata IPs', () => {
+    expect(block('http://127.0.0.1/x').blocked).toBe(true)
+    expect(block('http://10.0.0.5/x').blocked).toBe(true)
+    expect(block('http://172.16.0.1/x').blocked).toBe(true)
+    expect(block('http://192.168.1.1/x').blocked).toBe(true)
+    expect(block('http://169.254.169.254/latest/meta-data').blocked).toBe(true)
+    expect(block('http://[::1]/x').blocked).toBe(true)
+    expect(block('http://localhost/x').blocked).toBe(true)
+    expect(block('http://metadata.google.internal/x').blocked).toBe(true)
+  })
+  it('blocks IPv4-mapped IPv6, including the canonical hex form Node emits', () => {
+    // new URL() canonicalizes [::ffff:127.0.0.1] -> hostname '::ffff:7f00:1';
+    // both the dotted input and the explicit hex form must be blocked (P1 SSRF).
+    expect(block('http://[::ffff:127.0.0.1]/x').blocked).toBe(true)
+    expect(block('http://[::ffff:7f00:1]/x').blocked).toBe(true)
+    expect(block('http://[::ffff:a9fe:a9fe]/latest/meta-data').blocked).toBe(true) // 169.254.169.254
+    expect(block('http://[::ffff:0a00:0005]/x').blocked).toBe(true) // 10.0.0.5
+    // A public IPv4-mapped address stays allowed.
+    expect(block('http://[::ffff:0808:0808]/x').blocked).toBe(false) // 8.8.8.8
+  })
+  it('relies on URL normalization for alternate IPv4 encodings (lock-in)', () => {
+    // Node's WHATWG URL parser canonicalizes these to dotted-quad BEFORE the
+    // guard runs. These assertions lock that assumption in — if a future parser
+    // stopped normalizing, the guard would silently weaken and this would fail.
+    expect(block('http://0177.0.0.1/x').blocked).toBe(true) // octal -> 127.0.0.1
+    expect(block('http://2130706433/x').blocked).toBe(true) // dword -> 127.0.0.1
+    expect(block('http://0x7f000001/x').blocked).toBe(true) // hex -> 127.0.0.1
+    expect(block('http://127.1/x').blocked).toBe(true) // part-collapse -> 127.0.0.1
+    expect(block('http://2852039166/x').blocked).toBe(true) // dword -> 169.254.169.254
+  })
+  it('blocks IPv6 transition forms that embed a private/loopback IPv4', () => {
+    expect(block('http://[::127.0.0.1]/x').blocked).toBe(true) // IPv4-compatible
+    expect(block('http://[::ffff:0:127.0.0.1]/x').blocked).toBe(true) // IPv4-translated
+    expect(block('http://[64:ff9b::127.0.0.1]/x').blocked).toBe(true) // NAT64 -> loopback
+    expect(block('http://[64:ff9b::a9fe:a9fe]/x').blocked).toBe(true) // NAT64 -> metadata
+    expect(block('http://[2002:7f00:1::]/x').blocked).toBe(true) // 6to4 -> 127.0.0.1
+    expect(block('http://[fec0::1]/x').blocked).toBe(true) // site-local (deprecated)
+    expect(block('http://[2001::1]/x').blocked).toBe(true) // Teredo
+    expect(block('http://[ff02::1]/x').blocked).toBe(true) // multicast (ff00::/8)
+    expect(block('http://[ff05::1:3]/x').blocked).toBe(true) // site-local multicast
+    // Public IPv6 and a public IPv4-mapped address stay allowed.
+    expect(block('https://[2606:4700:4700::1111]/x').blocked).toBe(false) // Cloudflare DNS
+    expect(block('http://[::ffff:8.8.8.8]/x').blocked).toBe(false)
+  })
+  it('blocks trailing-dot FQDN forms of internal hosts', () => {
+    // DNS treats `localhost.` as `localhost`, but URL.hostname keeps the dot.
+    expect(block('http://localhost./x').blocked).toBe(true)
+    expect(block('http://metadata.google.internal./x').blocked).toBe(true)
+    expect(block('http://foo.internal./x').blocked).toBe(true)
+    expect(block('http://127.0.0.1./x').blocked).toBe(true)
+  })
+  it('allows public hosts', () => {
+    expect(block('https://example.com/x').blocked).toBe(false)
+    expect(block('https://8.8.8.8/x').blocked).toBe(false)
+  })
+  it('respects allowPrivateHosts + allowlist', () => {
+    expect(checkSsrf(new URL('http://127.0.0.1/x'), { allowPrivateHosts: true }).blocked).toBe(
+      false,
+    )
+    expect(checkSsrf(new URL('http://localhost/x'), { allowlist: ['localhost'] }).blocked).toBe(
+      false,
+    )
+  })
+})
+
+describe('fetchVerified - maxBytes validation (public surface)', () => {
+  // The downstream cap checks are `>` comparisons: NaN never rejects an oversized payload and
+  // Infinity disables the hard ceiling. A direct caller passing a non-finite/non-positive cap
+  // must be rejected up front (the higher-level fetchRef validates too, but the engine is also
+  // public and must be safe on its own).
+  for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, 0, -1]) {
+    it(`rejects a non-finite/non-positive maxBytes (${bad})`, async () => {
+      await expect(
+        fetchVerified(['data:text/plain;base64,aGVsbG8='], undefined, { maxBytes: bad }),
+      ).rejects.toThrow(/maxBytes/)
+    })
+  }
+})
+
+describe('fetchVerified - happy paths per transport', () => {
+  it('https happy path returns matches-author + declared content-type (informational)', async () => {
+    const bytes = enc('the bytes')
+    const hash = hashContent(bytes)
+    const fetchImpl = vi.fn(async () =>
+      mockResponse(bytes, { headers: { 'content-type': 'application/pdf' } }),
+    ) as unknown as typeof fetch
+    const res = await fetchVerified(['https://cdn.example.com/a'], hash, { fetchImpl })
+    expect(res.verification).toBe('matches-author')
+    expect(res.contentType).toBe('application/pdf')
+    expect(res.mirrorUsed).toBe('https://cdn.example.com/a')
+    expect(res.bytes).toEqual(bytes)
+    expect(fetchImpl).toHaveBeenCalledOnce()
+  })
+
+  it('ipfs happy path hits the first gateway', async () => {
+    const bytes = enc('ipfs content')
+    const hash = hashContent(bytes)
+    const fetchImpl = vi.fn(async () => mockResponse(bytes)) as unknown as typeof fetch
+    const res = await fetchVerified(['ipfs://bafytest'], hash, { fetchImpl })
+    expect(res.verification).toBe('matches-author')
+    expect(res.urlUsed).toBe('https://ipfs.io/ipfs/bafytest')
+  })
+
+  it('rejects an http:// gateway URL unless allowInsecureHttp (no network call)', async () => {
+    const bytes = enc('ipfs content')
+    const hash = hashContent(bytes)
+    const fetchImpl = vi.fn(async () => mockResponse(bytes)) as unknown as typeof fetch
+    // The ipfs:// mirror resolves through an http:// gateway → a plaintext concrete URL.
+    await expect(
+      fetchVerified(['ipfs://bafytest'], hash, { fetchImpl, ipfsGateways: ['http://gw.example/'] }),
+    ).rejects.toThrow()
+    expect(fetchImpl).not.toHaveBeenCalled() // downgrade blocked before the network
+  })
+
+  it('allows an http:// gateway only when allowInsecureHttp is set', async () => {
+    const bytes = enc('ipfs content')
+    const hash = hashContent(bytes)
+    const fetchImpl = vi.fn(async () => mockResponse(bytes)) as unknown as typeof fetch
+    const res = await fetchVerified(['ipfs://bafytest'], hash, {
+      fetchImpl,
+      ipfsGateways: ['http://gw.example/'],
+      allowInsecureHttp: true,
+    })
+    expect(res.verification).toBe('matches-author')
+    expect(fetchImpl).toHaveBeenCalled()
+  })
+
+  it('data: URI is verified inline without any fetch call', async () => {
+    const bytes = enc('hello')
+    const hash = hashContent(bytes)
+    const fetchImpl = vi.fn() as unknown as typeof fetch
+    const res = await fetchVerified(['data:text/plain;base64,aGVsbG8='], hash, { fetchImpl })
+    expect(res.verification).toBe('matches-author')
+    expect(res.contentType).toBe('text/plain')
+    expect(fetchImpl).not.toHaveBeenCalled()
+  })
+
+  it('refuses a compressed response before reading the body (decompression bomb)', async () => {
+    const fetchImpl = vi.fn(async () =>
+      mockResponse(enc('x'), { headers: { 'content-encoding': 'gzip' } }),
+    ) as unknown as typeof fetch
+    await expect(
+      fetchVerified(['https://mirror.example/blob'], undefined, { fetchImpl }),
+    ).rejects.toBeInstanceOf(AllMirrorsFailedError)
+  })
+
+  it('enforces maxBytes on inline data: URIs (no cap bypass)', async () => {
+    // 'hello' is 5 bytes; cap at 4 -> the inline mirror must be rejected.
+    const fetchImpl = vi.fn() as unknown as typeof fetch
+    await expect(
+      fetchVerified(['data:text/plain;base64,aGVsbG8='], undefined, { fetchImpl, maxBytes: 4 }),
+    ).rejects.toBeInstanceOf(AllMirrorsFailedError)
+    expect(fetchImpl).not.toHaveBeenCalled()
+  })
+
+  it('does not count base64 padding/whitespace against the cap', async () => {
+    // 'aGVsbG8=' decodes to exactly 5 bytes; at maxBytes=5 it must be ACCEPTED
+    // (the padding `=` must not be counted as a 6th byte by the pre-check).
+    const bytes = enc('hello')
+    const hash = hashContent(bytes)
+    const fetchImpl = vi.fn() as unknown as typeof fetch
+    const res = await fetchVerified(['data:text/plain;base64,aGVsbG8='], hash, {
+      fetchImpl,
+      maxBytes: 5,
+    })
+    expect(res.verification).toBe('matches-author')
+    expect(res.bytes).toEqual(bytes)
+  })
+
+  it('elides the data: payload from error + attempt records (no full-payload copies)', async () => {
+    const body = 'A'.repeat(5000)
+    const uri = `data:;base64,${body}`
+    await expect(fetchVerified([uri], undefined, { maxBytes: 64 })).rejects.toMatchObject({
+      name: 'AllMirrorsFailedError',
+    })
+    try {
+      await fetchVerified([uri], undefined, { maxBytes: 64 })
+    } catch (e) {
+      const err = e as AllMirrorsFailedError
+      expect(err.attempts[0]!.uri).toContain('elided')
+      expect(err.attempts[0]!.uri).not.toContain(body)
+      expect(err.message).not.toContain(body)
+    }
+  })
+
+  it('aborts a large literal data: payload during decode (bound-aware)', () => {
+    // A mostly-literal payload well over the cap must be rejected by the decoder
+    // itself, not allocated in full and then rejected after the fact.
+    const big = 'a'.repeat(10_000)
+    expect(() => resolveTransport(`data:,${big}`, { maxBytes: 64 })).toThrow()
+  })
+
+  it('counts UTF-8 bytes (not UTF-16 length) for text data: URIs', async () => {
+    // '€' is 1 string char but 3 UTF-8 bytes; cap at 2 must reject it even though
+    // its character count (1) is within the cap.
+    const fetchImpl = vi.fn() as unknown as typeof fetch
+    await expect(
+      fetchVerified(['data:,%E2%82%AC'], undefined, { fetchImpl, maxBytes: 2 }),
+    ).rejects.toBeInstanceOf(AllMirrorsFailedError)
+    // resolveTransport enforces the cap directly too (not only via fetchVerified).
+    expect(() => resolveTransport('data:,%E2%82%AC', { maxBytes: 2 })).toThrow()
+    // A literal (non-percent-encoded) non-ASCII char is caught as well.
+    expect(() => resolveTransport('data:,€', { maxBytes: 2 })).toThrow()
+  })
+})
+
+describe('fetchVerified - failover', () => {
+  it('falls over to the next ipfs gateway when the first errors', async () => {
+    const bytes = enc('content')
+    const hash = hashContent(bytes)
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(
+        mockResponse(new Uint8Array(), { status: 502, statusText: 'Bad Gateway' }),
+      )
+      .mockResolvedValueOnce(mockResponse(bytes)) as unknown as typeof fetch
+    const res = await fetchVerified(['ipfs://bafytest'], hash, { fetchImpl })
+    expect(res.verification).toBe('matches-author')
+    expect(res.urlUsed).toBe('https://dweb.link/ipfs/bafytest')
+    expect(res.attempts).toHaveLength(1)
+    expect(res.attempts[0]!.reason).toContain('502')
+  })
+
+  it('falls over from a dead mirror to the next mirror', async () => {
+    const bytes = enc('second mirror wins')
+    const hash = hashContent(bytes)
+    const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+      const href = String(input)
+      if (href.startsWith('https://dead.example')) throw new Error('ECONNREFUSED')
+      return mockResponse(bytes)
+    }) as unknown as typeof fetch
+    const res = await fetchVerified(['https://dead.example/a', 'https://live.example/a'], hash, {
+      fetchImpl,
+    })
+    expect(res.mirrorUsed).toBe('https://live.example/a')
+    expect(res.attempts).toHaveLength(1)
+  })
+
+  it('web3:// mirror is recorded as failed but a later mirror still wins', async () => {
+    const bytes = enc('x')
+    const hash = hashContent(bytes)
+    const fetchImpl = vi.fn(async () => mockResponse(bytes)) as unknown as typeof fetch
+    const res = await fetchVerified(['web3://0xabc/f', 'https://ok.example/f'], hash, { fetchImpl })
+    expect(res.mirrorUsed).toBe('https://ok.example/f')
+    expect(res.attempts[0]!.scheme).toBe(TRANSPORT.web3)
+    expect(res.attempts[0]!.reason).toContain('not implemented')
+  })
+
+  it('throws AllMirrorsFailedError with the attempt log when nothing works', async () => {
+    const fetchImpl = vi.fn(async () => {
+      throw new Error('network down')
+    }) as unknown as typeof fetch
+    await expect(
+      fetchVerified(['https://a.example/x', 'https://b.example/x'], undefined, { fetchImpl }),
+    ).rejects.toBeInstanceOf(AllMirrorsFailedError)
+  })
+})
+
+describe('fetchVerified - size cap', () => {
+  it('trips on an honest Content-Length over the cap (no body read)', async () => {
+    const big = enc('x'.repeat(100))
+    const fetchImpl = vi.fn(async () =>
+      mockResponse(big, { headers: { 'content-length': '999999999' } }),
+    ) as unknown as typeof fetch
+    await expect(
+      fetchVerified(['https://a.example/big'], undefined, { fetchImpl, maxBytes: 10 }),
+    ).rejects.toBeInstanceOf(AllMirrorsFailedError)
+  })
+
+  it('trips while streaming when the declared length lies', async () => {
+    const big = enc('x'.repeat(100))
+    // Declare a small length but stream a large body.
+    const fetchImpl = vi.fn(async () =>
+      mockResponse(big, { headers: { 'content-length': '5' } }),
+    ) as unknown as typeof fetch
+    await expect(
+      fetchVerified(['https://a.example/big'], undefined, { fetchImpl, maxBytes: 10 }),
+    ).rejects.toBeInstanceOf(AllMirrorsFailedError)
+  })
+})
+
+describe('fetchVerified - timeout', () => {
+  it('aborts a slow attempt and fails over', async () => {
+    vi.useFakeTimers()
+    try {
+      const bytes = enc('fast')
+      const hash = hashContent(bytes)
+      const fetchImpl = vi.fn((input: string | URL | Request, init?: RequestInit) => {
+        const href = String(input)
+        if (href.includes('slow')) {
+          // Never resolves on its own; rejects when the engine's timer aborts.
+          return new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener('abort', () => {
+              const e = new Error('aborted')
+              e.name = 'AbortError'
+              reject(e)
+            })
+          })
+        }
+        return Promise.resolve(mockResponse(bytes))
+      }) as unknown as typeof fetch
+
+      const p = fetchVerified(['https://slow.example/a', 'https://fast.example/a'], hash, {
+        fetchImpl,
+        timeoutMs: 1000,
+      })
+      // Advance past the per-attempt timeout so the slow attempt aborts.
+      await vi.advanceTimersByTimeAsync(1001)
+      const res = await p
+      expect(res.mirrorUsed).toBe('https://fast.example/a')
+      expect(res.attempts[0]!.reason).toContain('timed out')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+describe('fetchVerified - verification statuses', () => {
+  const bytes = enc('payload')
+  const makeFetch = () => vi.fn(async () => mockResponse(bytes)) as unknown as typeof fetch
+
+  it('mismatch when the hash diverges', async () => {
+    const res = await fetchVerified(['https://a.example/x'], hashContent(enc('other')), {
+      fetchImpl: makeFetch(),
+    })
+    expect(res.verification).toBe('mismatch')
+    expect(res.bytes).toEqual(bytes) // bytes are still returned
+  })
+
+  it('malformed-claim when expectedHash is not 64-hex', async () => {
+    const res = await fetchVerified(['https://a.example/x'], '0xdeadbeef', {
+      fetchImpl: makeFetch(),
+    })
+    expect(res.verification).toBe('malformed-claim')
+  })
+
+  it('malformed-claim for a non-canonical (uppercase) hash, not a silent match', async () => {
+    const bytes = enc('payload')
+    const upper = (hashContent(bytes) as string).toUpperCase() // valid bytes, uppercased claim
+    const res = await fetchVerified(['https://a.example/x'], upper, {
+      fetchImpl: vi.fn(async () => mockResponse(bytes)) as unknown as typeof fetch,
+    })
+    expect(res.verification).toBe('malformed-claim')
+  })
+
+  it('no-claim when expectedHash is undefined', async () => {
+    const res = await fetchVerified(['https://a.example/x'], undefined, {
+      fetchImpl: makeFetch(),
+    })
+    expect(res.verification).toBe('no-claim')
+  })
+})
+
+describe('fetchVerified - SSRF', () => {
+  it('summarizes an oversized failed URL in error/attempt records', async () => {
+    const big = `https://127.0.0.1/${'a'.repeat(5000)}`
+    const fetchImpl = vi.fn() as unknown as typeof fetch
+    try {
+      await fetchVerified([big], undefined, { fetchImpl })
+    } catch (e) {
+      const err = e as AllMirrorsFailedError
+      expect(err.attempts[0]!.url?.length ?? 0).toBeLessThan(260)
+      expect(err.attempts[0]!.url).not.toContain('a'.repeat(5000))
+      expect(err.message).not.toContain('a'.repeat(5000))
+    }
+    expect(fetchImpl).not.toHaveBeenCalled() // blocked before any fetch
+  })
+
+  it('skips an SSRF-blocked host and records it, then fails over', async () => {
+    const bytes = enc('safe')
+    const hash = hashContent(bytes)
+    const fetchImpl = vi.fn(async () => mockResponse(bytes)) as unknown as typeof fetch
+    const res = await fetchVerified(
+      ['https://169.254.169.254/latest', 'https://public.example/x'],
+      hash,
+      { fetchImpl },
+    )
+    expect(res.mirrorUsed).toBe('https://public.example/x')
+    expect(res.attempts[0]!.reason).toContain('SSRF-blocked')
+    // The blocked host was never fetched.
+    expect(fetchImpl).toHaveBeenCalledOnce()
+    expect(fetchImpl).toHaveBeenCalledWith('https://public.example/x', expect.anything())
+  })
+
+  it('allows a private host when allowPrivateHosts is set', async () => {
+    const bytes = enc('local')
+    const hash = hashContent(bytes)
+    const fetchImpl = vi.fn(async () => mockResponse(bytes)) as unknown as typeof fetch
+    const res = await fetchVerified(['https://127.0.0.1/x'], hash, {
+      fetchImpl,
+      allowPrivateHosts: true,
+    })
+    expect(res.verification).toBe('matches-author')
+  })
+
+  it('re-checks redirect targets: a 30x to a private host is blocked (P1)', async () => {
+    const fetchImpl = vi.fn(async (url: string) => {
+      // A public mirror that tries to bounce us at loopback.
+      if (url === 'https://public.example/a') {
+        return mockResponse(new Uint8Array(), {
+          status: 302,
+          headers: { location: 'http://127.0.0.1/secret' },
+        })
+      }
+      throw new Error(`unexpected fetch to ${url}`) // 127.0.0.1 must never be hit
+    }) as unknown as typeof fetch
+    await expect(
+      fetchVerified(['https://public.example/a'], undefined, { fetchImpl }),
+    ).rejects.toBeInstanceOf(AllMirrorsFailedError)
+    // The redirect was issued once; the loopback target was never fetched.
+    expect(fetchImpl).toHaveBeenCalledOnce()
+    expect(fetchImpl).toHaveBeenCalledWith('https://public.example/a', expect.anything())
+  })
+
+  it('follows a redirect to a public host and verifies the final bytes', async () => {
+    const bytes = enc('after redirect')
+    const hash = hashContent(bytes)
+    const fetchImpl = vi.fn(async (url: string) =>
+      url === 'https://public.example/a'
+        ? mockResponse(new Uint8Array(), {
+            status: 302,
+            headers: { location: 'https://cdn.example/b' },
+          })
+        : mockResponse(bytes),
+    ) as unknown as typeof fetch
+    const res = await fetchVerified(['https://public.example/a'], hash, { fetchImpl })
+    expect(res.verification).toBe('matches-author')
+    expect(fetchImpl).toHaveBeenCalledTimes(2)
+    expect(fetchImpl).toHaveBeenLastCalledWith('https://cdn.example/b', expect.anything())
+    // urlUsed reports the FINAL fetched URL, not the original candidate.
+    expect(res.urlUsed).toBe('https://cdn.example/b')
+  })
+})
+
+describe('fetchVerified - http downgrade defense (allowInsecureHttp)', () => {
+  it('rejects an http:// mirror by default (recorded as a failed attempt)', async () => {
+    const fetchImpl = vi.fn() as unknown as typeof fetch
+    await expect(
+      fetchVerified(['http://mirror.example/blob'], undefined, { fetchImpl }),
+    ).rejects.toBeInstanceOf(AllMirrorsFailedError)
+    // It was rejected at resolveTransport — no network call ever issued.
+    expect(fetchImpl).not.toHaveBeenCalled()
+    try {
+      await fetchVerified(['http://mirror.example/blob'], undefined, { fetchImpl })
+    } catch (e) {
+      expect((e as AllMirrorsFailedError).attempts[0]!.reason).toMatch(/plaintext http/i)
+    }
+  })
+
+  it('fetches an http:// mirror when allowInsecureHttp is set', async () => {
+    const bytes = enc('local plaintext')
+    const hash = hashContent(bytes)
+    const fetchImpl = vi.fn(async () => mockResponse(bytes)) as unknown as typeof fetch
+    const res = await fetchVerified(['http://127.0.0.1/x'], hash, {
+      fetchImpl,
+      allowInsecureHttp: true,
+      allowPrivateHosts: true, // a local plaintext mirror is also a private host
+    })
+    expect(res.verification).toBe('matches-author')
+    expect(fetchImpl).toHaveBeenCalledWith('http://127.0.0.1/x', expect.anything())
+  })
+
+  it('leaves https:// unaffected by the http guard', async () => {
+    const bytes = enc('secure')
+    const hash = hashContent(bytes)
+    const fetchImpl = vi.fn(async () => mockResponse(bytes)) as unknown as typeof fetch
+    const res = await fetchVerified(['https://cdn.example/a'], hash, { fetchImpl })
+    expect(res.verification).toBe('matches-author')
+  })
+
+  it('rejects an https→http redirect by default, but follows it with allowInsecureHttp', async () => {
+    const bytes = enc('after downgrade')
+    const hash = hashContent(bytes)
+    const makeFetch = () =>
+      vi.fn(async (url: string) =>
+        url === 'https://public.example/a'
+          ? mockResponse(new Uint8Array(), {
+              status: 302,
+              headers: { location: 'http://public.example/b' },
+            })
+          : mockResponse(bytes),
+      ) as unknown as typeof fetch
+
+    // Default: the http redirect target is refused — the http hop is never fetched.
+    const blocked = makeFetch()
+    await expect(
+      fetchVerified(['https://public.example/a'], hash, { fetchImpl: blocked }),
+    ).rejects.toBeInstanceOf(AllMirrorsFailedError)
+    expect(blocked).toHaveBeenCalledOnce() // only the initial https request
+    expect(blocked).toHaveBeenCalledWith('https://public.example/a', expect.anything())
+
+    // Opt in: the downgrade redirect is followed and the bytes verify.
+    const allowed = makeFetch()
+    const res = await fetchVerified(['https://public.example/a'], hash, {
+      fetchImpl: allowed,
+      allowInsecureHttp: true,
+    })
+    expect(res.verification).toBe('matches-author')
+    expect(res.urlUsed).toBe('http://public.example/b')
+  })
+})
+
+describe('fetchVerified - AbortSignal', () => {
+  it('an already-aborted signal short-circuits before any fetch — and propagates as the ABORT, not a mirror outage (r3740636913)', async () => {
+    const ac = new AbortController()
+    ac.abort()
+    const fetchImpl = vi.fn() as unknown as typeof fetch
+    const err = await fetchVerified(['https://a.example/x'], undefined, {
+      fetchImpl,
+      signal: ac.signal,
+    }).catch((e) => e)
+    // Cancellation is the CALLER's act — converting it into AllMirrorsFailedError
+    // misclassified it as an outage. The raw abort reason propagates.
+    expect(err).not.toBeInstanceOf(AllMirrorsFailedError)
+    expect((err as Error).name).toBe('AbortError')
+    expect(fetchImpl).not.toHaveBeenCalled()
+  })
+
+  it('does not decode an inline data: mirror when already aborted', async () => {
+    // The abort check must run BEFORE resolveTransport decodes the inline payload.
+    const ac = new AbortController()
+    ac.abort()
+    const err = await fetchVerified(['data:text/plain;base64,aGVsbG8='], undefined, {
+      signal: ac.signal,
+    }).catch((e) => e)
+    expect((err as Error).name).toBe('AbortError') // the abort, not a mirror outage
+  })
+})
+
+describe('browser opaqueredirect fails closed (review r3740599137, supersedes r3740482355)', () => {
+  it('an opaque redirect is REJECTED (not followed unchecked) and failover proceeds', async () => {
+    // The destination of an opaque redirect cannot be safety-checked (no
+    // Location visible), so none of the per-hop SSRF/downgrade guards can run —
+    // and CORS gates response READING, not whether the redirected request
+    // reaches a private-network endpoint. The attempt fails; a direct mirror wins.
+    const bytes = new TextEncoder().encode('direct wins')
+    const hash = hashContent(bytes)
+    const dataUri = `data:application/octet-stream;base64,${Buffer.from(bytes).toString('base64')}`
+    let followRequests = 0
+    const fetchImpl = (async (_url: unknown, init?: { redirect?: string }) => {
+      if (init?.redirect === 'manual') {
+        return { type: 'opaqueredirect', ok: false, status: 0 } as unknown as Response
+      }
+      followRequests += 1
+      return mockResponse(bytes)
+    }) as typeof fetch
+    const { fetchVerified } = await import('../src/mirror/fetch.js')
+    const out = await fetchVerified(['https://gateway.example/redirects', dataUri], hash, {
+      fetchImpl,
+    })
+    expect(out.verification).toBe('matches-author')
+    expect(out.mirrorUsed).toBe(dataUri) // the redirecting mirror was skipped
+    expect(out.attempts[0]?.reason).toMatch(/opaque redirect/i)
+    expect(followRequests).toBe(0) // the unchecked follow never happened
+  })
+})
+
+describe('numeric-option validation (review r3740495860 + sweep)', () => {
+  it('resolveTransport rejects non-finite/non-positive maxBytes at the public entry', () => {
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, 0, -5]) {
+      expect(() => resolveTransport('data:text/plain;base64,aGk=', { maxBytes: bad })).toThrow(
+        RangeError,
+      )
+    }
+  })
+
+  it('fetchVerified rejects a non-finite/non-positive timeoutMs (would abort every attempt instantly)', async () => {
+    const { fetchVerified } = await import('../src/mirror/fetch.js')
+    await expect(
+      fetchVerified(['https://x.example/a'], undefined, { timeoutMs: Number.NaN }),
+    ).rejects.toThrow(RangeError)
+  })
+})
+
+describe('web3 attempt races the timeout (review r3740539231)', () => {
+  it('a reader whose RPC never settles cannot block failover past timeoutMs', async () => {
+    const bytes = new TextEncoder().encode('fallback wins')
+    const hash = hashContent(bytes)
+    const dataUri = `data:application/octet-stream;base64,${Buffer.from(bytes).toString('base64')}`
+    const { fetchVerified } = await import('../src/mirror/fetch.js')
+    const start = Date.now()
+    const out = await fetchVerified([`web3://0x${'aa'.repeat(20)}`, dataUri], hash, {
+      timeoutMs: 50,
+      web3Reader: () => new Promise<Uint8Array>(() => {}), // NEVER settles
+    })
+    expect(out.verification).toBe('matches-author')
+    expect(out.mirrorUsed).toBe(dataUri) // failover happened
+    expect(out.attempts[0]?.reason).toMatch(/abort/i)
+    expect(Date.now() - start).toBeLessThan(5_000) // settled on the timer, not never
+  })
+})
+
+describe('abort propagates between GATEWAY attempts (review r3740650224)', () => {
+  it('an abort during the first gateway surfaces as the abort, not AllMirrorsFailed', async () => {
+    const ac = new AbortController()
+    const fetchImpl = (async () => {
+      // The caller cancels while the first gateway attempt is in flight.
+      ac.abort()
+      throw Object.assign(new Error('The operation was aborted.'), { name: 'AbortError' })
+    }) as unknown as typeof fetch
+    const { fetchVerified } = await import('../src/mirror/fetch.js')
+    const err = await fetchVerified(
+      ['ipfs://bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi'],
+      undefined,
+      {
+        fetchImpl,
+        signal: ac.signal,
+        ipfsGateways: ['https://g1.example/ipfs/', 'https://g2.example/ipfs/'],
+      },
+    ).catch((e) => e)
+    expect((err as Error).name).toBe('AbortError')
+    expect(err).not.toBeInstanceOf(AllMirrorsFailedError)
+  })
+})
+
+describe('cap enforcement + timer bounds + custom abort reasons (reviews r3740666173/77/79)', () => {
+  it('a non-streamable body FAILS the attempt (the cap cannot be enforced) and failover proceeds', async () => {
+    const bytes = new TextEncoder().encode('streamed wins')
+    const hash = hashContent(bytes)
+    const dataUri = `data:application/octet-stream;base64,${Buffer.from(bytes).toString('base64')}`
+    const fetchImpl = (async () => {
+      // A response with arrayBuffer but NO body stream — buffering it would
+      // allocate the whole (attacker-sized) payload before any cap check.
+      return {
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        headers: new Headers(),
+        body: null,
+        arrayBuffer: async () => new ArrayBuffer(4),
+      } as unknown as Response
+    }) as typeof fetch
+    const { fetchVerified } = await import('../src/mirror/fetch.js')
+    const out = await fetchVerified(['https://mock.example/x', dataUri], hash, { fetchImpl })
+    expect(out.mirrorUsed).toBe(dataUri)
+    expect(out.attempts[0]?.reason).toMatch(/not streamable/i)
+  })
+
+  it('rejects timeoutMs above the platform timer ceiling (would truncate to ~1ms)', async () => {
+    const { fetchVerified, MAX_TIMEOUT_MS } = await import('../src/mirror/fetch.js')
+    await expect(
+      fetchVerified(['https://x.example/a'], undefined, { timeoutMs: MAX_TIMEOUT_MS + 1 }),
+    ).rejects.toThrow(RangeError)
+    expect(MAX_TIMEOUT_MS).toBe(2_147_483_647)
+  })
+
+  it('a CUSTOM abort reason (non-Error) propagates verbatim, never classified as an outage', async () => {
+    const ac = new AbortController()
+    ac.abort('user pressed cancel') // a string reason — no name property
+    const { fetchVerified } = await import('../src/mirror/fetch.js')
+    const err = await fetchVerified(['https://a.example/x'], undefined, {
+      signal: ac.signal,
+    }).catch((e) => e)
+    expect(err).toBe('user pressed cancel')
+  })
+})

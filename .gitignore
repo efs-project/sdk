@@ -1,0 +1,29 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# TypeScript / build output
+dist/
+*.tsbuildinfo
+
+# Turbo
+.turbo/
+
+# Foundry (packages/solidity) — build artifacts, never shipped or tracked
+out/
+cache/
+broadcast/
+packages/solidity/out/
+packages/solidity/cache/
+packages/solidity/lib/
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.log

@@ -1,0 +1,902 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.26;
+
+import {Test} from "forge-std/Test.sol";
+import {
+    IEAS,
+    AttestationRequest,
+    AttestationRequestData,
+    MultiAttestationRequest,
+    DelegatedAttestationRequest,
+    MultiDelegatedAttestationRequest,
+    RevocationRequest,
+    MultiRevocationRequest,
+    DelegatedRevocationRequest,
+    MultiDelegatedRevocationRequest
+} from "@ethereum-attestation-service/eas-contracts/contracts/IEAS.sol";
+import {Attestation} from "@ethereum-attestation-service/eas-contracts/contracts/Common.sol";
+import {
+    ISchemaRegistry
+} from "@ethereum-attestation-service/eas-contracts/contracts/ISchemaRegistry.sol";
+import {EFSWriter} from "../src/v1/EFSWriter.sol";
+import {EFSLib, IEFSIndexerWrite} from "../src/v1/EFSLib.sol";
+
+/// @dev A spy `IEAS` that records every `attest` call (schema + full request data + the
+///      msg.sender it saw) and returns a deterministic, unique UID per call. Only `attest` is
+///      exercised by EFSLib; the rest revert as unused so a stray call is loud, not silent.
+contract MockEAS is IEAS {
+    /// @dev One recorded `attest` call, flattened for easy assertions.
+    struct Call {
+        bytes32 schema;
+        address recipient;
+        uint64 expirationTime;
+        bool revocable;
+        bytes32 refUID;
+        bytes data;
+        uint256 value;
+        bytes32 returnedUID;
+        address attester; // msg.sender the mock saw — i.e. the inlining caller
+    }
+
+    Call[] public calls;
+
+    function callCount() external view returns (uint256) {
+        return calls.length;
+    }
+
+    function callAt(uint256 i) external view returns (Call memory) {
+        return calls[i];
+    }
+
+    /// @dev Deterministic UID: keccak256("EFS_MOCK_UID", index). Unique & order-revealing.
+    function _uidFor(uint256 index) internal pure returns (bytes32) {
+        return keccak256(abi.encodePacked("EFS_MOCK_UID", index));
+    }
+
+    function attest(AttestationRequest calldata request) external payable returns (bytes32) {
+        bytes32 uid = _uidFor(calls.length);
+        calls.push(
+            Call({
+                schema: request.schema,
+                recipient: request.data.recipient,
+                expirationTime: request.data.expirationTime,
+                revocable: request.data.revocable,
+                refUID: request.data.refUID,
+                data: request.data.data,
+                value: request.data.value,
+                returnedUID: uid,
+                attester: msg.sender
+            })
+        );
+        return uid;
+    }
+
+    // ── Unused IEAS surface — revert if ever hit ──────────────────────────────────────────────
+    function getSchemaRegistry() external pure returns (ISchemaRegistry) {
+        revert("unused");
+    }
+
+    function attestByDelegation(DelegatedAttestationRequest calldata)
+        external
+        payable
+        returns (bytes32)
+    {
+        revert("unused");
+    }
+
+    function multiAttest(MultiAttestationRequest[] calldata)
+        external
+        payable
+        returns (bytes32[] memory)
+    {
+        revert("unused");
+    }
+
+    function multiAttestByDelegation(MultiDelegatedAttestationRequest[] calldata)
+        external
+        payable
+        returns (bytes32[] memory)
+    {
+        revert("unused");
+    }
+
+    /// @dev Recorded revocations (schema, uid) — the redirect-retract leg asserts on these.
+    struct Revocation {
+        bytes32 schema;
+        bytes32 uid;
+    }
+
+    Revocation[] public revocations;
+
+    function revocationCount() external view returns (uint256) {
+        return revocations.length;
+    }
+
+    function revocationAt(uint256 i) external view returns (Revocation memory) {
+        return revocations[i];
+    }
+
+    function revoke(RevocationRequest calldata request) external payable {
+        revocations.push(Revocation({schema: request.schema, uid: request.data.uid}));
+    }
+
+    function revokeByDelegation(DelegatedRevocationRequest calldata) external payable {
+        revert("unused");
+    }
+
+    function multiRevoke(MultiRevocationRequest[] calldata) external payable {
+        revert("unused");
+    }
+
+    function multiRevokeByDelegation(MultiDelegatedRevocationRequest[] calldata) external payable {
+        revert("unused");
+    }
+
+    function timestamp(bytes32) external pure returns (uint64) {
+        revert("unused");
+    }
+
+    function multiTimestamp(bytes32[] calldata) external pure returns (uint64) {
+        revert("unused");
+    }
+
+    function revokeOffchain(bytes32) external pure returns (uint64) {
+        revert("unused");
+    }
+
+    function multiRevokeOffchain(bytes32[] calldata) external pure returns (uint64) {
+        revert("unused");
+    }
+
+    /// @dev Seeded author + schema registry so EFSLib's placement gates
+    ///      (self-authorship + DATA-schema) can read a UID's attestation.
+    mapping(bytes32 => address) public seededAuthor;
+    mapping(bytes32 => bytes32) public seededSchema;
+    mapping(bytes32 => bytes32) public seededRefUID;
+    mapping(bytes32 => bytes) public seededData;
+
+    function seedAuthor(bytes32 uid, address author) external {
+        seededAuthor[uid] = author;
+    }
+
+    function seedSchema(bytes32 uid, bytes32 schema) external {
+        seededSchema[uid] = schema;
+    }
+
+    /// @dev Seed an ANCHOR's slot-defining fields (parent + encoded (name, forSchema))
+    ///      for the placement gates' slot-binding/bucket checks.
+    function seedAnchorSlot(bytes32 uid, bytes32 parent, string memory name, bytes32 forSchema)
+        external
+    {
+        seededRefUID[uid] = parent;
+        seededData[uid] = abi.encode(name, forSchema);
+    }
+
+    function getAttestation(bytes32 uid) external view returns (Attestation memory a) {
+        a.uid = uid;
+        a.attester = seededAuthor[uid];
+        a.schema = seededSchema[uid];
+        a.refUID = seededRefUID[uid];
+        a.data = seededData[uid];
+    }
+
+    function isAttestationValid(bytes32) external pure returns (bool) {
+        revert("unused");
+    }
+
+    function getTimestamp(bytes32) external pure returns (uint64) {
+        revert("unused");
+    }
+
+    function getRevokeOffchain(address, bytes32) external pure returns (uint64) {
+        revert("unused");
+    }
+
+    function version() external pure returns (string memory) {
+        return "mock";
+    }
+}
+
+/// @dev A minimal consumer that inherits the writer base, used to assert the inline pattern
+///      (the consumer — not the lib — must be the attester EAS records).
+/// @dev Records the ADR-0017 lifecycle legs so tests can assert the same-tx index calls.
+contract MockIndexer {
+    bytes32[] public indexedUIDs;
+    bytes32[] public revocationMirroredUIDs;
+
+    /// @dev Seeded mirror state per DATA UID — the placement readability proof reads the
+    ///      RAW slot count then scans filtered physical windows. `activeMirrors` is the raw
+    ///      count (revoked slots included, since the array is append-only) and
+    ///      `activeMirrorSlot` is the physical offset of the ONE active row, so a test can
+    ///      place that row inside or outside the scanned window.
+    mapping(bytes32 => uint256) public activeMirrors;
+    mapping(bytes32 => uint256) public activeMirrorSlot;
+    mapping(bytes32 => bool) public hasActiveMirror;
+
+    /// @dev `n` raw slots, the active row at offset 0 (raw == active — the healthy case).
+    function seedActiveMirrors(bytes32 uid, uint256 n) external {
+        activeMirrors[uid] = n;
+        activeMirrorSlot[uid] = 0;
+        hasActiveMirror[uid] = n > 0;
+    }
+
+    /// @dev `raw` slots of which only physical offset `slot` is active — everything else
+    ///      is revoked but still occupies its slot.
+    function seedMirrorAtSlot(bytes32 uid, uint256 raw, uint256 slot) external {
+        activeMirrors[uid] = raw;
+        activeMirrorSlot[uid] = slot;
+        hasActiveMirror[uid] = true;
+    }
+
+    function getReferencingBySchemaAndAttesterCount(bytes32 targetUID, bytes32, address)
+        external
+        view
+        returns (uint256)
+    {
+        return activeMirrors[targetUID];
+    }
+
+    function getReferencingBySchemaAndAttester(
+        bytes32 targetUID,
+        bytes32,
+        address,
+        uint256 start,
+        uint256 length,
+        bool,
+        bool
+    ) external view returns (bytes32[] memory page) {
+        uint256 slot = activeMirrorSlot[targetUID];
+        if (hasActiveMirror[targetUID] && slot >= start && slot < start + length) {
+            page = new bytes32[](1);
+            page[0] = keccak256(abi.encodePacked("MIRROR_OF", targetUID));
+        } else {
+            page = new bytes32[](0);
+        }
+    }
+
+    function index(bytes32 uid) external {
+        indexedUIDs.push(uid);
+    }
+
+    function indexRevocation(bytes32 uid) external {
+        revocationMirroredUIDs.push(uid);
+    }
+
+    function indexedCount() external view returns (uint256) {
+        return indexedUIDs.length;
+    }
+
+    function revocationMirroredCount() external view returns (uint256) {
+        return revocationMirroredUIDs.length;
+    }
+}
+
+contract ConsumerMock is EFSWriter {
+    constructor(IEAS eas) EFSWriter(eas) {}
+
+    function writeFile(EFSLib.FileWrite memory w)
+        external
+        returns (bytes32 dataUID, bytes32 fileAnchorUID, bytes32 placementPinUID)
+    {
+        return _efsWriteFile(w);
+    }
+
+    function placeExisting(
+        IEFSIndexerWrite indexer,
+        EFSLib.SchemaUIDs memory schemas,
+        bytes32 dataUID,
+        bytes32 parentAnchorUID,
+        string memory fileName
+    ) external returns (bytes32 fileAnchorUID, bytes32 placementPinUID) {
+        return _efsPlaceExisting(indexer, schemas, dataUID, parentAnchorUID, fileName);
+    }
+
+    function placeExistingAt(
+        IEFSIndexerWrite indexer,
+        EFSLib.SchemaUIDs memory schemas,
+        bytes32 dataUID,
+        bytes32 parentAnchorUID,
+        string memory fileName,
+        bytes32 existingFileAnchorUID
+    ) external returns (bytes32 fileAnchorUID, bytes32 placementPinUID) {
+        return _efsPlaceExisting(
+            indexer, schemas, dataUID, parentAnchorUID, fileName, existingFileAnchorUID
+        );
+    }
+}
+
+contract EFSWriterTest is Test {
+    MockEAS eas;
+    ConsumerMock consumer;
+    MockIndexer indexer;
+
+    // Distinct, recognizable schema UIDs.
+    EFSLib.SchemaUIDs schemas = EFSLib.SchemaUIDs({
+        data: keccak256("DATA_SCHEMA"),
+        anchor: keccak256("ANCHOR_SCHEMA"),
+        property: keccak256("PROPERTY_SCHEMA"),
+        mirror: keccak256("MIRROR_SCHEMA"),
+        pin: keccak256("PIN_SCHEMA"),
+        tag: keccak256("TAG_SCHEMA"),
+        list: keccak256("LIST_SCHEMA"),
+        listEntry: keccak256("LIST_ENTRY_SCHEMA"),
+        redirect: keccak256("REDIRECT_SCHEMA")
+    });
+
+    bytes32 constant PARENT = keccak256("PARENT_FOLDER_ANCHOR");
+    bytes32 constant TRANSPORT = keccak256("TRANSPORT_IPFS");
+    address constant ALICE = address(0xA11CE);
+
+    function setUp() public {
+        consumer = new ConsumerMock(IEAS(address(eas = new MockEAS())));
+        indexer = new MockIndexer();
+    }
+
+    // Recompute the mock's deterministic UID for the i-th attest call.
+    function _uid(uint256 i) internal pure returns (bytes32) {
+        return keccak256(abi.encodePacked("EFS_MOCK_UID", i));
+    }
+
+    function _minimalWrite() internal view returns (EFSLib.FileWrite memory w) {
+        w.schemas = schemas;
+        w.parentAnchorUID = PARENT;
+        w.fileName = "hello.txt";
+        // ONE mirror — writeFile enforces the readability floor (EmptyMirrorSet);
+        // reservedKeys stay empty.
+        w.mirrors = new EFSLib.Mirror[](1);
+        w.mirrors[0] =
+            EFSLib.Mirror({transportDefinition: keccak256("WEB3_TRANSPORT"), uri: "web3://0xabc"});
+    }
+
+    /// @notice Minimal file: DATA + file-ANCHOR + placement-PIN, in that order, correctly threaded.
+    function test_MinimalWrite_OrderAndThreading() public {
+        EFSLib.FileWrite memory w = _minimalWrite();
+
+        vm.prank(ALICE);
+        (bytes32 dataUID, bytes32 fileAnchorUID, bytes32 pinUID) = consumer.writeFile(w);
+
+        assertEq(eas.callCount(), 4, "minimal write = DATA + ANCHOR + MIRROR + PIN");
+
+        // Call 0: DATA
+        MockEAS.Call memory c0 = eas.callAt(0);
+        assertEq(c0.schema, schemas.data, "c0 schema = DATA");
+        assertEq(c0.refUID, bytes32(0), "DATA refUID = 0");
+        assertEq(c0.revocable, false, "DATA non-revocable");
+        assertEq(c0.expirationTime, 0, "DATA no expiration");
+        assertEq(c0.data.length, 0, "DATA empty data");
+        assertEq(c0.recipient, address(0), "DATA recipient 0");
+        assertEq(c0.value, 0, "DATA value 0");
+        assertEq(dataUID, _uid(0), "returned dataUID = call-0 UID");
+
+        // Call 1: file-ANCHOR
+        MockEAS.Call memory c1 = eas.callAt(1);
+        assertEq(c1.schema, schemas.anchor, "c1 schema = ANCHOR");
+        assertEq(c1.refUID, PARENT, "file-ANCHOR refUID = parent");
+        assertEq(c1.revocable, false, "ANCHOR non-revocable");
+        assertEq(
+            c1.data, abi.encode("hello.txt", schemas.data), "file-ANCHOR data = (name, DATA schema)"
+        );
+        assertEq(fileAnchorUID, _uid(1), "returned fileAnchorUID = call-1 UID");
+
+        // Call 2: MIRROR (the readability floor) — refUID = DATA (threaded)
+        MockEAS.Call memory cm = eas.callAt(2);
+        assertEq(cm.schema, schemas.mirror, "c2 schema = MIRROR");
+        assertEq(cm.refUID, dataUID, "MIRROR refUID = DATA UID");
+
+        // Call 3: placement-PIN — definition = file-ANCHOR (threaded), refUID = DATA (threaded)
+        MockEAS.Call memory c2 = eas.callAt(3);
+        assertEq(c2.schema, schemas.pin, "c3 schema = PIN");
+        assertEq(c2.refUID, dataUID, "placement-PIN refUID = DATA UID");
+        assertEq(c2.revocable, true, "PIN revocable");
+        assertEq(c2.expirationTime, 0, "PIN no expiration");
+        assertEq(c2.data, abi.encode(fileAnchorUID), "PIN data = (file-ANCHOR UID)");
+        assertEq(pinUID, _uid(3), "returned placementPinUID = call-3 UID");
+
+        // Attester = the consumer contract (lib inlined; msg.sender preserved through to EAS).
+        assertEq(c0.attester, address(consumer), "DATA attester = consumer (inlined)");
+        assertEq(c2.attester, address(consumer), "PIN attester = consumer (inlined)");
+    }
+
+    /// @notice Overwrite: `existingFileAnchorUID` set ⇒ NO file-ANCHOR mint; the placement PIN
+    ///         supersedes the prior one at the reused (permanent) anchor.
+    function test_WriteFile_ReusesExistingFileAnchor() public {
+        EFSLib.FileWrite memory w = _minimalWrite();
+        bytes32 existing = keccak256("existing_file_anchor");
+        eas.seedSchema(existing, schemas.anchor); // the reused-anchor gate (r3741308922)
+        eas.seedAnchorSlot(existing, PARENT, "hello.txt", schemas.data); // slot binding
+        w.existingFileAnchorUID = existing;
+
+        vm.prank(ALICE);
+        (bytes32 dataUID, bytes32 fileAnchorUID, bytes32 pinUID) = consumer.writeFile(w);
+
+        // DATA + MIRROR + placement PIN — the permanent file-ANCHOR is reused, not re-minted.
+        assertEq(eas.callCount(), 3, "overwrite = DATA + MIRROR + PIN (no anchor mint)");
+        assertEq(fileAnchorUID, existing, "returns the reused anchor");
+
+        MockEAS.Call memory pin = eas.callAt(2);
+        assertEq(pin.schema, schemas.pin, "call 2 = placement PIN");
+        assertEq(pin.data, abi.encode(existing), "PIN definition = the reused anchor");
+        assertEq(pin.refUID, dataUID, "PIN refUID = the fresh DATA");
+        assertEq(pinUID, _uid(2), "returned placement-PIN UID");
+    }
+
+    /// @notice Full graph: DATA, file-ANCHOR, 1 MIRROR, 2 reserved-key triplets, placement-PIN.
+    function test_FullWrite_OrderThreadingAndConstraints() public {
+        EFSLib.FileWrite memory w = _minimalWrite();
+
+        w.mirrors = new EFSLib.Mirror[](1);
+        w.mirrors[0] = EFSLib.Mirror({transportDefinition: TRANSPORT, uri: "ipfs://Qm123"});
+
+        w.reservedKeys = new EFSLib.ReservedKey[](2);
+        w.reservedKeys[0] = EFSLib.ReservedKey({
+            key: "contentHash",
+            value: "f1220abababababababababababababababababababababababababababababababab"
+        });
+        w.reservedKeys[1] = EFSLib.ReservedKey({key: "size", value: "1024"});
+
+        (bytes32 dataUID, bytes32 fileAnchorUID, bytes32 pinUID) = consumer.writeFile(w);
+
+        // 1 DATA + 1 file-ANCHOR + 1 MIRROR + 2*(keyAnchor + property + bindingPin) + 1 placement
+        // = 1 + 1 + 1 + 6 + 1 = 10
+        assertEq(eas.callCount(), 10, "full write = 10 attestations");
+
+        // 0: DATA, 1: file-ANCHOR (already covered above; spot-check identity wiring)
+        assertEq(dataUID, _uid(0));
+        assertEq(fileAnchorUID, _uid(1));
+
+        // 2: MIRROR — refUID = DATA, revocable, data = (transportDefinition, uri)
+        MockEAS.Call memory mir = eas.callAt(2);
+        assertEq(mir.schema, schemas.mirror, "MIRROR schema");
+        assertEq(mir.refUID, dataUID, "MIRROR refUID = DATA");
+        assertEq(mir.revocable, true, "MIRROR revocable");
+        assertEq(mir.expirationTime, 0, "MIRROR no expiration");
+        assertEq(mir.data, abi.encode(TRANSPORT, "ipfs://Qm123"), "MIRROR data");
+
+        // Reserved key #0 (contentHash): calls 3 (key-ANCHOR), 4 (PROPERTY), 5 (binding-PIN)
+        _assertReservedTriplet(
+            3,
+            dataUID,
+            "contentHash",
+            "f1220abababababababababababababababababababababababababababababababab"
+        );
+        // Reserved key #1 (size): calls 6, 7, 8
+        _assertReservedTriplet(6, dataUID, "size", "1024");
+
+        // 9: placement-PIN — definition = file-ANCHOR, refUID = DATA
+        MockEAS.Call memory pin = eas.callAt(9);
+        assertEq(pin.schema, schemas.pin, "placement-PIN schema");
+        assertEq(pin.refUID, dataUID, "placement-PIN refUID = DATA");
+        assertEq(pin.revocable, true, "placement-PIN revocable");
+        assertEq(pin.data, abi.encode(fileAnchorUID), "placement-PIN definition = file-ANCHOR");
+        assertEq(pinUID, _uid(9), "returned placementPinUID = call-9 UID");
+    }
+
+    /// @dev Assert one reserved-key triplet starting at call index `base`:
+    ///      base   = key-ANCHOR (refUID = DATA, non-revocable, data = (key, PROPERTY forSchema))
+    ///      base+1 = PROPERTY   (refUID = 0,    non-revocable, data = (value))
+    ///      base+2 = binding-PIN(refUID = PROPERTY, revocable, definition = key-ANCHOR)
+    function _assertReservedTriplet(
+        uint256 base,
+        bytes32 dataUID,
+        string memory key,
+        string memory value
+    ) internal view {
+        MockEAS.Call memory keyAnchor = eas.callAt(base);
+        assertEq(keyAnchor.schema, schemas.anchor, "key-ANCHOR schema");
+        assertEq(keyAnchor.refUID, dataUID, "key-ANCHOR refUID = DATA");
+        assertEq(keyAnchor.revocable, false, "key-ANCHOR non-revocable");
+        assertEq(
+            keyAnchor.data, abi.encode(key, schemas.property), "key-ANCHOR data = (key, PROPERTY)"
+        );
+
+        MockEAS.Call memory property = eas.callAt(base + 1);
+        assertEq(property.schema, schemas.property, "PROPERTY schema");
+        assertEq(property.refUID, bytes32(0), "PROPERTY refUID = 0");
+        assertEq(property.revocable, false, "PROPERTY non-revocable");
+        assertEq(property.data, abi.encode(value), "PROPERTY data = (value)");
+
+        MockEAS.Call memory bindingPin = eas.callAt(base + 2);
+        assertEq(bindingPin.schema, schemas.pin, "binding-PIN schema");
+        assertEq(
+            bindingPin.refUID, property.returnedUID, "binding-PIN refUID = PROPERTY (threaded)"
+        );
+        assertEq(bindingPin.revocable, true, "binding-PIN revocable");
+        assertEq(
+            bindingPin.data,
+            abi.encode(keyAnchor.returnedUID),
+            "binding-PIN definition = key-ANCHOR (threaded)"
+        );
+    }
+
+    /// @notice Hardlink path: file-ANCHOR + single placement PIN pointing at a PRE-EXISTING DATA.
+    function test_PlaceExisting_SinglePinHardlink() public {
+        bytes32 existingData = keccak256("PRE_EXISTING_DATA");
+        eas.seedAuthor(existingData, address(consumer)); // self-authored — the gate passes
+        eas.seedSchema(existingData, schemas.data);
+        indexer.seedActiveMirrors(existingData, 1); // the readability proof passes
+
+        vm.prank(ALICE);
+        (bytes32 fileAnchorUID, bytes32 pinUID) = consumer.placeExisting(
+            IEFSIndexerWrite(address(indexer)), schemas, existingData, PARENT, "linked.txt"
+        );
+
+        assertEq(eas.callCount(), 2, "hardlink = 2 attestations (anchor + pin)");
+
+        // 0: file-ANCHOR
+        MockEAS.Call memory anchor = eas.callAt(0);
+        assertEq(anchor.schema, schemas.anchor, "hardlink anchor schema");
+        assertEq(anchor.refUID, PARENT, "hardlink anchor refUID = parent");
+        assertEq(anchor.revocable, false, "hardlink anchor non-revocable");
+        assertEq(
+            anchor.data, abi.encode("linked.txt", schemas.data), "hardlink anchor data (DATA-typed)"
+        );
+        assertEq(fileAnchorUID, _uid(0));
+
+        // 1: placement-PIN pointing at the PRE-EXISTING DATA (no fresh DATA minted)
+        MockEAS.Call memory pin = eas.callAt(1);
+        assertEq(pin.schema, schemas.pin, "hardlink pin schema");
+        assertEq(pin.refUID, existingData, "hardlink pin refUID = pre-existing DATA");
+        assertEq(pin.revocable, true, "hardlink pin revocable");
+        assertEq(pin.data, abi.encode(fileAnchorUID), "hardlink pin definition = file-ANCHOR");
+        assertEq(pinUID, _uid(1));
+
+        // No DATA schema attestation anywhere in the hardlink path.
+        assertTrue(
+            anchor.schema != schemas.data && pin.schema != schemas.data, "no fresh DATA minted"
+        );
+    }
+
+    /// @notice Overwrite/relink: re-pointing an EXISTING path reuses its permanent file-ANCHOR
+    ///         (no re-mint) and emits only the cardinality-1 placement PIN — re-minting the
+    ///         `(parent, name, DATA)` anchor would revert (DuplicateFileName) or file a
+    ///         non-canonical anchor the read path never finds. Mirrors the TS hardlink branch.
+    function test_PlaceExistingAt_ReusesAnchorOnRelink() public {
+        bytes32 existingData = keccak256("PRE_EXISTING_DATA_2");
+        bytes32 existingAnchor = keccak256("ALREADY_RESOLVED_FILE_ANCHOR");
+        eas.seedAuthor(existingData, address(consumer));
+        eas.seedSchema(existingData, schemas.data);
+        eas.seedSchema(existingAnchor, schemas.anchor); // the reused-anchor gate
+        eas.seedAnchorSlot(existingAnchor, PARENT, "linked.txt", schemas.data); // slot binding
+        indexer.seedActiveMirrors(existingData, 1);
+
+        vm.prank(ALICE);
+        (bytes32 fileAnchorUID, bytes32 pinUID) = consumer.placeExistingAt(
+            IEFSIndexerWrite(address(indexer)),
+            schemas,
+            existingData,
+            PARENT,
+            "linked.txt",
+            existingAnchor
+        );
+
+        assertEq(eas.callCount(), 1, "relink = ONE attestation (the placement PIN only)");
+
+        // The single attestation is the placement PIN, bound to the EXISTING anchor.
+        MockEAS.Call memory pin = eas.callAt(0);
+        assertEq(pin.schema, schemas.pin, "relink pin schema");
+        assertEq(pin.refUID, existingData, "relink pin refUID = pre-existing DATA");
+        assertEq(
+            pin.data, abi.encode(existingAnchor), "relink pin definition = existing file-ANCHOR"
+        );
+        assertEq(fileAnchorUID, existingAnchor, "returns the reused anchor (no fresh mint)");
+        assertEq(pinUID, _uid(0));
+
+        // No ANCHOR-schema attestation: the permanent file-ANCHOR was NOT re-minted.
+        assertTrue(pin.schema != schemas.anchor, "no fresh file-ANCHOR minted on relink");
+    }
+
+    /// @notice writeFile refuses an EMPTY mirror set (r3741534980): a mirror-less file
+    ///         confirms (and emits EFSFileWritten) but every byte read fails — the same
+    ///         readability floor the placement helpers enforce.
+    function test_WriteFile_RevertsOnEmptyMirrors() public {
+        EFSLib.FileWrite memory w = _minimalWrite();
+        w.mirrors = new EFSLib.Mirror[](0);
+        vm.prank(ALICE);
+        vm.expectRevert(EFSLib.EmptyMirrorSet.selector);
+        consumer.writeFile(w);
+        // nothing minted — the gate runs before the DATA attest
+    }
+
+    /// @notice The Solidity write path is a SEPARATE public door onto the same authoritative
+    ///         metadata as the TypeScript one, so it enforces the reserved-value contract itself
+    ///         (r3742980317). Without this, `{key:"contentHash", value:"0xdeadbeef"}` wrote
+    ///         successfully and every TypeScript read then threw `malformed-claim` — with the
+    ///         mirror bytes perfectly intact.
+    function test_WriteFile_RevertsOnMalformedReservedValues() public {
+        // contentHash: must be the canonical f1220…/f1b20… + 64 lowercase hex.
+        string[3] memory badHashes = [
+            "0xdeadbeef",
+            "f1220ABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB",
+            "f1220ab"
+        ];
+        for (uint256 i = 0; i < badHashes.length; ++i) {
+            EFSLib.FileWrite memory w = _minimalWrite();
+            w.reservedKeys = new EFSLib.ReservedKey[](1);
+            w.reservedKeys[0] = EFSLib.ReservedKey({key: "contentHash", value: badHashes[i]});
+            vm.prank(ALICE);
+            vm.expectRevert(
+                abi.encodeWithSelector(
+                    EFSLib.InvalidReservedValue.selector, "contentHash", badHashes[i]
+                )
+            );
+            consumer.writeFile(w);
+        }
+
+        // size: non-negative decimal, no leading zeros.
+        string[3] memory badSizes = ["garbage", "007", "-1"];
+        for (uint256 i = 0; i < badSizes.length; ++i) {
+            EFSLib.FileWrite memory w = _minimalWrite();
+            w.reservedKeys = new EFSLib.ReservedKey[](1);
+            w.reservedKeys[0] = EFSLib.ReservedKey({key: "size", value: badSizes[i]});
+            vm.prank(ALICE);
+            vm.expectRevert(
+                abi.encodeWithSelector(EFSLib.InvalidReservedValue.selector, "size", badSizes[i])
+            );
+            consumer.writeFile(w);
+        }
+
+        // contentType: shape, no media RANGES, no control characters in parameters.
+        string[4] memory badTypes = ["not-a-media-type", "text/*", "text/", "text/plain;\r\nx=y"];
+        for (uint256 i = 0; i < badTypes.length; ++i) {
+            EFSLib.FileWrite memory w = _minimalWrite();
+            w.reservedKeys = new EFSLib.ReservedKey[](1);
+            w.reservedKeys[0] = EFSLib.ReservedKey({key: "contentType", value: badTypes[i]});
+            vm.prank(ALICE);
+            vm.expectRevert(
+                abi.encodeWithSelector(
+                    EFSLib.InvalidReservedValue.selector, "contentType", badTypes[i]
+                )
+            );
+            consumer.writeFile(w);
+        }
+    }
+
+    /// @notice RFC 6838 caps EACH of type/subtype at 127 characters. A total-length cap alone
+    ///         let this path persist a contentType the TypeScript validator rejects — the two
+    ///         rules are hand-mirrored across languages, so they drift clause by clause
+    ///         (r3743014611).
+    function test_WriteFile_RevertsOnOverlongMediaTypeHalf() public {
+        string memory longType = string(abi.encodePacked(_repeat("a", 128), "/x"));
+        string memory longSub = string(abi.encodePacked("x/", _repeat("a", 128)));
+        string[2] memory bad = [longType, longSub];
+        for (uint256 i = 0; i < bad.length; ++i) {
+            EFSLib.FileWrite memory w = _minimalWrite();
+            w.reservedKeys = new EFSLib.ReservedKey[](1);
+            w.reservedKeys[0] = EFSLib.ReservedKey({key: "contentType", value: bad[i]});
+            vm.prank(ALICE);
+            vm.expectRevert(
+                abi.encodeWithSelector(EFSLib.InvalidReservedValue.selector, "contentType", bad[i])
+            );
+            consumer.writeFile(w);
+        }
+
+        // Exactly 127 per half is the LIMIT, not one past it — must still write.
+        EFSLib.FileWrite memory ok = _minimalWrite();
+        ok.reservedKeys = new EFSLib.ReservedKey[](1);
+        ok.reservedKeys[0] = EFSLib.ReservedKey({
+            key: "contentType",
+            value: string(abi.encodePacked(_repeat("a", 127), "/", _repeat("b", 127)))
+        });
+        vm.prank(ALICE);
+        consumer.writeFile(ok);
+    }
+
+    /// @notice OWS (space/HTAB) is legal before and after the `;`, and the TypeScript rule
+    ///         accepts it — so rejecting it here would revert a write that should succeed, the
+    ///         worse direction to diverge in. Found by diffing the two validators clause by
+    ///         clause rather than comparing them in spirit.
+    function test_WriteFile_AcceptsOptionalWhitespaceAroundMediaTypeParams() public {
+        string[3] memory ok = [
+            "text/plain ; charset=utf-8",
+            "text/plain\t;\tcharset=utf-8",
+            "text/plain  ;  charset=utf-8"
+        ];
+        for (uint256 i = 0; i < ok.length; ++i) {
+            EFSLib.FileWrite memory w = _minimalWrite();
+            w.reservedKeys = new EFSLib.ReservedKey[](1);
+            w.reservedKeys[0] = EFSLib.ReservedKey({key: "contentType", value: ok[i]});
+            vm.prank(ALICE);
+            consumer.writeFile(w); // must not revert
+        }
+    }
+
+    /// @notice A `;` that introduces nothing is not a media type (the TypeScript grammar
+    ///         requires a parameter after it).
+    function test_WriteFile_RevertsOnDanglingMediaTypeSemicolon() public {
+        EFSLib.FileWrite memory w = _minimalWrite();
+        w.reservedKeys = new EFSLib.ReservedKey[](1);
+        w.reservedKeys[0] = EFSLib.ReservedKey({key: "contentType", value: "text/plain;"});
+        vm.prank(ALICE);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                EFSLib.InvalidReservedValue.selector, "contentType", "text/plain;"
+            )
+        );
+        consumer.writeFile(w);
+    }
+
+    /// @dev Repeat `s` `n` times (test-local helper; Solidity has no string multiply).
+    function _repeat(string memory s, uint256 n) private pure returns (string memory out) {
+        for (uint256 i = 0; i < n; ++i) {
+            out = string(abi.encodePacked(out, s));
+        }
+    }
+
+    /// @notice The canonical forms still write, and a NON-reserved key stays unconstrained —
+    ///         this is a reserved-key contract, not a value policy for every property.
+    function test_WriteFile_AcceptsCanonicalReservedValuesAndFreeCustomKeys() public {
+        EFSLib.FileWrite memory w = _minimalWrite();
+        w.reservedKeys = new EFSLib.ReservedKey[](4);
+        w.reservedKeys[0] = EFSLib.ReservedKey({
+            key: "contentHash",
+            value: "f1b20abababababababababababababababababababababababababababababababab" // keccak-256 variant
+        });
+        w.reservedKeys[1] = EFSLib.ReservedKey({key: "size", value: "0"});
+        w.reservedKeys[2] = EFSLib.ReservedKey({
+            key: "contentType", value: "application/vnd.api+json; charset=utf-8"
+        });
+        w.reservedKeys[3] = EFSLib.ReservedKey({key: "xyz.efs.note", value: "anything at all */*"});
+        vm.prank(ALICE);
+        consumer.writeFile(w); // must not revert
+    }
+
+    /// @notice writeFile refuses a reused anchor from a DIFFERENT slot (r3741358641):
+    ///         a valid ANCHOR under another parent would overwrite another path while
+    ///         the caller believes (parentAnchorUID, fileName) was written.
+    function test_WriteFile_RevertsOnWrongSlotReuse() public {
+        EFSLib.FileWrite memory w = _minimalWrite();
+        bytes32 foreignSlot = keccak256("ANCHOR_OF_ANOTHER_PATH");
+        eas.seedSchema(foreignSlot, schemas.anchor);
+        eas.seedAnchorSlot(foreignSlot, keccak256("OTHER_PARENT"), "hello.txt", schemas.data);
+        w.existingFileAnchorUID = foreignSlot;
+        vm.prank(ALICE);
+        vm.expectRevert(abi.encodeWithSelector(EFSLib.AnchorSlotMismatch.selector, foreignSlot));
+        consumer.writeFile(w);
+    }
+
+    /// @notice writeFile refuses a reused existingFileAnchorUID that is NOT an ANCHOR
+    ///         (r3741308922): the full-write funnel checks BEFORE minting the DATA
+    ///         graph, so no attestation lands for an undiscoverable placement.
+    function test_WriteFile_RevertsOnNonAnchorReuse() public {
+        EFSLib.FileWrite memory w = _minimalWrite();
+        bytes32 notAnchor = keccak256("A_DATA_AS_ANCHOR");
+        eas.seedSchema(notAnchor, schemas.data);
+        w.existingFileAnchorUID = notAnchor;
+        vm.prank(ALICE);
+        vm.expectRevert(
+            abi.encodeWithSelector(EFSLib.NotAnchorUID.selector, notAnchor, schemas.data)
+        );
+        consumer.writeFile(w);
+        assertEq(eas.callCount(), 0, "nothing minted before the gate");
+    }
+
+    /// @notice The 6-arg form with a zero `existingFileAnchorUID` behaves like the 4-arg form:
+    ///         it MINTS a fresh file-ANCHOR (place at a NEW path).
+    function test_PlaceExistingAt_ZeroAnchorMintsLikeNewPath() public {
+        bytes32 existingData = keccak256("PRE_EXISTING_DATA_3");
+        eas.seedAuthor(existingData, address(consumer));
+        eas.seedSchema(existingData, schemas.data);
+        indexer.seedActiveMirrors(existingData, 1);
+        vm.prank(ALICE);
+        consumer.placeExistingAt(
+            IEFSIndexerWrite(address(indexer)),
+            schemas,
+            existingData,
+            PARENT,
+            "fresh.txt",
+            bytes32(0)
+        );
+        assertEq(eas.callCount(), 2, "new path = anchor + pin (2 attestations)");
+        assertEq(eas.callAt(0).schema, schemas.anchor, "minted a fresh file-ANCHOR");
+    }
+
+    /// @notice FOREIGN-authored DATA is rejected (r3741021021): lens-scoped reads key
+    ///         mirrors/properties on the placement attester, so a foreign hardlink would
+    ///         resolve to a UID with no retrieval metadata — an unreadable advertised file.
+    function test_PlaceExisting_RevertsOnForeignData() public {
+        bytes32 foreignData = keccak256("FOREIGN_DATA");
+        eas.seedAuthor(foreignData, address(0xBEEF)); // authored by someone else
+        vm.prank(ALICE);
+        vm.expectRevert(
+            abi.encodeWithSelector(EFSLib.ForeignDataUID.selector, foreignData, address(0xBEEF))
+        );
+        consumer.placeExisting(
+            IEFSIndexerWrite(address(indexer)), schemas, foreignData, PARENT, "foreign.txt"
+        );
+        // An UNKNOWN UID (empty attestation, attester 0) is foreign too.
+        bytes32 unknownData = keccak256("NEVER_ATTESTED");
+        vm.prank(ALICE);
+        vm.expectRevert(
+            abi.encodeWithSelector(EFSLib.ForeignDataUID.selector, unknownData, address(0))
+        );
+        consumer.placeExisting(
+            IEFSIndexerWrite(address(indexer)), schemas, unknownData, PARENT, "unknown.txt"
+        );
+    }
+
+    /// @notice A reused existingFileAnchorUID that is NOT an ANCHOR is rejected
+    ///         (r3741288476): the relink funnel assigned it directly, confirming a
+    ///         placement (and EFSFileWritten) path resolution can never find.
+    function test_PlaceExistingAt_RevertsOnNonAnchorReuse() public {
+        bytes32 existingData = keccak256("PRE_EXISTING_DATA_4");
+        eas.seedAuthor(existingData, address(consumer));
+        eas.seedSchema(existingData, schemas.data);
+        indexer.seedActiveMirrors(existingData, 1);
+        bytes32 notAnchor = keccak256("A_PROPERTY_AS_ANCHOR");
+        eas.seedSchema(notAnchor, schemas.property);
+        vm.prank(ALICE);
+        vm.expectRevert(
+            abi.encodeWithSelector(EFSLib.NotAnchorUID.selector, notAnchor, schemas.property)
+        );
+        consumer.placeExistingAt(
+            IEFSIndexerWrite(address(indexer)), schemas, existingData, PARENT, "x.txt", notAnchor
+        );
+    }
+
+    /// @notice placeExisting refuses a reused anchor whose NAME differs from the
+    ///         requested fileName (r3741358641) — same slot-binding gate as writeFile.
+    function test_PlaceExistingAt_RevertsOnWrongNameReuse() public {
+        bytes32 existingData = keccak256("PRE_EXISTING_DATA_5");
+        eas.seedAuthor(existingData, address(consumer));
+        eas.seedSchema(existingData, schemas.data);
+        indexer.seedActiveMirrors(existingData, 1);
+        bytes32 otherFile = keccak256("ANCHOR_OF_OTHER_FILE");
+        eas.seedSchema(otherFile, schemas.anchor);
+        eas.seedAnchorSlot(otherFile, PARENT, "other.txt", schemas.data);
+        vm.prank(ALICE);
+        vm.expectRevert(abi.encodeWithSelector(EFSLib.AnchorSlotMismatch.selector, otherFile));
+        consumer.placeExistingAt(
+            IEFSIndexerWrite(address(indexer)),
+            schemas,
+            existingData,
+            PARENT,
+            "linked.txt",
+            otherFile
+        );
+    }
+
+    /// @notice placeExisting refuses a SELF-authored DATA with NO active mirror
+    ///         (r3741250936): the hardlink shortcut has no metadata to reuse — the
+    ///         placement would confirm and every lens-scoped read would fail.
+    function test_PlaceExisting_RevertsOnNoActiveMirror() public {
+        bytes32 bareData = keccak256("BARE_DATA_NO_MIRRORS_W");
+        eas.seedAuthor(bareData, address(consumer));
+        eas.seedSchema(bareData, schemas.data);
+        // no seedActiveMirrors — zero mirrors
+        vm.prank(ALICE);
+        vm.expectRevert(
+            abi.encodeWithSelector(EFSLib.NoActiveMirror.selector, bareData, address(consumer))
+        );
+        consumer.placeExisting(
+            IEFSIndexerWrite(address(indexer)), schemas, bareData, PARENT, "bare.txt"
+        );
+    }
+
+    /// @notice A SELF-authored non-DATA UID is rejected too (r3741115243): the PIN would
+    ///         index under the target's actual schema while file resolution reads the
+    ///         DATA slot — an EFSFileWritten placement no SDK reader could see.
+    function test_PlaceExisting_RevertsOnNonDataUID() public {
+        bytes32 anchorUID = keccak256("SELF_AUTHORED_ANCHOR");
+        eas.seedAuthor(anchorUID, address(consumer));
+        eas.seedSchema(anchorUID, schemas.anchor); // wrong schema: ANCHOR, not DATA
+        vm.prank(ALICE);
+        vm.expectRevert(
+            abi.encodeWithSelector(EFSLib.NotDataUID.selector, anchorUID, schemas.anchor)
+        );
+        consumer.placeExisting(
+            IEFSIndexerWrite(address(indexer)), schemas, anchorUID, PARENT, "not-data.txt"
+        );
+    }
+
+    /// @notice The library inlines, so EAS records the CALLER (the consumer) as attester, never
+    ///         the library — the ADR-0003 identity-preservation invariant.
+    function test_AttesterIsConsumerNotLibrary() public {
+        EFSLib.FileWrite memory w = _minimalWrite();
+        vm.prank(ALICE);
+        consumer.writeFile(w);
+        uint256 n = eas.callCount();
+        for (uint256 i = 0; i < n; ++i) {
+            assertEq(eas.callAt(i).attester, address(consumer), "every attester = consumer");
+        }
+    }
+}
