@@ -5,9 +5,18 @@
  *     Anvil fork via prool and asserts EAS bytecode is present. Scaffold only.
  *
  *  2. `fork write→read round-trip (live deploy)` — gated on `EFS_FORK_TEST=1`;
- *     talks to an ALREADY-RUNNING local Sepolia-fork node (Hardhat `yarn chain`)
- *     at `EFS_FORK_NODE_URL` (default http://127.0.0.1:8545) where the EFS system
- *     has been deployed (`yarn deploy:efs` + `yarn deploy:efs-views`). It proves
+ *     talks to an ALREADY-RUNNING local Sepolia-fork node at `EFS_FORK_NODE_URL`
+ *     (default http://127.0.0.1:8545) where the EFS system has been deployed. In the
+ *     contracts repo's `packages/hardhat`: `yarn fork` (NOT `yarn chain` — a plain
+ *     chain has no EAS), then `yarn deploy:efs --network localhost` and
+ *     `yarn deploy:efs-views --network localhost`. Use the workspace scripts, not the
+ *     root `yarn deploy`, which also pushes into the client repo. The deploy rewrites
+ *     the tracked `packages/nextjs/contracts/deployedContracts.ts` — restore it with
+ *     `git checkout` afterwards. The core addresses and schema UIDs below are
+ *     deterministic for that fork, but the VIEW addresses and the `/transports/*`
+ *     anchor UIDs (timestamped EAS UIDs) change per deploy: pass the fresh values via
+ *     `EFS_FORK_FILE_VIEW`/`EFS_FORK_ROUTER`/`EFS_FORK_LIST_READER` and `EFS_FORK_T_*`
+ *     (resolve `/transports/<scheme>` with `resolvePathToAnchor`). It proves
  *     the SDK's public `efs.fs.write` → `efs.fs.cat` pipeline end-to-end against
  *     the real frozen resolvers: a file is written (DATA + MIRROR + reserved-key
  *     PROPERTYs + placement PIN, one multiAttest per DAG layer), then read back
