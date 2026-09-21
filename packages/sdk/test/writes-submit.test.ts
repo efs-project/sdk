@@ -445,7 +445,7 @@ describe('submitWriteTier1 — get-or-create anchor slots (front-running, r37430
     expect(chain.callCount).toBe(2) // layer 1, then the declined layer 2 — no third prompt
   })
 
-  it('without an indexer address, behaves exactly as before (clean revert, no probe)', async () => {
+  it('a byte write cannot run WITHOUT the probe: no indexer address fails closed up front', async () => {
     const plan = buildFileWriteGraph(bytesInput)
     const { ctx } = makeMockChain({ slotRace: { call: 2, slot: contentTypeSlot, as: 'reverted' } })
     const bare = { ...ctx, indexerAddress: undefined } as SubmitContext
