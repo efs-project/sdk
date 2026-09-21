@@ -366,6 +366,8 @@ function makeSubmitCtx(): {
       }
       if (args.functionName === 'getReferencingBySchemaAndAttesterCount') return 1n
       if (args.functionName === 'getReferencingBySchemaAndAttester') return [uid(0x3141)]
+      // The layered submitter's get-or-create probe (r3743049284): slot free.
+      if (args.functionName === 'resolveAnchor') return uid(0)
       throw new Error(`submit-ctx mock: unexpected readContract ${args.functionName}`)
     },
     async waitForTransactionReceipt({ hash }: { hash: Hex }) {

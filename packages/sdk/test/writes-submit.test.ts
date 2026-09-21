@@ -1,5 +1,6 @@
 import {
   type Address,
+  ContractFunctionRevertedError,
   type Hex,
   type Log,
   type TransactionReceipt,
@@ -12,7 +13,7 @@ import { hashContent } from '../src/content/hash.js'
 import { attestedEventAbi } from '../src/eas/abi.js'
 import { SchemaEncoder } from '../src/eas/schema-encoder.js'
 import { EFS_SCHEMA_FIELDS } from '../src/eas/schemas.js'
-import { buildFileWriteGraph } from '../src/writes/graph.js'
+import { REF, buildFileWriteGraph } from '../src/writes/graph.js'
 import {
   type SubmitContext,
   type SubmitPublicClient,
@@ -164,13 +165,23 @@ interface MockChainOptions {
   extraNoiseLog?: boolean
   /** Force a wrong UID count in the receipt (drop the last log). */
   dropLastLog?: boolean
+  /** Anchor slots that ALREADY exist before the write, matched on (name, forSchema). */
+  claimedAnchors?: readonly ClaimedSlot[]
+  /** A front-run: when `writeContract` call `call` arrives, `slot` gets claimed just
+   * ahead of it, and this attempt fails the way a real race does — a simulation
+   * revert (`refusal`, nothing sent) or a same-block revert (`reverted`, mined). */
+  slotRace?: { call: number; slot: ClaimedSlot; as: 'refusal' | 'reverted' | 'userRejected' }
 }
+
+/** An existing anchor slot the get-or-create probe should find. */
+type ClaimedSlot = { name: string; forSchema: Hex; uid: Hex }
 
 function makeMockChain(opts: MockChainOptions = {}) {
   const sent: SentLayer[] = []
   let globalIndex = 0
   let callIndex = 0
   const mint = opts.mintUID ?? ((i) => uid(0xd000 + i))
+  const claimed: ClaimedSlot[] = [...(opts.claimedAnchors ?? [])]
   const emitFrom = opts.emitFrom ?? EAS
 
   // Map a sent tx hash to the receipt the public client should return.
@@ -180,6 +191,22 @@ function makeMockChain(opts: MockChainOptions = {}) {
     async writeContract(args) {
       callIndex += 1
       const thisCall = callIndex
+      const race = opts.slotRace?.call === thisCall ? opts.slotRace : undefined
+      if (race !== undefined) {
+        claimed.push(race.slot)
+        if (race.as === 'userRejected') {
+          // A slot WAS claimed — but the user also declined this prompt.
+          throw Object.assign(new Error('mock: user rejected'), { code: 4001 })
+        }
+        if (race.as === 'refusal') {
+          // The node simulated the multiAttest against the now-claimed slot.
+          throw new ContractFunctionRevertedError({
+            abi: [],
+            functionName: 'multiAttest',
+            message: 'DuplicateFileName()',
+          })
+        }
+      }
       if (opts.revertOnCall === thisCall) {
         // A DEFINITE refusal: the wallet declined (EIP-1193 4001), so nothing
         // was broadcast (→ WriteNotSentError, mode (a)). Code-less transport
@@ -230,7 +257,7 @@ function makeMockChain(opts: MockChainOptions = {}) {
       if (opts.dropLastLog) logs.pop()
 
       const status: 'success' | 'reverted' =
-        opts.receiptRevertOnCall === thisCall ? 'reverted' : 'success'
+        opts.receiptRevertOnCall === thisCall || race?.as === 'reverted' ? 'reverted' : 'success'
 
       receipts.set(txHash, {
         transactionHash: txHash,
@@ -290,6 +317,10 @@ function makeMockChain(opts: MockChainOptions = {}) {
       if (args.functionName === 'getReferencingBySchemaAndAttester') {
         return (opts.hardlinkMirrorCount ?? 1n) > 0n ? [uid(0x3141)] : []
       }
+      if (args.functionName === 'resolveAnchor') {
+        const [, name, forSchema] = (args.args ?? []) as [Hex, string, Hex]
+        return claimed.find((c) => c.name === name && c.forSchema === forSchema)?.uid ?? ZERO_UID
+      }
       throw new Error(`mock: unexpected readContract ${args.functionName}`)
     },
     async waitForTransactionReceipt({ hash }) {
@@ -324,6 +355,105 @@ function makeMockChain(opts: MockChainOptions = {}) {
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
+
+describe('submitWriteTier1 — get-or-create anchor slots (front-running, r3743049284)', () => {
+  // A key-ANCHOR slot is (DATA, key, PROPERTY) with NO attester, and minting an
+  // existing slot reverts. The DATA UID is public between layer 1 and layer 2, so
+  // anyone can claim a slot first. The write must bind to the claimed slot — a slot
+  // holds only a name; values are the signer's own PROPERTY + binding-PIN.
+  const MALLORY_SLOT = uid(0x6a11)
+  const contentTypeSlot = { name: 'contentType', forSchema: SCHEMAS.property, uid: MALLORY_SLOT }
+
+  /** The PIN whose `definition` (decoded) is `def`, across every sent entry. */
+  const pinsDefinedBy = (sent: { entries: { schema: Hex; data: Hex }[] }[], def: Hex) =>
+    sent
+      .flatMap((l) => l.entries)
+      .filter((e) => e.schema === SCHEMAS.pin)
+      .filter((e) => (pinEnc.decodeData(e.data)[0] as string).toLowerCase() === def.toLowerCase())
+
+  const keyAnchorMints = (sent: { entries: { schema: Hex; data: Hex }[] }[], name: string) =>
+    sent
+      .flatMap((l) => l.entries)
+      .filter((e) => e.schema === SCHEMAS.anchor)
+      .filter((e) => e.data.includes(Buffer.from(name).toString('hex')))
+
+  it('binds to a slot claimed BEFORE the key layer instead of reverting', async () => {
+    const plan = buildFileWriteGraph(bytesInput)
+    const { ctx, sent } = makeMockChain({ claimedAnchors: [contentTypeSlot] })
+    const result = await submitWriteTier1(plan, ctx)
+
+    expect(keyAnchorMints(sent, 'contentType')).toHaveLength(0) // not re-minted
+    expect(keyAnchorMints(sent, 'contentHash')).toHaveLength(1) // untouched slots still minted
+    // The signer's own binding-PIN hangs off Mallory's slot — lens-scoped to the signer.
+    expect(pinsDefinedBy(sent, MALLORY_SLOT)).toHaveLength(1)
+    // Reported as reused, never as something this write created.
+    expect(result.reused.get(REF.keyAnchor('contentType'))).toBe(MALLORY_SLOT)
+    expect([...result.uids.values()]).not.toContain(MALLORY_SLOT)
+    expect(result.revertedAttemptTxHashes).toEqual([])
+    expect(result.layerTxHashes).toHaveLength(3)
+  })
+
+  it('retries ONLY the layer when the slot is claimed in the same block (mined revert)', async () => {
+    const plan = buildFileWriteGraph(bytesInput)
+    const { ctx, sent } = makeMockChain({
+      slotRace: { call: 2, slot: contentTypeSlot, as: 'reverted' },
+    })
+    const result = await submitWriteTier1(plan, ctx)
+
+    // Layer 2 went out twice: first WITH the contentType anchor (reverted), then
+    // without it. DATA was minted once — the write did NOT start over.
+    expect(sent).toHaveLength(4)
+    expect(keyAnchorMints([sent[1]], 'contentType')).toHaveLength(1)
+    expect(keyAnchorMints([sent[2]], 'contentType')).toHaveLength(0)
+    expect(sent.flatMap((l) => l.entries).filter((e) => e.schema === SCHEMAS.data)).toHaveLength(1)
+    expect(pinsDefinedBy(sent, MALLORY_SLOT)).toHaveLength(1)
+    // The failed attempt cost a confirmation, so it is reported.
+    expect(result.revertedAttemptTxHashes).toHaveLength(1)
+    expect(result.layerTxHashes).toHaveLength(3)
+  })
+
+  it('retries when the node simulation rejects the layer against a just-claimed slot', async () => {
+    const plan = buildFileWriteGraph(bytesInput)
+    const { ctx, sent } = makeMockChain({
+      slotRace: { call: 2, slot: contentTypeSlot, as: 'refusal' },
+    })
+    const result = await submitWriteTier1(plan, ctx)
+    expect(result.revertedAttemptTxHashes).toEqual([]) // never broadcast, no signature
+    expect(pinsDefinedBy(sent, MALLORY_SLOT)).toHaveLength(1)
+    expect(result.reused.get(REF.keyAnchor('contentType'))).toBe(MALLORY_SLOT)
+  })
+
+  it('does NOT retry a revert that no claimed slot explains — the error surfaces as before', async () => {
+    const plan = buildFileWriteGraph(bytesInput)
+    const { ctx, sent } = makeMockChain({ receiptRevertOnCall: 2 })
+    const err = await submitWriteTier1(plan, ctx).catch((e) => e)
+    expect(err).toBeInstanceOf(WriteRevertedError)
+    expect(sent).toHaveLength(2) // no silent resend
+  })
+
+  it('never re-prompts a user who declined', async () => {
+    const plan = buildFileWriteGraph(bytesInput)
+    // A slot IS newly claimed at this attempt, AND the user declines it. The
+    // re-check would find the claimed slot, so only the rejection guard stops a
+    // retry — which would put a second signing prompt in front of someone who
+    // just said no.
+    const chain = makeMockChain({
+      slotRace: { call: 2, slot: contentTypeSlot, as: 'userRejected' },
+    })
+    const err = await submitWriteTier1(plan, chain.ctx).catch((e) => e)
+    expect(err).toBeInstanceOf(WriteNotSentError)
+    expect(chain.callCount).toBe(2) // layer 1, then the declined layer 2 — no third prompt
+  })
+
+  it('without an indexer address, behaves exactly as before (clean revert, no probe)', async () => {
+    const plan = buildFileWriteGraph(bytesInput)
+    const { ctx } = makeMockChain({ slotRace: { call: 2, slot: contentTypeSlot, as: 'reverted' } })
+    const bare = { ...ctx, indexerAddress: undefined } as SubmitContext
+    // The transport gate needs an indexer on a byte write, so this fails closed
+    // up front — i.e. no SDK byte-write path can ever run WITHOUT the probe.
+    await expect(submitWriteTier1(plan, bare)).rejects.toThrowError(/indexerAddress/)
+  })
+})
 
 describe('submitWriteTier1 — full fresh-file graph', () => {
   it('sends exactly one multiAttest per DAG layer, in layer order (1 → 2 → 3)', async () => {

@@ -102,7 +102,8 @@ function toEdgeReceipt(result: LayeredWriteResult, attester: Address): WriteRece
     profile: 'efs/v1',
     roles: { author: attester, signer: attester, payer: attester },
     steps,
-    signatureCount: result.layerTxHashes.length,
+    // Includes a retried layer's reverted attempt — it still cost a confirmation.
+    signatureCount: result.layerTxHashes.length + result.revertedAttemptTxHashes.length,
     mechanism: 'sequential',
     status: 'confirmed',
     gasless: false,

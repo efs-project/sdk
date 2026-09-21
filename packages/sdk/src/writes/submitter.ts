@@ -130,7 +130,12 @@ function toReceipt(result: Tier1WriteResult, ctx: SubmitterContext): WriteReceip
     steps,
     // Honest wallet-confirmation count: the EAS attestation layers PLUS the on-chain
     // storage deploys (chunk + manager) the orchestrator sent before them.
-    signatureCount: result.layerTxHashes.length + (ctx.storageTxCount ?? 0),
+    // A retried layer's reverted attempt (a front-run anchor slot, r3743049284) still
+    // cost the signer a confirmation, so it counts.
+    signatureCount:
+      result.layerTxHashes.length +
+      result.revertedAttemptTxHashes.length +
+      (ctx.storageTxCount ?? 0),
     mechanism: 'sequential',
     status: 'confirmed',
     gasless: false,

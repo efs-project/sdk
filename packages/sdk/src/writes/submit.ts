@@ -70,6 +70,7 @@
 
 import type { Address, Hex, Log, TransactionReceipt } from 'viem'
 import { decodeAbiParameters, parseEventLogs } from 'viem'
+import { resolveAnchorAbi } from '../chain/abi/indexer.js'
 import { easAbi, getAttestationAbi } from '../eas/abi.js'
 import { buildMultiAttest } from '../eas/attest.js'
 import { SchemaEncoder } from '../eas/schema-encoder.js'
@@ -83,6 +84,7 @@ import {
   type PlannedAttestation,
   REF,
   type RefOrUID,
+  type WriteLayer,
   ZERO_ADDRESS,
   ZERO_UID,
   isSymbolicRef,
@@ -200,6 +202,10 @@ export interface Tier1WriteResult {
   readonly uids: RefMap
   /** Each layer's tx hash, in execution order (1 → 2 → 3). */
   readonly layerTxHashes: readonly Hex[]
+  /** See {@link LayeredWriteResult.reused}. */
+  readonly reused: RefMap
+  /** See {@link LayeredWriteResult.revertedAttemptTxHashes}. */
+  readonly revertedAttemptTxHashes: readonly Hex[]
   /** Per-layer breakdown (hash + minted refs), in execution order. */
   readonly layers: readonly LayerResult[]
   /** The file's content-identity DATA UID — the hardlink target for re-placement.
@@ -1059,10 +1065,97 @@ function extractMintedUIDs(
 export interface LayeredWriteResult {
   /** Every created `ref → real UID`, across all layers. */
   readonly uids: RefMap
+  /** ANCHOR refs this write did NOT mint because the slot already existed — bound
+   * to the existing canonical anchor instead (get-or-create, r3743049284). Kept
+   * apart from {@link uids} so a receipt never claims a slot someone else minted. */
+  readonly reused: RefMap
   /** Each layer's tx hash, in execution order. */
   readonly layerTxHashes: readonly Hex[]
+  /** Txs that MINED and REVERTED because a planned anchor slot was claimed while
+   * they were in flight, each followed by a successful retry of the same layer.
+   * Each cost the signer a confirmation, so receipts count them. */
+  readonly revertedAttemptTxHashes: readonly Hex[]
   /** Per-layer breakdown (hash + minted refs), in execution order. */
   readonly layers: readonly LayerResult[]
+}
+
+/** The ANCHOR schema's field layout (`string name, bytes32 forSchema`). */
+const ANCHOR_FIELDS = [{ type: 'string' }, { type: 'bytes32' }] as const
+
+/**
+ * GET-OR-CREATE for a layer's planned ANCHORs (r3743049284): any whose slot
+ * already exists is moved into `reused`, so the layer binds to the existing
+ * canonical anchor instead of minting a duplicate. Returns how many NEW slots it
+ * found taken.
+ *
+ * Why this is needed: an anchor slot is `(parent, name, forSchema)` with NO
+ * attester, and the EFSIndexer can only accept or reject a mint — it cannot
+ * "skip" one, because EAS has already created the attestation by the time the
+ * resolver runs — so minting an existing slot reverts (`DuplicateFileName`).
+ * The file write mints its DATA in one layer and the DATA's key-ANCHORs in the
+ * NEXT; between them the DATA UID is public, so anyone can claim
+ * `(DATA, "contentType", PROPERTY)` first and the key layer reverts after the
+ * caller paid for storage. A retry mints a fresh DATA and re-opens the window,
+ * so the write could be blocked indefinitely.
+ *
+ * Binding to the claimed slot is safe, not merely tolerable: a slot holds only a
+ * name, never a value. Values are PROPERTY + binding-PIN, keyed to the signing
+ * attester, and readers resolve `resolveAnchor(DATA, key, PROPERTY)` without
+ * regard to who minted it — this is exactly how `efs.props.set` updates an
+ * existing key. The same holds for folder and file anchors, which is why every
+ * ANCHOR is checked, not only the reserved keys.
+ *
+ * Skipped (returns 0) without an indexer address: the fallback is the old
+ * behaviour, a clean revert, never a wrong binding. Every SDK write path
+ * supplies one.
+ *
+ * The CALLER must assert the live chain immediately before this runs: an anchor
+ * UID served from another chain would be bound as if canonical, and every value
+ * under it would confirm and never be readable.
+ */
+async function claimTakenAnchorSlots(
+  layer: WriteLayer,
+  planned: readonly PlannedAttestation[],
+  failedRefs: readonly string[],
+  resolved: RefMap,
+  reused: Map<string, Hex>,
+  ctx: SubmitContext,
+): Promise<number> {
+  const anchors = planned.filter((a) => a.kind === 'ANCHOR' && !reused.has(a.ref))
+  const indexer = ctx.indexerAddress
+  if (
+    anchors.length === 0 ||
+    indexer === undefined ||
+    ctx.publicClient.readContract === undefined
+  ) {
+    return 0
+  }
+  let found = 0
+  try {
+    for (const a of anchors) {
+      const parent = isSymbolicRef(a.refUID)
+        ? (resolved.get(a.refUID.ref) ?? reused.get(a.refUID.ref))
+        : a.refUID
+      if (parent === undefined || parent === ZERO_UID) continue
+      const [name, forSchema] = decodeAbiParameters(ANCHOR_FIELDS, a.data)
+      const existing = (await ctx.publicClient.readContract({
+        address: indexer,
+        abi: resolveAnchorAbi,
+        functionName: 'resolveAnchor',
+        args: [parent, name, forSchema],
+      })) as Hex
+      if (existing !== ZERO_UID) {
+        reused.set(a.ref, existing)
+        found += 1
+      }
+    }
+  } catch (cause) {
+    // Nothing of THIS layer was sent — the same no-tx boundary as the pre-send
+    // chain guard below.
+    if (resolved.size === 0) throw cause
+    throw new WriteNotSentError(layer, failedRefs, new Map(resolved), cause)
+  }
+  return found
 }
 
 /**
@@ -1113,156 +1206,204 @@ export async function submitLayeredTier1(
   // Pure structural check — costs nothing, so it runs for EVERY plan.
   assertPlanRefsResolvable(plan)
   const resolved = new Map<string, Hex>()
+  const reused = new Map<string, Hex>()
+  const revertedAttemptTxHashes: Hex[] = []
   const layerTxHashes: Hex[] = []
   const layers: LayerResult[] = []
 
   for (const layer of layersOf(plan)) {
-    const layerAtts = plan.attestations.filter((a) => a.layer === layer)
-    if (layerAtts.length === 0) continue
+    const planned = plan.attestations.filter((a) => a.layer === layer)
+    if (planned.length === 0) continue
 
-    // Resolve symbols against prior layers' UIDs, group by schema, capture the
-    // flat ref order EAS will emit in. (Pure — no tx; the abort + chain guards run just
-    // before the broadcast below so a bail is a no-tx failure that still carries `flatRefs`.)
-    const { requests, flatRefs } = buildLayerRequests(layerAtts, resolved)
-    const call = buildMultiAttest(ctx.easAddress, requests)
+    // Each pass either lands the layer, or finds at least one planned ANCHOR's slot
+    // newly taken, drops it (binding to the existing anchor) and tries again, or
+    // throws. The anchor set strictly shrinks between passes, so a front-runner can
+    // cost at most one failed attempt per anchor — and can never block the write,
+    // because a claimed slot stays claimed and is simply reused (r3743049284).
+    for (;;) {
+      const layerAtts = planned.filter((a) => !reused.has(a.ref))
+      if (layerAtts.length === 0) break // every attestation here already existed — no tx
 
-    // Cancellation boundary: bail BEFORE sending this layer's irreversible multiAttest (never
-    // mid-flight — a tx already broadcast can't be unsent). Once an earlier layer has landed
-    // (`resolved.size > 0`), a mid-write abort is a PARTIAL write — fold it into the no-tx
-    // WriteNotSentError (landed map + PartialBatchFailure, the AbortError as `cause`) so the
-    // caller can recover. On the first/only layer (nothing landed) let the raw AbortError
-    // escape (no partial write to describe). Mirrors the pre-send chain-guard handling below.
-    if (ctx.signal?.aborted) {
-      if (resolved.size === 0) ctx.signal.throwIfAborted()
-      throw new WriteNotSentError(layer, flatRefs, new Map(resolved), ctx.signal.reason)
-    }
+      // Did a slot get claimed while this attempt was in flight? Only then is a retry
+      // warranted: the multiAttest is atomic, so a refused or reverted layer minted
+      // nothing and resending without the claimed anchor is safe. Never re-prompt a
+      // user who declined, and if the re-check itself fails, surface the ORIGINAL
+      // error rather than the read failure.
+      const slotRaceExplains = async (cause?: unknown): Promise<boolean> => {
+        if (cause !== undefined && classifyError(cause).code === 'UserRejected') return false
+        try {
+          await ctx.assertChain?.()
+          const refs = layerAtts.map((a) => a.ref)
+          return (await claimTakenAnchorSlots(layer, layerAtts, refs, resolved, reused, ctx)) > 0
+        } catch {
+          return false
+        }
+      }
 
-    // Send the layer's single multiAttest. The five failure modes are kept
-    // DISTINCT so a caller can tell what (if anything) landed:
-    //
-    //   (a) writeContract fails WITH a refusal response — a wallet/node error code, a
-    //       decoded revert, or our pre-send chain guard → NO tx was broadcast: nothing
-    //       landed in THIS layer → WriteNotSentError (no txHash), carrying the
-    //       landed-UID map (whole-write retry safety depends on `landed`/`storage`).
-    //   (a′) writeContract fails WITHOUT a response (transport drop/timeout — no
-    //       JSON-RPC/EIP-1193 code anywhere in the chain) → broadcast state UNKNOWN,
-    //       no hash to reconcile by → WriteSendUnknownError (may still mine).
-    //   (b) the receipt wait throws after a txHash exists → the tx may still mine
-    //       later: outcome UNKNOWN, naive retry risks a duplicate →
-    //       WriteRevertedError(mined:false) carrying the in-flight txHash.
-    //   (c) the receipt reports status:'reverted' → the tx mined and reverted →
-    //       WriteRevertedError(mined:true) carrying the txHash.
-    //   (d) the receipt is SUCCESS but the Attested logs can't be extracted → the
-    //       layer's attestations EXIST with unknown UIDs → WriteUidsUnknownError
-    //       (resending would duplicate them; recover from the receipt logs).
-    //
-    // All four preserve the prior-layer landed refs.
-    // Wrong-chain boundary (pre-send): re-assert the live wallet/public chain BEFORE
-    // broadcasting — a multi-layer write prompts once per layer, so a switch after an earlier
-    // layer mined must not broadcast this dependent layer to the new chain. When earlier layers
-    // already landed (`resolved.size > 0`), a drift here is a PARTIAL write: fold it into the
-    // no-tx WriteNotSentError so the caller keeps the landed-UID map + PartialBatchFailure
-    // context (the WrongChain rides as `cause`). When NOTHING has landed yet (first/only layer),
-    // let WrongChain escape raw — there's no partial write to describe, and a bare WrongChain is
-    // the honest signal (matches the standalone single-layer write contract).
-    try {
-      await ctx.assertChain?.()
-    } catch (cause) {
-      if (resolved.size === 0) throw cause
-      throw new WriteNotSentError(layer, flatRefs, new Map(resolved), cause)
-    }
+      // Resolve symbols against prior layers' UIDs — minted OR reused — group by schema,
+      // capture the flat ref order EAS will emit in. (Pure — no tx; the abort + chain
+      // guards run just before the broadcast below so a bail is a no-tx failure that
+      // still carries `flatRefs`.)
+      const { requests, flatRefs } = buildLayerRequests(
+        layerAtts,
+        new Map([...resolved, ...reused]),
+      )
+      const call = buildMultiAttest(ctx.easAddress, requests)
 
-    let txHash: Hex
-    try {
-      txHash = await ctx.walletClient.writeContract({
-        address: call.address,
-        abi: call.abi,
-        functionName: call.functionName,
-        args: call.args,
-        value: call.value,
-        ...(ctx.account !== undefined ? { account: ctx.account } : {}),
-        ...(ctx.chain !== undefined ? { chain: ctx.chain } : {}),
-      })
-    } catch (cause) {
-      // Split (a) from (a′) by whether the failure carries a RESPONSE
-      // (r3740924421): a classified refusal proves the node/wallet ANSWERED —
-      // nothing broadcast. A code-less transport failure proves nothing: the
-      // request may have reached the node and the tx may still mine, so the
-      // not-sent contract ("no tx exists, this layer is clean") must not be
-      // asserted.
-      if (isDefiniteSendRefusal(cause)) {
+      // Cancellation boundary: bail BEFORE sending this layer's irreversible multiAttest (never
+      // mid-flight — a tx already broadcast can't be unsent). Once an earlier layer has landed
+      // (`resolved.size > 0`), a mid-write abort is a PARTIAL write — fold it into the no-tx
+      // WriteNotSentError (landed map + PartialBatchFailure, the AbortError as `cause`) so the
+      // caller can recover. On the first/only layer (nothing landed) let the raw AbortError
+      // escape (no partial write to describe). Mirrors the pre-send chain-guard handling below.
+      if (ctx.signal?.aborted) {
+        if (resolved.size === 0) ctx.signal.throwIfAborted()
+        throw new WriteNotSentError(layer, flatRefs, new Map(resolved), ctx.signal.reason)
+      }
+
+      // Send the layer's single multiAttest. The five failure modes are kept
+      // DISTINCT so a caller can tell what (if anything) landed:
+      //
+      //   (a) writeContract fails WITH a refusal response — a wallet/node error code, a
+      //       decoded revert, or our pre-send chain guard → NO tx was broadcast: nothing
+      //       landed in THIS layer → WriteNotSentError (no txHash), carrying the
+      //       landed-UID map (whole-write retry safety depends on `landed`/`storage`).
+      //   (a′) writeContract fails WITHOUT a response (transport drop/timeout — no
+      //       JSON-RPC/EIP-1193 code anywhere in the chain) → broadcast state UNKNOWN,
+      //       no hash to reconcile by → WriteSendUnknownError (may still mine).
+      //   (b) the receipt wait throws after a txHash exists → the tx may still mine
+      //       later: outcome UNKNOWN, naive retry risks a duplicate →
+      //       WriteRevertedError(mined:false) carrying the in-flight txHash.
+      //   (c) the receipt reports status:'reverted' → the tx mined and reverted →
+      //       WriteRevertedError(mined:true) carrying the txHash.
+      //   (d) the receipt is SUCCESS but the Attested logs can't be extracted → the
+      //       layer's attestations EXIST with unknown UIDs → WriteUidsUnknownError
+      //       (resending would duplicate them; recover from the receipt logs).
+      //
+      // All four preserve the prior-layer landed refs.
+      // Wrong-chain boundary (pre-send): re-assert the live wallet/public chain BEFORE
+      // broadcasting — a multi-layer write prompts once per layer, so a switch after an earlier
+      // layer mined must not broadcast this dependent layer to the new chain. When earlier layers
+      // already landed (`resolved.size > 0`), a drift here is a PARTIAL write: fold it into the
+      // no-tx WriteNotSentError so the caller keeps the landed-UID map + PartialBatchFailure
+      // context (the WrongChain rides as `cause`). When NOTHING has landed yet (first/only layer),
+      // let WrongChain escape raw — there's no partial write to describe, and a bare WrongChain is
+      // the honest signal (matches the standalone single-layer write contract).
+      try {
+        await ctx.assertChain?.()
+      } catch (cause) {
+        if (resolved.size === 0) throw cause
         throw new WriteNotSentError(layer, flatRefs, new Map(resolved), cause)
       }
-      throw new WriteSendUnknownError(layer, flatRefs, new Map(resolved), cause)
-    }
 
-    let receipt: TransactionReceipt
-    try {
-      // The public client can drift to another chain AFTER the tx is broadcast and BEFORE
-      // this wait; waiting on the wrong chain would surface a tx that is mining on the
-      // deployment chain as not-found (a FALSE mined:false / partial failure). Re-assert
-      // INSIDE the try so a drift is reported as the honest (b) outcome — "may still mine,
-      // here's the in-flight txHash" — not a misleading revert, and recovery keeps the hash.
-      await ctx.assertChain?.()
-      receipt = await ctx.publicClient.waitForTransactionReceipt({ hash: txHash })
-    } catch (cause) {
-      // (b) Tx sent, receipt unknown — may still mine; carry the txHash, mined:false.
-      throw new WriteRevertedError(layer, flatRefs, new Map(resolved), txHash, false, cause)
-    }
+      // GET-OR-CREATE probe (r3743049284), deliberately right behind the chain guard
+      // so its reads are chain-checked without adding a guard of its own. A slot
+      // found taken is bound to rather than re-minted: rebuild this layer without it.
+      if ((await claimTakenAnchorSlots(layer, layerAtts, flatRefs, resolved, reused, ctx)) > 0) {
+        continue
+      }
 
-    // (c) A mined-but-reverted tx yields a receipt with `status: 'reverted'`.
-    if (receipt.status === 'reverted') {
-      throw new WriteRevertedError(
-        layer,
-        flatRefs,
-        new Map(resolved),
-        txHash,
-        true,
-        new EfsError(`multiAttest reverted on-chain (tx ${txHash}).`, {
-          code: 'ContractReverted',
-        }),
-      )
-    }
+      let txHash: Hex
+      try {
+        txHash = await ctx.walletClient.writeContract({
+          address: call.address,
+          abi: call.abi,
+          functionName: call.functionName,
+          args: call.args,
+          value: call.value,
+          ...(ctx.account !== undefined ? { account: ctx.account } : {}),
+          ...(ctx.chain !== undefined ? { chain: ctx.chain } : {}),
+        })
+      } catch (cause) {
+        // Split (a) from (a′) by whether the failure carries a RESPONSE
+        // (r3740924421): a classified refusal proves the node/wallet ANSWERED —
+        // nothing broadcast. A code-less transport failure proves nothing: the
+        // request may have reached the node and the tx may still mine, so the
+        // not-sent contract ("no tx exists, this layer is clean") must not be
+        // asserted.
+        if (isDefiniteSendRefusal(cause)) {
+          // Typically a simulation revert: a planned slot was claimed after the check.
+          if (await slotRaceExplains(cause)) continue
+          throw new WriteNotSentError(layer, flatRefs, new Map(resolved), cause)
+        }
+        throw new WriteSendUnknownError(layer, flatRefs, new Map(resolved), cause)
+      }
 
-    // EAS emits one Attested per attestation, in submission order — zip against
-    // the captured flat ref order.
-    let uids: readonly Hex[]
-    try {
-      uids = extractMintedUIDs(receipt, ctx.easAddress, flatRefs.length)
-    } catch (cause) {
-      // The layer MINED (status success) — only the Attested-log extraction
-      // failed (an RPC returning incomplete logs, or event drift). This is
-      // mode (d): NOT a revert (WriteRevertedError's contract says failedRefs
-      // did not mint — here every ref DID), and NOT unsent. The distinct class
-      // makes the duplicate-on-resend hazard structural: recovery re-reads the
-      // tx's logs instead of replaying the layer.
-      throw new WriteUidsUnknownError(layer, flatRefs, new Map(resolved), txHash, cause)
-    }
-    const minted: { ref: string; uid: Hex }[] = flatRefs.map((ref, i) => {
-      // `extractMintedUIDs` asserts `uids.length === flatRefs.length`, so the
-      // index is always in range — the `?? ZERO_UID` only satisfies the
-      // noUncheckedIndexedAccess type gate and is never taken.
-      const u = uids[i] ?? ZERO_UID
-      resolved.set(ref, u)
-      return { ref, uid: u }
-    })
+      let receipt: TransactionReceipt
+      try {
+        // The public client can drift to another chain AFTER the tx is broadcast and BEFORE
+        // this wait; waiting on the wrong chain would surface a tx that is mining on the
+        // deployment chain as not-found (a FALSE mined:false / partial failure). Re-assert
+        // INSIDE the try so a drift is reported as the honest (b) outcome — "may still mine,
+        // here's the in-flight txHash" — not a misleading revert, and recovery keeps the hash.
+        await ctx.assertChain?.()
+        receipt = await ctx.publicClient.waitForTransactionReceipt({ hash: txHash })
+      } catch (cause) {
+        // (b) Tx sent, receipt unknown — may still mine; carry the txHash, mined:false.
+        throw new WriteRevertedError(layer, flatRefs, new Map(resolved), txHash, false, cause)
+      }
 
-    layerTxHashes.push(txHash)
-    const result: LayerResult = { layer, txHash, minted }
-    layers.push(result)
-    // The progress hook is best-effort UI/reporting. A throw here — AFTER this layer mined —
-    // must NOT propagate and abort the remaining (irreversible, dependent) layers: that would
-    // manufacture a partial write from reporting code, with none of the structured
-    // partial-write error a real tx failure carries. Cancellation has its own AbortSignal
-    // (checked before each send); a callback bug is swallowed so it can't corrupt the write.
-    try {
-      ctx.onLayer?.(result)
-    } catch {
-      // best-effort progress only — a reporting-callback exception never interrupts the write
+      // (c) A mined-but-reverted tx yields a receipt with `status: 'reverted'`.
+      if (receipt.status === 'reverted') {
+        // A same-block front-run: the slot was free when checked, claimed before this
+        // tx was included. Record the spent attempt and retry without that anchor.
+        if (await slotRaceExplains()) {
+          revertedAttemptTxHashes.push(txHash)
+          continue
+        }
+        throw new WriteRevertedError(
+          layer,
+          flatRefs,
+          new Map(resolved),
+          txHash,
+          true,
+          new EfsError(`multiAttest reverted on-chain (tx ${txHash}).`, {
+            code: 'ContractReverted',
+          }),
+        )
+      }
+
+      // EAS emits one Attested per attestation, in submission order — zip against
+      // the captured flat ref order.
+      let uids: readonly Hex[]
+      try {
+        uids = extractMintedUIDs(receipt, ctx.easAddress, flatRefs.length)
+      } catch (cause) {
+        // The layer MINED (status success) — only the Attested-log extraction
+        // failed (an RPC returning incomplete logs, or event drift). This is
+        // mode (d): NOT a revert (WriteRevertedError's contract says failedRefs
+        // did not mint — here every ref DID), and NOT unsent. The distinct class
+        // makes the duplicate-on-resend hazard structural: recovery re-reads the
+        // tx's logs instead of replaying the layer.
+        throw new WriteUidsUnknownError(layer, flatRefs, new Map(resolved), txHash, cause)
+      }
+      const minted: { ref: string; uid: Hex }[] = flatRefs.map((ref, i) => {
+        // `extractMintedUIDs` asserts `uids.length === flatRefs.length`, so the
+        // index is always in range — the `?? ZERO_UID` only satisfies the
+        // noUncheckedIndexedAccess type gate and is never taken.
+        const u = uids[i] ?? ZERO_UID
+        resolved.set(ref, u)
+        return { ref, uid: u }
+      })
+
+      layerTxHashes.push(txHash)
+      const result: LayerResult = { layer, txHash, minted }
+      layers.push(result)
+      // The progress hook is best-effort UI/reporting. A throw here — AFTER this layer mined —
+      // must NOT propagate and abort the remaining (irreversible, dependent) layers: that would
+      // manufacture a partial write from reporting code, with none of the structured
+      // partial-write error a real tx failure carries. Cancellation has its own AbortSignal
+      // (checked before each send); a callback bug is swallowed so it can't corrupt the write.
+      try {
+        ctx.onLayer?.(result)
+      } catch {
+        // best-effort progress only — a reporting-callback exception never interrupts the write
+      }
+      break
     }
   }
 
-  return { uids: resolved, layerTxHashes, layers }
+  return { uids: resolved, reused, layerTxHashes, revertedAttemptTxHashes, layers }
 }
 
 /**
@@ -1283,7 +1424,13 @@ export async function submitWriteTier1(
 ): Promise<Tier1WriteResult> {
   // The hardlink authorship/schema gates run inside submitLayeredTier1 — the
   // common boundary every exported executor funnels through (r3741216400).
-  const { uids: resolved, layerTxHashes, layers } = await submitLayeredTier1(plan, ctx)
+  const {
+    uids: resolved,
+    reused,
+    layerTxHashes,
+    revertedAttemptTxHashes,
+    layers,
+  } = await submitLayeredTier1(plan, ctx)
 
   const placementPinUID = resolved.get(REF.PLACEMENT_PIN)
   if (placementPinUID === undefined) {
@@ -1301,7 +1448,9 @@ export async function submitWriteTier1(
 
   return {
     uids: resolved,
+    reused,
     layerTxHashes,
+    revertedAttemptTxHashes,
     layers,
     dataUID,
     placementPinUID,

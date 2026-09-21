@@ -341,6 +341,8 @@ describe('Tier1Submitter receipt', () => {
             data: encodeAbiParameters([{ type: 'string' }, { type: 'bytes32' }], ['ipfs', uid(0)]),
           }
         }
+        // The layered submitter's get-or-create probe (r3743049284): slot free.
+        if (a.functionName === 'resolveAnchor') return uid(0)
         throw new Error(`seam mock: unexpected ${a.functionName}`)
       },
       async waitForTransactionReceipt({ hash }: { hash: Hex }) {
