@@ -1,6 +1,6 @@
 {
   "name": "@efs/sdk",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "TypeScript SDK for the Ethereum File System (EFS)",
   "license": "MIT",
   "type": "module",
@@ -10,8 +10,13 @@
     "url": "git+https://github.com/efs-project/sdk.git",
     "directory": "packages/sdk"
   },
-  "files": ["dist"],
-  "publishConfig": { "access": "public", "provenance": true },
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -70,7 +75,9 @@
     "viem": "^2"
   },
   "peerDependenciesMeta": {
-    "viem": { "optional": false }
+    "viem": {
+      "optional": false
+    }
   },
   "devDependencies": {
     "@size-limit/preset-small-lib": "12.1.0",
