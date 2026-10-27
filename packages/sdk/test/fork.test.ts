@@ -36,9 +36,17 @@
  * MIRROR, then reads them back through the canonical EFSRouter (ERC-5219 `request`).
  */
 
+import { createHash } from 'node:crypto'
 import { type Server, createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
-import { http, type Chain, type Hex, createPublicClient, createWalletClient } from 'viem'
+import {
+  http,
+  type Chain,
+  type Hex,
+  createPublicClient,
+  createWalletClient,
+  decodeAbiParameters,
+} from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { type DeploymentsMap, type EfsDeployment, createEfsClient } from '../src/index.js'
@@ -270,6 +278,22 @@ describe.skipIf(!liveEnabled)('fork write→read round-trip (live deploy)', () =
     expect(file.verification).toBe('matches-author')
     expect(new Uint8Array(file.bytes)).toEqual(payload)
     expect(file.hashAuthor.toLowerCase()).toBe(account.address.toLowerCase())
+
+    // ── EXACT ON-CHAIN contentHash (sdk#2) ────────────────────────────────────
+    // `matches-author` only proves the claim DECODES to the right digest; the
+    // PROPERTY value is permanently interned, so pin the exact string the chain
+    // holds. Decode the raw attestation and compare against a digest computed
+    // here with node:crypto, not the SDK's own hasher. `info` reads only
+    // contentType/size/name by default, so request contentHash explicitly.
+    const stat = await efs.fs.info(filePath, {
+      fields: ['contentHash'],
+      expand: ['attestations'],
+    })
+    const claimData = stat.attestations.contentHash?.data
+    expect(claimData).toBeDefined()
+    const [claim] = decodeAbiParameters([{ type: 'string' }], claimData as Hex)
+    expect(claim).toBe(`f1220${createHash('sha256').update(payload).digest('hex')}`)
+    expect(claim).toHaveLength(69)
   }, 300_000)
 
   // ── On-chain (web3:// + SSTORE2) default storage round-trip ─────────────────
